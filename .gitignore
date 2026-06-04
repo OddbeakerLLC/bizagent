@@ -1,0 +1,11 @@
+# This is the PUBLIC framework repo. Never commit secrets or operator-specific data.
+*.env
+.env
+*.key
+*.pem
+*_secret*
+*secrets*
+
+# Local scratch
+*.log
+*.lock

@@ -82,6 +82,25 @@ settled — they *are* this template. Re-litigating them is not your job.
 
 Work through these in order. Every step is idempotent; a re-run is safe.
 
+**First launch — detach from the framework repo (do this BEFORE anything else).**
+This working copy was cloned from the public bizagent *framework* repository, so
+its `origin` points at that public GitHub repo. Your hub will hold **private
+operational data** — journals, agent configs, your real `registry.json`, inbox
+messages — that must NEVER reach a public repo. Before the first commit:
+- **Remove the inherited remote:** `git remote remove origin` (then `git remote -v`
+  should show nothing). This severs the link to the public framework repo so a
+  later commit or nightly run can never push your private data to it.
+- **Give your operational history a private home** (pick one):
+  - *Local-only (default, simplest):* keep committing to this local repo with no
+    remote — nightly commits stay on this machine.
+  - *Local bare backup:* `git init --bare ~/bizagent-ops.git && git remote add
+    origin ~/bizagent-ops.git` — a private backup on your own box.
+  - *Private server remote:* a remote on a private host you control. Never a public one.
+
+The operational hub and the public framework repo must always stay **separate
+repositories with separate remotes.** (This rule exists because conflating the two
+once exposed an operator's private data publicly — don't repeat it.)
+
 1. **Write `registry.json`.** Use the schema in `registry.example.json`,
    populated from the interview answers. Include the `agent_name` confirmed
    in step 3 of the interview on each product entry.
@@ -105,8 +124,11 @@ Work through these in order. Every step is idempotent; a re-run is safe.
    alongside the nightly cron.
 7. **Run the tests:** `bash tests/run-tests.sh`. Expect all green. If anything
    fails, stop and report before continuing.
-8. **Version control.** `git init` if needed, then commit. If a hub remote was
-   given, add it and push.
+8. **Version control.** Ensure this is a local repo (`git init` if needed) and
+   commit. Your nightly maintenance commits go to **this local operational repo**.
+   Only add a remote if it is a **private** one you control (see the first-launch
+   note above) — never the public framework remote. If a private hub remote was
+   given in the interview, add it and push.
 9. **Install the cron lines.** Build the nightly line and (if
    `knowledge_stack.enabled`) the weekly line, and add them to the
    operator's crontab:
