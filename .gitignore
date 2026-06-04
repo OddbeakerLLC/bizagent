@@ -9,3 +9,8 @@
 # Local scratch
 *.log
 *.lock
+
+# Operational scaffolding must never land in the public framework repo.
+# (Agent B keeps this product's journal in the operational hub, not here.)
+.agent/
+sitemap.md
