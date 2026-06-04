@@ -85,6 +85,28 @@ Launch your CLI agent in that directory and tell it the same thing:
 
 ---
 
+## Bring your own engine — including local models
+
+bizagent is **engine-agnostic**: the "CLI agent" it runs is just a command, so any
+CLI coding agent works (Claude Code, Codex, OpenCode, and others). That command is
+also what the nightly cron invokes — whatever you choose runs the whole hub.
+
+You can back that agent with a **local, open-weight model via [Ollama](https://ollama.com)**
+and run the entire system on your own hardware — private, offline, no per-token cost:
+
+```sh
+# launch a supported coding agent backed by a local model
+ollama launch claude --model qwen3-coder-next
+```
+
+Ollama's launcher supports several agents this way (Claude Code, Codex, OpenCode,
+Hermes, and more). A coding-tuned model with strong tool-calling and a large context
+window — e.g. `qwen3-coder-next` (256K context, tool-calling out of the box) — suits
+the hub's agent loop well. Point the interview's "CLI agent command" at your
+local-model-backed agent and the nightly pass runs fully local too.
+
+---
+
 ## What the interview asks
 
 Only the things that are genuinely yours:
