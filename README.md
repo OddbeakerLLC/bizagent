@@ -1,0 +1,142 @@
+# bizagent
+
+**An interview-driven starter kit for managing digital-product development with AI agents.**
+
+Clone this repo, point your CLI coding agent at it, answer a short interview,
+and you walk away with a working hub-and-spoke agent system tailored to _your_
+products — no architecture decisions required.
+
+---
+
+![bizagent](bizagent.png)
+
+---
+
+## What it builds
+
+`bizagent` is a **hub**. Around it sit one **agent per product**, and each
+agent looks after one or more **project repositories**.
+
+```
+            ┌─────────────────────────┐
+            │   You (the operator)    │
+            └────────────┬────────────┘
+                         │ directives / "give me the big picture"
+            ┌────────────▼────────────┐
+            │   bizagent  (the hub)   │
+            │   Products Team Lead    │
+            └──┬──────┬──────┬────────┘
+               │      │      │
+          ┌────▼─┐ ┌──▼───┐ ┌▼─────┐    one agent per product;
+          │ Prod │ │ Prod │ │ Prod │    each owns one or more repos
+          │  A   │ │  B   │ │  C   │
+          └──────┘ └──────┘ └──────┘
+```
+
+Each agent keeps a **journal** (plain-English "what changed and why",
+git-log-for-humans) and a **sitemap** (a living structure map) for every repo
+it owns. Agents talk to each other by dropping markdown messages in each
+other's mailboxes. Work happens two ways: **real-time**, the moment you raise
+an issue, and a light **nightly** maintenance pass.
+
+You ask the hub for the big picture; it digests every journal and reports back.
+
+---
+
+## Quick start
+
+One command — macOS, Linux, or WSL on Windows:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash
+```
+
+This installs anything missing (`git`, `cron`, Claude Code), clones bizagent
+into `~/bizagent`, and hands you off to Claude Code. When it opens, tell it:
+
+> Read AGENT.md and set up my system.
+
+The agent will interview you — what your products are, where the repos live,
+how they relate, when the nightly run should fire — then generate everything
+and (with your confirmation) install the nightly schedule.
+
+From then on, working in that directory, your agent _is_ your Digital Products
+Lead. Raise an issue and it routes the work; ask for the big picture and it
+summarizes across every product.
+
+### Windows
+
+bizagent uses `cron` for the nightly pass, so on Windows you'll need WSL.
+In PowerShell, run `wsl --install`, reboot, then run the one-liner above
+inside your new WSL shell.
+
+### Manual install
+
+Prefer to do it by hand? You'll need a CLI coding agent (e.g. Claude Code),
+plus `git`, `bash`, and `cron`. Then:
+
+```sh
+git clone https://github.com/OddbeakerLLC/bizagent
+cd bizagent
+```
+
+Launch your CLI agent in that directory and tell it the same thing:
+"Read AGENT.md and set up my system."
+
+---
+
+## What the interview asks
+
+Only the things that are genuinely yours:
+
+- your organization name
+- where your project repositories live (a folder to scan, or a list)
+- how repos group into products, and a short slug for each
+- which products' agents need to message each other
+- nightly run time _(default 23:00)_
+- how long an unactioned message waits before being archived _(default 30 days)_
+- agent autonomy: maintenance-only, +monitoring, or +light-dev _(default maintenance-only)_
+- an optional git remote for the hub
+
+It does **not** ask you to design the system. The hub-and-spoke topology,
+file-based messaging, the journal and sitemap formats, and the real-time +
+nightly model are decided — that is what this template _is_.
+
+---
+
+## Repository layout
+
+```
+bizagent/
+├── AGENT.md                 the agent's instructions: interview -> build -> operate
+├── README.md                this file
+├── registry.example.json    the shape of the generated registry.json
+├── scripts/
+│   ├── onboard.sh           scaffold .agent/ + sitemap.md into a project repo
+│   ├── router.sh            deliver messages between agent mailboxes
+│   └── nightly.sh           route + archive the mechanical nightly work
+├── tests/                   shell tests for the scripts
+├── templates/
+│   ├── agent.md.template    per-product agent config
+│   └── NIGHTLY.md           thin file the nightly cron points at
+└── docs/
+    └── ARCHITECTURE.md       how and why the system is built this way
+```
+
+Cloning gives you the template. Running the interview adds your `registry.json`
+and an `agents/` directory — that clone becomes _your_ instance.
+
+---
+
+## Customizing
+
+Everything generated is plain files. `registry.json` is the source of truth —
+edit it and re-run the relevant step to add a product or change a setting. The
+scripts are short, dependency-light bash; read them, change them, re-run
+`tests/run-tests.sh`. `docs/ARCHITECTURE.md` explains the design choices.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE). Built and shared by Oddbeaker LLC.

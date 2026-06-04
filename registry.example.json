@@ -1,0 +1,48 @@
+{
+  "_comment": "Example registry. The interview in AGENT.md generates a real registry.json from your answers. Paths are relative to this hub directory. Fill 'remote' to allow setup on a machine where the repos are not yet present.",
+  "org": "Example Co",
+  "hub": {
+    "name": "bizagent",
+    "remote": ""
+  },
+  "settings": {
+    "nightly_time": "23:00",
+    "archive_after_days": 30,
+    "autonomy": "maintenance-only"
+  },
+  "knowledge_stack": {
+    "enabled": true,
+    "refresh_day": "sunday",
+    "refresh_time": "01:00"
+  },
+  "cross_product_edges": [
+    ["widgets", "platform"]
+  ],
+  "products": [
+    {
+      "slug": "widgets",
+      "name": "Widgets",
+      "agent_name": "Agent W",
+      "projects": [
+        { "name": "widgets-web", "path": "../widgets-web", "remote": "" },
+        { "name": "widgets-api", "path": "../widgets-api", "remote": "" }
+      ]
+    },
+    {
+      "slug": "platform",
+      "name": "Platform",
+      "agent_name": "Agent P",
+      "projects": [
+        { "name": "platform-core", "path": "../platform-core", "remote": "" }
+      ]
+    },
+    {
+      "slug": "tooling",
+      "name": "Tooling",
+      "agent_name": "Agent T",
+      "projects": [
+        { "name": "cli-tools", "path": "../cli-tools", "remote": "" }
+      ]
+    }
+  ]
+}
