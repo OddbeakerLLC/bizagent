@@ -69,8 +69,13 @@ Ask for:
    `+monitoring` (also flags failing builds / stale branches), or `+light-dev`
    (also makes small changes and proposes them). Default `maintenance-only`.
 9. **Hub git remote** — optional; blank means local-only.
-10. **CLI agent command** — what launches their agent for the nightly cron
-    (e.g. `claude`). Confirm its absolute path with `which`.
+10. **CLI agent command** — check whether `.cli` exists at the hub root.
+    If it does, read `CLI_CMD` and `CLI_PROMPT_FLAG` from it — the installer
+    already resolved this; skip this question and use those values in step 9.
+    If `.cli` is absent (manual clone without the installer), ask which CLI
+    they use (e.g. `claude`, `gemini`, `codex`, `grok`), confirm its path
+    with `which`, and determine its non-interactive prompt flag
+    (`-p` for claude/gemini/grok, `--prompt` for codex).
 
 **Do not ask** about message transport, hub-and-spoke topology, the
 journal/sitemap formats, or the real-time vs nightly model. Those decisions are
@@ -133,9 +138,11 @@ once exposed an operator's private data publicly — don't repeat it.)
    `knowledge_stack.enabled`) the weekly line, and add them to the
    operator's crontab:
    ```
-   <min> <hr> * * *      cd <HUB_ABS_PATH> && <AGENT_CMD> -p "Follow NIGHTLY.md exactly." >> logs/nightly.log 2>&1
-   <wmin> <whr> * * <dow> cd <HUB_ABS_PATH> && <AGENT_CMD> -p "Follow WEEKLY.md exactly."  >> logs/weekly.log  2>&1
+   <min> <hr> * * *      cd <HUB_ABS_PATH> && <CLI_CMD> <CLI_PROMPT_FLAG> "Follow NIGHTLY.md exactly." >> logs/nightly.log 2>&1
+   <wmin> <whr> * * <dow> cd <HUB_ABS_PATH> && <CLI_CMD> <CLI_PROMPT_FLAG> "Follow WEEKLY.md exactly."  >> logs/weekly.log  2>&1
    ```
+   `<CLI_CMD>` and `<CLI_PROMPT_FLAG>` come from `.cli` (or question 10 if
+   installed manually).
    `<dow>` is the day-of-week from `knowledge_stack.refresh_day` (0–6,
    Sunday = 0). This modifies the user's crontab — a side effect outside
    this directory. Show the operator the exact lines and confirm before

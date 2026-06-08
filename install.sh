@@ -119,21 +119,91 @@ ensure_cron() {
   fi
 }
 
-ensure_claude_code() {
-  if have claude; then
-    ok "Claude Code present"
+# --- AI CLI detection and selection ---
+# Format: "binary|display_name|prompt_flag|install_hint"
+KNOWN_CLIS=(
+  "claude|Claude Code (Anthropic)|-p|curl -fsSL https://claude.ai/install.sh | bash"
+  "gemini|Gemini CLI (Google)|-p|npm install -g @google/gemini-cli"
+  "codex|Codex CLI (OpenAI)|--prompt|npm install -g @openai/codex"
+  "grok|Grok CLI (xAI)|-p|npm install -g @vibe-kit/grok-cli"
+)
+
+SELECTED_CLI=""
+SELECTED_PROMPT_FLAG=""
+
+detect_and_select_cli() {
+  local available_bins=()
+  local available_names=()
+  local available_flags=()
+
+  for entry in "${KNOWN_CLIS[@]}"; do
+    IFS='|' read -r bin name flag _ <<< "$entry"
+    if have "$bin"; then
+      available_bins+=("$bin")
+      available_names+=("$name")
+      available_flags+=("$flag")
+    fi
+  done
+
+  local count="${#available_bins[@]}"
+
+  if [[ "$count" -eq 0 ]]; then
+    warn "No supported AI CLI found. Installing Claude Code (recommended default)..."
+    _install_claude
+    SELECTED_CLI="claude"
+    SELECTED_PROMPT_FLAG="-p"
+    ok "Claude Code selected"
     return
   fi
-  note "installing Claude Code (native installer)..."
+
+  if [[ "$count" -eq 1 ]]; then
+    SELECTED_CLI="${available_bins[0]}"
+    SELECTED_PROMPT_FLAG="${available_flags[0]}"
+    ok "AI CLI detected: ${available_names[0]} ($SELECTED_CLI)"
+    return
+  fi
+
+  # Multiple found — let the user choose
+  printf "\n${BOLD}Multiple AI CLIs found. Which one should bizagent use?${NC}\n\n"
+  for i in "${!available_bins[@]}"; do
+    printf "  %d) %s\n" "$((i+1))" "${available_names[$i]}"
+  done
+  printf "\n"
+
+  local choice
+  while true; do
+    read -r -p "Enter number [1]: " choice
+    choice="${choice:-1}"
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= count )); then
+      break
+    fi
+    warn "Please enter a number between 1 and $count."
+  done
+
+  local idx=$(( choice - 1 ))
+  SELECTED_CLI="${available_bins[$idx]}"
+  SELECTED_PROMPT_FLAG="${available_flags[$idx]}"
+  ok "Selected: ${available_names[$idx]} ($SELECTED_CLI)"
+}
+
+_install_claude() {
+  if have claude; then return; fi
+  note "installing Claude Code..."
   curl -fsSL https://claude.ai/install.sh | bash
-  # The native installer drops `claude` in ~/.local/bin (sometimes ~/.claude/bin).
-  # Add those to PATH for this shell so we can exec it at the end.
   for p in "$HOME/.local/bin" "$HOME/.claude/bin"; do
     [[ -d "$p" ]] && export PATH="$p:$PATH"
   done
   hash -r 2>/dev/null || true
   have claude || die "Claude Code installed but 'claude' isn't on PATH. Open a new terminal and re-run this installer."
-  ok "Claude Code installed"
+}
+
+write_cli_config() {
+  cat > "$INSTALL_DIR/.cli" <<EOF
+# bizagent CLI config — written by installer, read by AGENT.md setup
+CLI_CMD=$SELECTED_CLI
+CLI_PROMPT_FLAG=$SELECTED_PROMPT_FLAG
+EOF
+  ok "CLI config written (.cli)"
 }
 
 # --- clone + handoff ---
@@ -165,12 +235,9 @@ handoff() {
 ${BOLD}You're set.${NC}
 
   ${DIM}bizagent lives at:${NC} $INSTALL_DIR
+  ${DIM}AI CLI:${NC}           $SELECTED_CLI
 
-What's next: Claude Code will open in that directory. The first time you
-run it, it opens your browser to sign in to your Anthropic account.
-(That's the API key / billing step — grab a friend if you need a hand.)
-
-Once it's running, tell it:
+Once your CLI is running in that directory, tell it:
 
   ${BOLD}Read AGENT.md and set up my system.${NC}
 
@@ -180,13 +247,13 @@ whole thing for you.
 EOF
 
   if [[ -n "${BIZAGENT_NO_LAUNCH:-}" ]]; then
-    note "Auto-launch skipped (BIZAGENT_NO_LAUNCH set). When ready:  cd $INSTALL_DIR && claude"
+    note "Auto-launch skipped (BIZAGENT_NO_LAUNCH set). When ready:  cd $INSTALL_DIR && $SELECTED_CLI"
     exit 0
   fi
 
-  read -r -p "Press Enter to launch Claude Code now (Ctrl-C to launch it yourself later): " _
+  read -r -p "Press Enter to launch $SELECTED_CLI now (Ctrl-C to launch it yourself later): " _
   cd "$INSTALL_DIR"
-  exec claude
+  exec "$SELECTED_CLI"
 }
 
 # --- main ---
@@ -202,12 +269,13 @@ main() {
   ensure python3
   ensure_cron
 
-  step "Installing Claude Code"
-  ensure_claude_code
+  step "Selecting AI CLI"
+  detect_and_select_cli
 
   step "Setting up bizagent"
   choose_dir
   clone_repo
+  write_cli_config
 
   handoff
 }
