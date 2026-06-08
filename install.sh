@@ -127,7 +127,7 @@ KNOWN_CLIS=(
   "claude|Claude Code (Anthropic)|-p|curl|https://claude.ai/install.sh"
   "gemini|Gemini CLI (Google)|-p|npm|@google/gemini-cli"
   "codex|Codex CLI (OpenAI)|--prompt|npm|@openai/codex"
-  "grok|Grok CLI (xAI)|-p|npm|@vibe-kit/grok-cli"
+  "grok|Grok CLI (xAI)|-p|curl|https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh"
 )
 
 SELECTED_CLI=""
@@ -154,7 +154,7 @@ install_cli() {
   case "$method" in
     curl)
       curl -fsSL "$target" | bash
-      for p in "$HOME/.local/bin" "$HOME/.claude/bin"; do
+      for p in "$HOME/.local/bin" "$HOME/.claude/bin" "$HOME/.grok/bin"; do
         [[ -d "$p" ]] && export PATH="$p:$PATH"
       done
       ;;
