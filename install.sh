@@ -120,81 +120,114 @@ ensure_cron() {
 }
 
 # --- AI CLI detection and selection ---
-# Format: "binary|display_name|prompt_flag|install_hint"
+# Format: "binary|display_name|prompt_flag|install_method|install_target"
+#   install_method: "curl" or "npm"
+#   install_target: URL (curl) or package name (npm)
 KNOWN_CLIS=(
-  "claude|Claude Code (Anthropic)|-p|curl -fsSL https://claude.ai/install.sh | bash"
-  "gemini|Gemini CLI (Google)|-p|npm install -g @google/gemini-cli"
-  "codex|Codex CLI (OpenAI)|--prompt|npm install -g @openai/codex"
-  "grok|Grok CLI (xAI)|-p|npm install -g @vibe-kit/grok-cli"
+  "claude|Claude Code (Anthropic)|-p|curl|https://claude.ai/install.sh"
+  "gemini|Gemini CLI (Google)|-p|npm|@google/gemini-cli"
+  "codex|Codex CLI (OpenAI)|--prompt|npm|@openai/codex"
+  "grok|Grok CLI (xAI)|-p|npm|@vibe-kit/grok-cli"
 )
 
 SELECTED_CLI=""
 SELECTED_PROMPT_FLAG=""
 
+ensure_npm() {
+  if have npm; then return; fi
+  note "npm not found — installing Node.js..."
+  case "$PKG" in
+    brew)   brew install node ;;
+    apt)    $INSTALL nodejs npm ;;
+    dnf)    $INSTALL nodejs npm ;;
+    pacman) $INSTALL nodejs npm ;;
+    zypper) $INSTALL nodejs npm ;;
+  esac
+  have npm || die "Node.js installed but 'npm' isn't on PATH. Open a new terminal and re-run."
+  ok "npm ready"
+}
+
+install_cli() {
+  local bin="$1" method="$2" target="$3"
+  have "$bin" && return
+  note "installing $bin..."
+  case "$method" in
+    curl)
+      curl -fsSL "$target" | bash
+      for p in "$HOME/.local/bin" "$HOME/.claude/bin"; do
+        [[ -d "$p" ]] && export PATH="$p:$PATH"
+      done
+      ;;
+    npm)
+      ensure_npm
+      npm install -g "$target"
+      ;;
+  esac
+  hash -r 2>/dev/null || true
+  have "$bin" || die "Installed $bin but it isn't on PATH. Open a new terminal and re-run this installer."
+  ok "$bin installed"
+}
+
 detect_and_select_cli() {
-  local available_bins=()
-  local available_names=()
-  local available_flags=()
+  local all_bins=() all_names=() all_flags=() all_methods=() all_targets=()
+  local default_idx=0
 
   for entry in "${KNOWN_CLIS[@]}"; do
-    IFS='|' read -r bin name flag _ <<< "$entry"
-    if have "$bin"; then
-      available_bins+=("$bin")
-      available_names+=("$name")
-      available_flags+=("$flag")
+    IFS='|' read -r bin name flag method target <<< "$entry"
+    all_bins+=("$bin")
+    all_names+=("$name")
+    all_flags+=("$flag")
+    all_methods+=("$method")
+    all_targets+=("$target")
+  done
+
+  # Find default: first installed CLI, or 0 (claude) if none
+  local i
+  for i in "${!all_bins[@]}"; do
+    if have "${all_bins[$i]}"; then
+      default_idx=$i
+      break
     fi
   done
 
-  local count="${#available_bins[@]}"
-
-  if [[ "$count" -eq 0 ]]; then
-    warn "No supported AI CLI found. Installing Claude Code (recommended default)..."
-    _install_claude
-    SELECTED_CLI="claude"
-    SELECTED_PROMPT_FLAG="-p"
-    ok "Claude Code selected"
-    return
-  fi
-
-  if [[ "$count" -eq 1 ]]; then
-    SELECTED_CLI="${available_bins[0]}"
-    SELECTED_PROMPT_FLAG="${available_flags[0]}"
-    ok "AI CLI detected: ${available_names[0]} ($SELECTED_CLI)"
-    return
-  fi
-
-  # Multiple found — let the user choose
-  printf "\n${BOLD}Multiple AI CLIs found. Which one should bizagent use?${NC}\n\n"
-  for i in "${!available_bins[@]}"; do
-    printf "  %d) %s\n" "$((i+1))" "${available_names[$i]}"
+  printf "\n${BOLD}Which AI CLI should bizagent use?${NC}\n\n"
+  for i in "${!all_bins[@]}"; do
+    local marker="  "
+    have "${all_bins[$i]}" && marker="${GREEN}✓${NC}"
+    local default_hint=""
+    [[ "$i" -eq "$default_idx" ]] && default_hint=" ${DIM}(default)${NC}"
+    printf "  %b %d) %s%b\n" "$marker" "$((i+1))" "${all_names[$i]}" "$default_hint"
   done
+  printf "\n"
+  note "✓ = already installed"
   printf "\n"
 
   local choice
   while true; do
-    read -r -p "Enter number [1]: " choice
-    choice="${choice:-1}"
-    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= count )); then
+    read -r -p "Enter number [$((default_idx+1))]: " choice
+    choice="${choice:-$((default_idx+1))}"
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#all_bins[@]} )); then
       break
     fi
-    warn "Please enter a number between 1 and $count."
+    warn "Please enter a number between 1 and ${#all_bins[@]}."
   done
 
   local idx=$(( choice - 1 ))
-  SELECTED_CLI="${available_bins[$idx]}"
-  SELECTED_PROMPT_FLAG="${available_flags[$idx]}"
-  ok "Selected: ${available_names[$idx]} ($SELECTED_CLI)"
-}
+  SELECTED_CLI="${all_bins[$idx]}"
+  SELECTED_PROMPT_FLAG="${all_flags[$idx]}"
 
-_install_claude() {
-  if have claude; then return; fi
-  note "installing Claude Code..."
-  curl -fsSL https://claude.ai/install.sh | bash
-  for p in "$HOME/.local/bin" "$HOME/.claude/bin"; do
-    [[ -d "$p" ]] && export PATH="$p:$PATH"
-  done
-  hash -r 2>/dev/null || true
-  have claude || die "Claude Code installed but 'claude' isn't on PATH. Open a new terminal and re-run this installer."
+  if ! have "$SELECTED_CLI"; then
+    local confirm
+    read -r -p "  ${all_names[$idx]} is not installed. Install it now? [Y/n]: " confirm
+    confirm="${confirm:-Y}"
+    if [[ "$confirm" =~ ^[Yy] ]]; then
+      install_cli "$SELECTED_CLI" "${all_methods[$idx]}" "${all_targets[$idx]}"
+    else
+      die "Cannot continue without an AI CLI. Re-run and choose an installed CLI or allow installation."
+    fi
+  fi
+
+  ok "Selected: ${all_names[$idx]} ($SELECTED_CLI)"
 }
 
 write_cli_config() {
