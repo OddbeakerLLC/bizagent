@@ -126,7 +126,7 @@ ensure_cron() {
 KNOWN_CLIS=(
   "claude|Claude Code (Anthropic)|-p|curl|https://claude.ai/install.sh"
   "gemini|Gemini CLI (Google)|-p|npm|@google/gemini-cli"
-  "codex|Codex CLI (OpenAI)|--prompt|npm|@openai/codex"
+  "codex|Codex CLI (OpenAI)|exec|curl|https://chatgpt.com/codex/install.sh"
   "grok|Grok CLI (xAI)|-p|curl|https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh"
 )
 
