@@ -274,15 +274,30 @@ a `Blocking:` line when the message sits on a critical path.
 
 ### Journal format
 **Project journals:** one file per active day per project,
-`<project>/.agent/journal/YYYY-MM-DD.md`. No file on days with no commits.
-One bullet per meaningful change. Add `Challenge:` / `Lesson:` lines only
-when there is something worth keeping.
+`<project>/.agent/journal/YYYY-MM-DD.md`. Write an entry when there are
+commits **or** when an incident occurs — a journal file is not tied to
+code changes alone. One bullet per meaningful change. Add `Challenge:` /
+`Lesson:` lines only when there is something worth keeping.
 
 **Hub journal:** one file per active day at the hub root,
 `journal/YYYY-MM-DD.md`. Bullets tagged `[Company]` (operator-shared
 business info — only meaningful when Knowledge Stack is enabled, but
-always applied) or `[Maintenance]` (PTL routing, archiving, refresh
-summaries). Same prose rules as project journals.
+always applied), `[Maintenance]` (PTL routing, archiving, refresh
+summaries), or `[Incident]` (see below). Same prose rules as project journals.
+
+**Incidents:** Any operational event that affects a live product or
+service — server outage, unexpected behavior, deployment failure, data
+loss, security event, or external dependency failure — must be journaled
+even if no code changes. Tag the bullet `[Incident]`. Format:
+
+```
+- [Incident] <product> — <what happened, when, duration if known>
+  - Impact: <who/what was affected>
+  - Resolution: <how it was fixed or current status if unresolved>
+```
+
+If the incident is unresolved, also create `company/incidents/YYYY-MM-DD-<slug>.md`
+with a full write-up. See existing files in `company/incidents/` for style.
 
 ### Sitemap format
 `sitemap.md` at the **root** of each project repo. Refreshed during the nightly
