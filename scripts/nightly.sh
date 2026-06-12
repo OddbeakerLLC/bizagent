@@ -12,6 +12,41 @@ set -u
 HUB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HUB"
 
+# --- 0. pull all project repos -----------------------------------------
+pull_project_paths() {
+  python3 - <<'PY'
+import json, os, sys
+try:
+    reg = json.load(open("registry.json"))
+    for p in reg.get("products", []):
+        for proj in p.get("projects", []):
+            path = proj.get("path", "").strip()
+            if path:
+                print(path)
+except Exception as e:
+    print(f"registry read error: {e}", file=sys.stderr)
+PY
+}
+
+while IFS= read -r rel; do
+  [ -z "$rel" ] && continue
+  # expand ~ and resolve relative to HUB
+  expanded="${rel/#\~/$HOME}"
+  [[ "$expanded" != /* ]] && expanded="$HUB/$expanded"
+  # normalize (resolve ../)
+  expanded="$(cd "$expanded" 2>/dev/null && pwd)" || { echo "pull skipped (not found): $rel"; continue; }
+  if [ -d "$expanded/.git" ]; then
+    out=$(git -C "$expanded" pull --ff-only 2>&1) \
+      && echo "pulled: $rel" \
+      || echo "pull skipped ($rel): $out"
+  fi
+done < <(pull_project_paths)
+
+# pull the hub itself if it has a remote
+if git -C "$HUB" remote | grep -q .; then
+  git -C "$HUB" pull --ff-only 2>&1 || echo "hub pull skipped (continuing)"
+fi
+
 # --- 1. route -------------------------------------------------------------
 "$HUB/scripts/router.sh"
 

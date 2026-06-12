@@ -199,7 +199,7 @@ spawn the agent to do the work, collect its reply in your `inbox/`, and report
 back. The operator never waits longer than the work itself takes.
 
 **Nightly (maintenance only).** Triggered by cron via `NIGHTLY.md`. In order:
-route queued messages; for each project run `git log --since=midnight` to
+pull all project repos (and hub if it has a remote); route queued messages; for each project run `git log --since=midnight` to
 detect the day's commits; for each project with activity, spawn its agent to
 refresh `sitemap.md` and add a journal entry; archive messages unactioned past
 the threshold; if anything happened, add a hub journal entry. Nightly work
