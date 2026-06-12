@@ -13,17 +13,6 @@
 
 set -euo pipefail
 
-# When piped through `bash`, stdin is the pipe. Reopen it from the controlling
-# terminal so prompts (sudo, Homebrew, our own) keep working.
-if [[ ! -t 0 ]]; then
-  if [[ -r /dev/tty ]]; then
-    exec </dev/tty
-  else
-    echo "No interactive terminal available; aborting." >&2
-    exit 1
-  fi
-fi
-
 # --- presentation ---
 BOLD=$'\033[1m'; DIM=$'\033[2m'
 RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BLUE=$'\033[34m'
@@ -204,7 +193,7 @@ detect_and_select_cli() {
 
   local choice
   while true; do
-    read -r -p "Enter number [$((default_idx+1))]: " choice
+    read -r -p "Enter number [$((default_idx+1))]: " choice </dev/tty
     choice="${choice:-$((default_idx+1))}"
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#all_bins[@]} )); then
       break
@@ -218,7 +207,7 @@ detect_and_select_cli() {
 
   if ! have "$SELECTED_CLI"; then
     local confirm
-    read -r -p "  ${all_names[$idx]} is not installed. Install it now? [Y/n]: " confirm
+    read -r -p "  ${all_names[$idx]} is not installed. Install it now? [Y/n]: " confirm </dev/tty
     confirm="${confirm:-Y}"
     if [[ "$confirm" =~ ^[Yy] ]]; then
       install_cli "$SELECTED_CLI" "${all_methods[$idx]}" "${all_targets[$idx]}"
@@ -284,7 +273,7 @@ EOF
     exit 0
   fi
 
-  read -r -p "Press Enter to launch $SELECTED_CLI now (Ctrl-C to launch it yourself later): " _
+  read -r -p "Press Enter to launch $SELECTED_CLI now (Ctrl-C to launch it yourself later): " _ </dev/tty
   cd "$INSTALL_DIR"
   exec "$SELECTED_CLI"
 }
