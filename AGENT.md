@@ -147,8 +147,19 @@ once exposed an operator's private data publicly — don't repeat it.)
    Sunday = 0). This modifies the user's crontab — a side effect outside
    this directory. Show the operator the exact lines and confirm before
    installing.
-10. **Report.** Write a first hub journal entry, then summarize for the
-    operator: products and projects set up, anything deferred, cron status.
+10. **Offer the event-driven dispatcher (recommended).** The dispatcher
+    (`scripts/bizagent-dispatch.sh`) is what makes agents react to inbox mail in
+    near-real-time instead of waiting for the nightly run. Installing it is a
+    **deliberate, opt-in** step — never enable it silently. Show the operator
+    the line and confirm, then install with `scripts/install-dispatch.sh`
+    (`cron` or `systemd`; default every 2 min). After install, do the one-time
+    bootstrap kick yourself: `bash scripts/bizagent-dispatch.sh`. If the
+    operator declines, inbox mail still flows but only gets picked up when you
+    spawn an agent by hand or on the nightly route. See
+    `docs/ARCHITECTURE.md → The dispatcher`.
+11. **Report.** Write a first hub journal entry, then summarize for the
+    operator: products and projects set up, anything deferred, cron status, and
+    whether the dispatcher is enabled.
 
 ---
 
@@ -198,12 +209,23 @@ directive: identify the owning product, write a message to that agent's inbox,
 spawn the agent to do the work, collect its reply in your `inbox/`, and report
 back. The operator never waits longer than the work itself takes.
 
-**Nightly (maintenance only).** Triggered by cron via `NIGHTLY.md`. In order:
-pull all project repos (and hub if it has a remote); route queued messages; for each project run `git log --since=midnight` to
-detect the day's commits; for each project with activity, spawn its agent to
-refresh `sitemap.md` and add a journal entry; archive messages unactioned past
-the threshold; if anything happened, add a hub journal entry. Nightly work
-never blocks the operator.
+Agent-to-agent mail does not wait for you to spawn it. The **dispatcher**
+(`scripts/bizagent-dispatch.sh`, run every 1–2 min via cron/systemd) routes
+outbox mail and launches any agent that has a new inbox message — within a tick
+or two of the message arriving. So a reply one agent writes to another, or work
+you queue into an agent's inbox, is picked up in near-real-time without a manual
+spawn. See `docs/ARCHITECTURE.md → The dispatcher` for the locking/at-least-once
+model. (Inbox processing is the dispatcher's job — it is *not* part of the
+nightly run.)
+
+**Nightly (time-based housekeeping only).** Triggered by cron via `NIGHTLY.md`.
+In order: pull all project repos (and hub if it has a remote); route queued
+messages; for each project run `git log --since=midnight` to detect the day's
+commits; for each project with activity, spawn its agent to refresh `sitemap.md`
+and add a journal entry; archive messages left *unactioned* past the stale
+threshold (cleanup, not delivery); if anything happened, add a hub journal
+entry. The nightly never picks up fresh inbox mail and never blocks the
+operator.
 
 **Big picture.** When asked, read every journal entry since the last such
 request, synthesize across all products, and answer in plain English organized
@@ -305,9 +327,13 @@ run when that day's commits are detected. Sections: Overview, Structure,
 Key Integrations, Active Work, Known Issues.
 
 ### Message lifecycle
-An actioned message moves to `inbox/archive/`. A message unactioned past the
-threshold is auto-archived on the next nightly run, with a warning in the hub
-journal. `archive/` is never auto-purged.
+An agent moves each message to `inbox/archive/` **as it finishes acting on it**
+— archive immediately after the work for that message is done, not in a batch at
+the end. This matters for the dispatcher's at-least-once model: if a run crashes,
+any not-yet-archived messages stay in the inbox and are retried on the next tick,
+so keep that re-run window small and make per-message work safe to repeat. A
+message left *unactioned* past the stale threshold is auto-archived on the next
+nightly run, with a warning in the hub journal. `archive/` is never auto-purged.
 
 ---
 

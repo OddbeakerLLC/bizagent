@@ -9,6 +9,11 @@
 # Local scratch
 *.log
 *.lock
+logs/
+
+# Dispatcher runtime artifacts (per-agent lock dirs, CLI choice)
+agents/*/.lock/
+.cli
 
 # Operational scaffolding must never land in the public framework repo.
 # (Agent B keeps this product's journal in the operational hub, not here.)

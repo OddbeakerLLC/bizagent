@@ -8,7 +8,13 @@
   "settings": {
     "nightly_time": "23:00",
     "archive_after_days": 30,
-    "autonomy": "maintenance-only"
+    "autonomy": "maintenance-only",
+    "dispatch": {
+      "_comment": "Event-driven dispatcher tunables (scripts/bizagent-dispatch.sh). Enable via scripts/install-dispatch.sh — installation is a deliberate manual step.",
+      "interval_minutes": 2,
+      "max_concurrency": 4,
+      "lock_lease_secs": 1800
+    }
   },
   "knowledge_stack": {
     "enabled": true,

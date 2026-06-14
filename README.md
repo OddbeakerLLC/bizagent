@@ -36,8 +36,9 @@ agent looks after one or more **project repositories**.
 Each agent keeps a **journal** (plain-English "what changed and why",
 git-log-for-humans) and a **sitemap** (a living structure map) for every repo
 it owns. Agents talk to each other by dropping markdown messages in each
-other's mailboxes. Work happens two ways: **real-time**, the moment you raise
-an issue, and a light **nightly** maintenance pass.
+other's mailboxes. Work happens two ways: **real-time** — the moment you raise
+an issue, and (via the event-driven dispatcher) the moment one agent sends
+another a message — plus a light **nightly** maintenance pass for housekeeping.
 
 You ask the hub for the big picture; it digests every journal and reports back.
 
@@ -107,6 +108,33 @@ local-model-backed agent and the nightly pass runs fully local too.
 
 ---
 
+## Real-time dispatch (event-driven inbox)
+
+By default the hub picks up work the moment *you* raise it. To also have agents
+react to each other's messages in near-real-time, enable the **dispatcher** — a
+tiny script that runs every 1–2 minutes, routes mail, and launches any agent
+that has a new inbox message (and isn't already running) to drain its inbox.
+
+It's an opt-in, one-time manual step (the agent offers it during setup):
+
+```sh
+# install a cron line (or use 'systemd' for a user timer); default every 2 min
+scripts/install-dispatch.sh cron 2
+
+# bootstrap: the very first tick is a manual kick
+bash scripts/bizagent-dispatch.sh
+```
+
+It's cheap when idle — an empty tick is just `ls` + lock checks and launches no
+agent — so it only costs tokens when there's actual mail. A per-agent lock
+guarantees one run at a time, a global cap bounds concurrency, and the
+filesystem (inbox vs `inbox/archive/`) is the only ledger, so a crashed run is
+simply retried next tick. See `docs/ARCHITECTURE.md → The dispatcher` for the
+full model. Tunables live under `settings.dispatch` in `registry.json` (or
+`BIZAGENT_*` env vars).
+
+---
+
 ## What the interview asks
 
 Only the things that are genuinely yours:
@@ -134,13 +162,16 @@ bizagent/
 ├── README.md                this file
 ├── registry.example.json    the shape of the generated registry.json
 ├── scripts/
-│   ├── onboard.sh           scaffold .agent/ + sitemap.md into a project repo
-│   ├── router.sh            deliver messages between agent mailboxes
-│   └── nightly.sh           route + archive the mechanical nightly work
+│   ├── onboard.sh             scaffold .agent/ + sitemap.md into a project repo
+│   ├── router.sh              deliver messages between agent mailboxes
+│   ├── bizagent-dispatch.sh   one dispatcher tick: route + launch agents w/ mail
+│   ├── install-dispatch.sh    wire the dispatcher to cron / systemd (manual step)
+│   └── nightly.sh             route + archive the mechanical nightly work
 ├── tests/                   shell tests for the scripts
 ├── templates/
 │   ├── agent.md.template    per-product agent config
-│   └── NIGHTLY.md           thin file the nightly cron points at
+│   ├── NIGHTLY.md           thin file the nightly cron points at
+│   └── WEEKLY.md            thin file the weekly cron points at
 └── docs/
     └── ARCHITECTURE.md       how and why the system is built this way
 ```
