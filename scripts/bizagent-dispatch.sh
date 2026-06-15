@@ -68,6 +68,9 @@ NO_ROUTE="${BIZAGENT_NO_ROUTE:-0}"
 
 # CLI command: env > .cli file > default. The .cli file (if present) is sourced
 # for CLI / CLI_PROMPT_FLAG / CLI_EXTRA_ARGS, matching the install convention.
+# NOTE: install-dispatch.sh writes CLI= as an ABSOLUTE path on purpose — under
+# cron's minimal PATH a bare "claude" would not resolve. The bare-name default
+# below is only a last resort for a hand-run tick in an interactive shell.
 CLI_DEFAULT="claude"
 CLI_PROMPT_FLAG_DEFAULT="-p"
 CLI_EXTRA_ARGS_DEFAULT="--dangerously-skip-permissions"

@@ -83,6 +83,18 @@ Bootstrapping note: enabling the dispatcher is a deliberate manual step, and the
 *first* tick after install is a manual kick (`bash scripts/bizagent-dispatch.sh`)
 — nothing can auto-dispatch the dispatcher into existence.
 
+Absolute-CLI note: the dispatcher launches the agent CLI under cron's (or a
+systemd timer's) **minimal environment**, where the CLI's install directory is
+usually *not* on `PATH` — a per-user binary like `~/.local/bin/claude` is the
+common case. A bare command name then fails with "command not found" and mail
+silently never drains. To avoid this, `install-dispatch.sh` resolves the CLI to
+an **absolute** path at install time and writes it into the hub's `.cli` file
+(`CLI=`), and also exports a sane `PATH` in the generated cron line / timer unit
+as defense in depth. If you wire the dispatcher up by hand, make the CLI path
+absolute the same way. This is the same class of environment drift as a `PATH`
+that's fine in your login shell but empty under cron. (Runtime escape hatch:
+`BIZAGENT_CLI=/abs/path/to/cli`.)
+
 ## Messaging
 
 Plain markdown files moved between directories — no database, no broker. Each

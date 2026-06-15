@@ -311,4 +311,59 @@ EOF
   echo "  ok: lock mutual exclusion (one launch under concurrent ticks)"
 }
 
+# ----------------------------------------------------------------------------
+# install-dispatch: writes an ABSOLUTE, executable CLI path into .cli, and
+# fails loudly when no CLI can be resolved. (Regression: bare "claude" is not
+# on PATH under cron/setsid.)
+# ----------------------------------------------------------------------------
+INSTALL_SRC="$SCRIPT_DIR/../scripts/install-dispatch.sh"
+{
+  HUB="$(new_hub installcli)"
+  cp "$INSTALL_SRC" "$HUB/scripts/install-dispatch.sh"
+
+  # A fake CLI somewhere NOT on the test's PATH; point BIZAGENT_CLI at it by name
+  # via an absolute path and confirm .cli records the absolute path verbatim.
+  fakebin="$HUB/fakebin"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\n' > "$fakebin/myclaude"
+  chmod +x "$fakebin/myclaude"
+
+  # `print` mode also resolves+writes .cli (resolve runs in cron/systemd modes;
+  # for the test we drive resolution directly via systemd mode, which does not
+  # require a tty). Use BIZAGENT_CLI as the absolute escape hatch.
+  out="$(env BIZAGENT_CLI="$fakebin/myclaude" HOME="$HUB/fakehome" \
+        bash "$HUB/scripts/install-dispatch.sh" systemd 2 2>&1)" \
+    || fail "install-dispatch: systemd install failed: $out"
+
+  [ -f "$HUB/.cli" ] || fail "install-dispatch: .cli not written"
+  # CLI line must be the absolute path we gave
+  grep -q "^CLI=$fakebin/myclaude$" "$HUB/.cli" \
+    || fail "install-dispatch: .cli CLI= is not the absolute path (got: $(grep '^CLI=' "$HUB/.cli"))"
+  # and it must be absolute + executable
+  cli_val="$(. "$HUB/.cli"; printf '%s' "$CLI")"
+  case "$cli_val" in /*) ;; *) fail "install-dispatch: CLI is not absolute: $cli_val";; esac
+  [ -x "$cli_val" ] || fail "install-dispatch: recorded CLI is not executable: $cli_val"
+
+  # systemd unit must export a PATH (belt-and-suspenders)
+  unit="$HUB/fakehome/.config/systemd/user/bizagent-dispatch.service"
+  [ -f "$unit" ] || fail "install-dispatch: systemd .service not written"
+  grep -q "^Environment=PATH=" "$unit" \
+    || fail "install-dispatch: systemd unit does not export PATH"
+  echo "  ok: install-dispatch writes absolute executable CLI + PATH in unit"
+}
+
+# install-dispatch fails LOUDLY (non-zero) when no CLI can be resolved.
+{
+  HUB="$(new_hub installcli_fail)"
+  cp "$INSTALL_SRC" "$HUB/scripts/install-dispatch.sh"
+  # A HOME with no .local/bin/<cli> + a bogus BIZAGENT_CLI name that command -v
+  # cannot resolve on the (real) PATH. Must exit non-zero before writing .cli.
+  if env BIZAGENT_CLI="definitely-not-a-real-cli-xyz" HOME="$HUB/emptyhome" \
+       bash "$HUB/scripts/install-dispatch.sh" systemd 2 >/dev/null 2>&1; then
+    fail "install-dispatch: expected non-zero exit when CLI cannot be resolved"
+  fi
+  [ ! -f "$HUB/.cli" ] || fail "install-dispatch: wrote .cli despite unresolved CLI"
+  echo "  ok: install-dispatch fails loudly when no CLI resolvable"
+}
+
 echo "  ok: bizagent-dispatch.sh"
