@@ -366,4 +366,81 @@ INSTALL_SRC="$SCRIPT_DIR/../scripts/install-dispatch.sh"
   echo "  ok: install-dispatch fails loudly when no CLI resolvable"
 }
 
+# install-dispatch: SAFE-BY-DEFAULT — a default install (no opt-in flag, no tty)
+# must write an EMPTY CLI_EXTRA_ARGS (no --dangerously-skip-permissions baked in).
+{
+  HUB="$(new_hub installsafe)"
+  cp "$INSTALL_SRC" "$HUB/scripts/install-dispatch.sh"
+  fakebin="$HUB/fakebin"; mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\n' > "$fakebin/myclaude"; chmod +x "$fakebin/myclaude"
+
+  # No --allow-autonomous, non-interactive (output captured = no tty) -> safe.
+  out="$(env BIZAGENT_CLI="$fakebin/myclaude" HOME="$HUB/fakehome" \
+        bash "$HUB/scripts/install-dispatch.sh" systemd 2 2>&1)" \
+    || fail "install-dispatch(safe): install failed: $out"
+
+  [ -f "$HUB/.cli" ] || fail "install-dispatch(safe): .cli not written"
+  grep -q '^CLI_EXTRA_ARGS=$' "$HUB/.cli" \
+    || fail "install-dispatch(safe): CLI_EXTRA_ARGS not empty (got: $(grep '^CLI_EXTRA_ARGS=' "$HUB/.cli"))"
+  if grep -q 'dangerously-skip-permissions' "$HUB/.cli"; then
+    fail "install-dispatch(safe): dangerous flag was baked into .cli by default"
+  fi
+  echo "  ok: install-dispatch default install is safe (empty CLI_EXTRA_ARGS)"
+}
+
+# install-dispatch: OPT-IN — with --allow-autonomous the skip-permissions flag is
+# written into .cli. Also verify the env opt-in (BIZAGENT_ALLOW_AUTONOMOUS=1).
+{
+  HUB="$(new_hub installoptin)"
+  cp "$INSTALL_SRC" "$HUB/scripts/install-dispatch.sh"
+  fakebin="$HUB/fakebin"; mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\n' > "$fakebin/myclaude"; chmod +x "$fakebin/myclaude"
+
+  out="$(env BIZAGENT_CLI="$fakebin/myclaude" HOME="$HUB/fakehome" \
+        bash "$HUB/scripts/install-dispatch.sh" systemd 2 --allow-autonomous 2>&1)" \
+    || fail "install-dispatch(opt-in): install failed: $out"
+  grep -q '^CLI_EXTRA_ARGS=--dangerously-skip-permissions$' "$HUB/.cli" \
+    || fail "install-dispatch(opt-in --allow-autonomous): skip-permissions not written (got: $(grep '^CLI_EXTRA_ARGS=' "$HUB/.cli"))"
+
+  # env-based opt-in, into a fresh hub
+  HUB2="$(new_hub installoptinenv)"
+  cp "$INSTALL_SRC" "$HUB2/scripts/install-dispatch.sh"
+  fakebin2="$HUB2/fakebin"; mkdir -p "$fakebin2"
+  printf '#!/usr/bin/env bash\n' > "$fakebin2/myclaude"; chmod +x "$fakebin2/myclaude"
+  env BIZAGENT_CLI="$fakebin2/myclaude" HOME="$HUB2/fakehome" BIZAGENT_ALLOW_AUTONOMOUS=1 \
+      bash "$HUB2/scripts/install-dispatch.sh" systemd 2 >/dev/null 2>&1 \
+    || fail "install-dispatch(opt-in env): install failed"
+  grep -q '^CLI_EXTRA_ARGS=--dangerously-skip-permissions$' "$HUB2/.cli" \
+    || fail "install-dispatch(opt-in BIZAGENT_ALLOW_AUTONOMOUS): skip-permissions not written"
+  echo "  ok: install-dispatch opt-in writes skip-permissions (flag + env)"
+}
+
+# install-dispatch: an explicit prior choice in .cli is PRESERVED, not downgraded.
+{
+  HUB="$(new_hub installpreserve)"
+  cp "$INSTALL_SRC" "$HUB/scripts/install-dispatch.sh"
+  fakebin="$HUB/fakebin"; mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\n' > "$fakebin/myclaude"; chmod +x "$fakebin/myclaude"
+  # seed .cli with a prior explicit permission choice
+  cat > "$HUB/.cli" <<EOF
+CLI=$fakebin/myclaude
+CLI_PROMPT_FLAG=-p
+CLI_EXTRA_ARGS=--dangerously-skip-permissions
+EOF
+  env HOME="$HUB/fakehome" \
+      bash "$HUB/scripts/install-dispatch.sh" systemd 2 >/dev/null 2>&1 \
+    || fail "install-dispatch(preserve): install failed"
+  grep -q '^CLI_EXTRA_ARGS=--dangerously-skip-permissions$' "$HUB/.cli" \
+    || fail "install-dispatch(preserve): prior explicit choice was downgraded"
+  echo "  ok: install-dispatch preserves a prior explicit permission choice"
+}
+
+# bizagent-dispatch: the in-script default for CLI_EXTRA_ARGS must be EMPTY (the
+# dangerous flag is no longer a built-in default).
+{
+  grep -q '^CLI_EXTRA_ARGS_DEFAULT=""$' "$DISPATCH_SRC" \
+    || fail "bizagent-dispatch: CLI_EXTRA_ARGS_DEFAULT is not empty by default"
+  echo "  ok: bizagent-dispatch default CLI_EXTRA_ARGS is empty (safe)"
+}
+
 echo "  ok: bizagent-dispatch.sh"

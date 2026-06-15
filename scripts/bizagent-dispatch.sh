@@ -25,7 +25,14 @@
 #   BIZAGENT_LOCK_LEASE_SECS   max lock age before reclaim, seconds  (default 1800)
 #   BIZAGENT_CLI               CLI command to launch an agent        (default from .cli, else "claude")
 #   BIZAGENT_CLI_PROMPT_FLAG   non-interactive prompt flag           (default from .cli, else "-p")
-#   BIZAGENT_CLI_EXTRA_ARGS    extra args (e.g. permission flag)     (default from .cli, else "--dangerously-skip-permissions")
+#   BIZAGENT_CLI_EXTRA_ARGS    extra args (e.g. permission flag)     (default from .cli, else empty)
+#
+# Permission mode is SAFE-BY-DEFAULT: no permission flag is baked in. Unattended
+# cron-driven agents run unsandboxed with whatever permissions the CLI grants, so
+# autonomy is opt-in at install time (see install-dispatch.sh --allow-autonomous)
+# or via BIZAGENT_CLI_EXTRA_ARGS / the .cli file. With no extra args, an
+# interactive CLI may simply prompt-and-wait (and never act) under cron — that is
+# intentional: the operator must choose a permission mode deliberately.
 #   BIZAGENT_DRY_RUN           1 = print launch command, don't run   (default 0)
 #   BIZAGENT_NO_ROUTE          1 = skip the router step              (default 0)
 #
@@ -73,7 +80,9 @@ NO_ROUTE="${BIZAGENT_NO_ROUTE:-0}"
 # below is only a last resort for a hand-run tick in an interactive shell.
 CLI_DEFAULT="claude"
 CLI_PROMPT_FLAG_DEFAULT="-p"
-CLI_EXTRA_ARGS_DEFAULT="--dangerously-skip-permissions"
+# Safe-by-default: no permission flag baked in. Autonomy is opt-in (see the
+# header note and install-dispatch.sh --allow-autonomous).
+CLI_EXTRA_ARGS_DEFAULT=""
 if [ -f "$HUB/.cli" ]; then
   # shellcheck disable=SC1091
   . "$HUB/.cli" 2>/dev/null || true

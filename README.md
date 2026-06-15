@@ -125,6 +125,21 @@ scripts/install-dispatch.sh cron 2
 bash scripts/bizagent-dispatch.sh
 ```
 
+**Permission mode is safe-by-default.** A default install grants agents **no**
+extra permissions, so cron-driven runs won't act unattended until you pick a
+mode. Running unattended needs an explicit opt-in — autonomous agents driven by
+cron run **unsandboxed with full permissions**, which is powerful and risky:
+
+```sh
+# opt in to autonomous (full-permission) dispatch — read the warning first
+scripts/install-dispatch.sh cron 2 --allow-autonomous
+```
+
+Without the flag, an interactive install asks (defaulting to **no**). Prefer
+hardening over a blanket grant: run the CLI inside a sandbox (`firejail` /
+`bwrap` / `docker`), or set `CLI_EXTRA_ARGS` in `.cli` to a tool allowlist (e.g.
+`--allowedTools ...`).
+
 It's cheap when idle — an empty tick is just `ls` + lock checks and launches no
 agent — so it only costs tokens when there's actual mail. A per-agent lock
 guarantees one run at a time, a global cap bounds concurrency, and the

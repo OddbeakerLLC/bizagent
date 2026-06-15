@@ -83,6 +83,24 @@ Bootstrapping note: enabling the dispatcher is a deliberate manual step, and the
 *first* tick after install is a manual kick (`bash scripts/bizagent-dispatch.sh`)
 — nothing can auto-dispatch the dispatcher into existence.
 
+Permission mode (safe-by-default): the dispatcher launches agents under cron with
+no human at the keyboard, so the permission flag it passes to the CLI is a real
+security decision. It is therefore **safe-by-default**: `bizagent-dispatch.sh`
+bakes in **no** permission flag (its `CLI_EXTRA_ARGS` default is empty), and
+`install-dispatch.sh` writes an **empty** `CLI_EXTRA_ARGS` into `.cli` unless the
+operator **opts in**. To run truly unattended you pass `--allow-autonomous` (alias
+`--skip-permissions`) at install — or answer *yes* to the interactive prompt,
+which defaults to **no** behind a warning. Only then does `.cli` get
+`CLI_EXTRA_ARGS=--dangerously-skip-permissions`, which lets cron-driven agents act
+**unsandboxed with full permissions** (edit files, run commands, reach the
+network) with no prompt. The tradeoff: with the safe default an interactive CLI
+under cron simply prompts and waits — so unattended dispatch won't *act* until you
+choose a mode. If you do opt in, harden it: run the CLI inside a sandbox
+(`firejail` / `bwrap` / `docker`) or set `CLI_EXTRA_ARGS` to a tool allowlist
+(e.g. `--allowedTools ...`) instead of blanket skip-permissions. An explicit
+choice already recorded in `.cli` is preserved across re-installs. (Runtime
+override: `BIZAGENT_CLI_EXTRA_ARGS`.)
+
 Absolute-CLI note: the dispatcher launches the agent CLI under cron's (or a
 systemd timer's) **minimal environment**, where the CLI's install directory is
 usually *not* on `PATH` — a per-user binary like `~/.local/bin/claude` is the

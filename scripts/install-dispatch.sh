@@ -10,6 +10,19 @@
 #   scripts/install-dispatch.sh systemd   [interval_minutes]   # user timer, default 2
 #   scripts/install-dispatch.sh print     [interval_minutes]   # just show the line(s)
 #
+# Permission mode (SAFE-BY-DEFAULT):
+#   By default this installer writes an EMPTY CLI_EXTRA_ARGS into .cli, so the
+#   dispatcher launches agents with NO permission flag. To run truly unattended,
+#   the operator must deliberately opt in to autonomous (full-permission) mode:
+#     --allow-autonomous  (alias: --skip-permissions)
+#         write CLI_EXTRA_ARGS=--dangerously-skip-permissions into .cli so cron-
+#         driven agents act without prompting. UNSANDBOXED + FULL PERMISSIONS.
+#   With no flag on an interactive terminal you are asked (default: NO). On a
+#   non-interactive run (no tty) the safe default (empty) is used unless the flag
+#   is given. Recommended hardening if you do opt in: run the CLI inside a sandbox
+#   (firejail / bwrap / docker) or pass a tool allowlist (e.g. --allowedTools) via
+#   CLI_EXTRA_ARGS instead of blanket skip-permissions.
+#
 # Bootstrapping note: the very first run must be a manual kick, because nothing
 # is dispatching yet:
 #   bash scripts/bizagent-dispatch.sh
@@ -27,10 +40,29 @@
 set -u
 
 HUB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODE="${1:-print}"
-INTERVAL="${2:-2}"
+
+# Parse args: positional MODE + INTERVAL, plus an optional opt-in flag that may
+# appear anywhere. ALLOW_AUTONOMOUS: 1=opt in (flag given), 0=not given (ask/safe).
+ALLOW_AUTONOMOUS=0
+POSITIONAL=()
+for arg in "$@"; do
+  case "$arg" in
+    --allow-autonomous|--skip-permissions) ALLOW_AUTONOMOUS=1 ;;
+    --*) echo "unknown flag: $arg" >&2; exit 2 ;;
+    *) POSITIONAL+=("$arg") ;;
+  esac
+done
+MODE="${POSITIONAL[0]:-print}"
+INTERVAL="${POSITIONAL[1]:-2}"
+
+# Env escape hatch (e.g. for non-interactive automation that has decided to opt
+# in without passing the flag): BIZAGENT_ALLOW_AUTONOMOUS=1.
+case "${BIZAGENT_ALLOW_AUTONOMOUS:-}" in 1|yes|YES|true|TRUE) ALLOW_AUTONOMOUS=1 ;; esac
 
 case "$INTERVAL" in (*[!0-9]*|'') echo "interval must be a whole number of minutes" >&2; exit 2;; esac
+
+# The flag we write into .cli when (and only when) the operator opts in.
+SKIP_PERMS_FLAG="--dangerously-skip-permissions"
 
 DISPATCH="$HUB/scripts/bizagent-dispatch.sh"
 
@@ -42,6 +74,56 @@ DISPATCH="$HUB/scripts/bizagent-dispatch.sh"
 SAFE_PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 CRON_LINE="*/$INTERVAL * * * * PATH=$SAFE_PATH; cd $HUB && bash scripts/bizagent-dispatch.sh >> logs/dispatch.log 2>&1"
+
+# resolve_permission_mode : decide what (if anything) goes into CLI_EXTRA_ARGS.
+# Echoes the chosen extra-args string (empty = safe default). Safe-by-default:
+#   - If --allow-autonomous/--skip-permissions (or BIZAGENT_ALLOW_AUTONOMOUS) was
+#     given, return the skip-permissions flag.
+#   - Else if a value was ALREADY recorded in .cli (an earlier explicit choice),
+#     preserve it (don't silently downgrade an operator's prior decision).
+#   - Else if interactive (a tty), warn loudly and ask, defaulting to NO.
+#   - Else (non-interactive, no flag, nothing recorded): empty (safe).
+# Diagnostics go to stderr so stdout stays just the chosen string.
+resolve_permission_mode() {
+  local recorded_extra="$1"
+
+  if [ "$ALLOW_AUTONOMOUS" = "1" ]; then
+    echo "$SKIP_PERMS_FLAG"
+    return 0
+  fi
+
+  # Preserve an explicit prior choice (e.g. a previous opt-in install).
+  if [ -n "$recorded_extra" ]; then
+    echo "$recorded_extra"
+    return 0
+  fi
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    {
+      echo
+      echo "⚠  AUTONOMOUS DISPATCH — permission mode"
+      echo "   The dispatcher launches agents from cron/systemd with NO human at"
+      echo "   the keyboard. Granting '$SKIP_PERMS_FLAG' lets those"
+      echo "   agents run UNSANDBOXED with FULL PERMISSIONS (edit files, run"
+      echo "   commands, reach the network) with no prompt. This is powerful and"
+      echo "   risky on a shared or internet-connected machine."
+      echo
+      echo "   Safer options if you proceed: run the CLI inside a sandbox"
+      echo "   (firejail / bwrap / docker), or set CLI_EXTRA_ARGS to a tool"
+      echo "   allowlist (e.g. --allowedTools ...) instead of blanket skip."
+      echo
+      printf "   Enable autonomous full-permission dispatch now? [y/N] "
+    } >&2
+    local ans=""
+    read -r ans
+    case "$ans" in
+      y|Y|yes|YES) echo "$SKIP_PERMS_FLAG"; return 0 ;;
+    esac
+  fi
+
+  # Safe default: no permission flag.
+  echo ""
+}
 
 # resolve_and_write_cli : figure out an ABSOLUTE, executable path to the agent
 # CLI and persist it to "$HUB/.cli" as CLI=<abspath>. Resolution order:
@@ -93,21 +175,33 @@ resolve_and_write_cli() {
     exit 3
   fi
 
-  # Persist. Default the prompt flag / extra args if the file didn't carry them,
-  # matching the dispatcher's own defaults so .cli is self-contained.
+  # Persist. Default the prompt flag if the file didn't carry one, matching the
+  # dispatcher's own default so .cli is self-contained.
   : "${recorded_flag:=-p}"
-  : "${recorded_extra:=--dangerously-skip-permissions}"
+
+  # Permission mode is SAFE-BY-DEFAULT: only write the dangerous flag if the
+  # operator explicitly opted in (flag/env/prompt) or had already recorded it.
+  local extra
+  extra="$(resolve_permission_mode "$recorded_extra")"
 
   cat > "$clifile" <<EOF
 # bizagent CLI config — CLI resolved to an absolute path by install-dispatch.sh.
 # The dispatcher sources this under cron's minimal env, so CLI MUST be absolute.
 # Override at runtime with BIZAGENT_CLI / BIZAGENT_CLI_PROMPT_FLAG / BIZAGENT_CLI_EXTRA_ARGS.
+# CLI_EXTRA_ARGS is the permission mode; empty = safe (no auto-permission flag).
 CLI=$resolved
 CLI_CMD=$resolved
 CLI_PROMPT_FLAG=$recorded_flag
-CLI_EXTRA_ARGS=$recorded_extra
+CLI_EXTRA_ARGS=$extra
 EOF
   echo "Resolved CLI -> $resolved (written to .cli)"
+  if [ -n "$extra" ]; then
+    echo "Permission mode: AUTONOMOUS — CLI_EXTRA_ARGS=$extra (agents act unprompted)."
+  else
+    echo "Permission mode: SAFE (CLI_EXTRA_ARGS empty). Unattended dispatch will NOT"
+    echo "  act until you choose a permission mode: re-run with --allow-autonomous,"
+    echo "  or edit .cli's CLI_EXTRA_ARGS (e.g. a sandbox wrapper or --allowedTools)."
+  fi
 }
 
 print_cron() {
@@ -187,5 +281,5 @@ case "$MODE" in
   cron)    install_cron ;;
   systemd) install_systemd ;;
   print)   print_cron ;;
-  *) echo "usage: $0 {cron|systemd|print} [interval_minutes]" >&2; exit 2 ;;
+  *) echo "usage: $0 {cron|systemd|print} [interval_minutes] [--allow-autonomous]" >&2; exit 2 ;;
 esac
