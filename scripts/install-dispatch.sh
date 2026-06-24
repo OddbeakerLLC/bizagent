@@ -65,9 +65,6 @@ case "${BIZAGENT_ALLOW_AUTONOMOUS:-}" in 1|yes|YES|true|TRUE) ALLOW_AUTONOMOUS=1
 
 case "$INTERVAL" in (*[!0-9]*|'') echo "interval must be a whole number of minutes" >&2; exit 2;; esac
 
-# Will be set by resolve_and_write_cli; fallback for backwards compat with old .cli files.
-YOLO_FLAG=""
-
 DISPATCH="$HUB/scripts/bizagent-dispatch.sh"
 
 # A minimal-but-sane PATH for the generated cron line / systemd unit. Cron in

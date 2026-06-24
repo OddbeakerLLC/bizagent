@@ -135,10 +135,14 @@ cron run **unsandboxed with full permissions**, which is powerful and risky:
 scripts/install-dispatch.sh cron 2 --allow-autonomous
 ```
 
-Without the flag, an interactive install asks (defaulting to **no**). Prefer
-hardening over a blanket grant: run the CLI inside a sandbox (`firejail` /
-`bwrap` / `docker`), or set `CLI_EXTRA_ARGS` in `.cli` to a tool allowlist (e.g.
-`--allowedTools ...`).
+Without the flag, an interactive install asks (defaulting to **no**). The
+autonomous flag is **per-CLI** (written to `.cli` as `CLI_YOLO_FLAG` by the
+installer): `--dangerously-skip-permissions` for Claude, `--yolo` for Gemini,
+`--full-auto` for Codex. The flag for Grok CLI is not yet confirmed — if you
+use Grok, set `CLI_EXTRA_ARGS` in `.cli` manually once you identify the correct
+flag from `grok --help`. Prefer hardening over a blanket grant: run the CLI
+inside a sandbox (`firejail` / `bwrap` / `docker`), or set `CLI_EXTRA_ARGS` in
+`.cli` to a tool allowlist (e.g. `--allowedTools ...`).
 
 It's cheap when idle — an empty tick is just `ls` + lock checks and launches no
 agent — so it only costs tokens when there's actual mail. A per-agent lock
