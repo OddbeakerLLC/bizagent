@@ -1,4 +1,4 @@
-# bizagent
+# BizAgent
 
 **An interview-driven starter kit for managing digital-product development with AI agents.**
 
