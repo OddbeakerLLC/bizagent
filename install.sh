@@ -109,18 +109,21 @@ ensure_cron() {
 }
 
 # --- AI CLI detection and selection ---
-# Format: "binary|display_name|prompt_flag|install_method|install_target"
+# Format: "binary|display_name|prompt_flag|install_method|install_target|yolo_flag"
 #   install_method: "curl" or "npm"
 #   install_target: URL (curl) or package name (npm)
+#   yolo_flag: the CLI-specific flag for autonomous/unattended operation (no prompts)
+#              Empty string means the flag is unknown; operator must set CLI_EXTRA_ARGS manually.
 KNOWN_CLIS=(
-  "claude|Claude Code (Anthropic)|-p|curl|https://claude.ai/install.sh"
-  "gemini|Gemini CLI (Google)|-p|npm|@google/gemini-cli"
-  "codex|Codex CLI (OpenAI)|exec|curl|https://chatgpt.com/codex/install.sh"
-  "grok|Grok CLI (xAI)|-p|curl|https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh"
+  "claude|Claude Code (Anthropic)|-p|curl|https://claude.ai/install.sh|--dangerously-skip-permissions"
+  "gemini|Gemini CLI (Google)|-p|npm|@google/gemini-cli|--yolo"
+  "codex|Codex CLI (OpenAI)|exec|curl|https://chatgpt.com/codex/install.sh|--full-auto"
+  "grok|Grok CLI (xAI)|-p|curl|https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh|"
 )
 
 SELECTED_CLI=""
 SELECTED_PROMPT_FLAG=""
+SELECTED_YOLO_FLAG=""
 
 ensure_npm() {
   if have npm; then return; fi
@@ -158,16 +161,17 @@ install_cli() {
 }
 
 detect_and_select_cli() {
-  local all_bins=() all_names=() all_flags=() all_methods=() all_targets=()
+  local all_bins=() all_names=() all_flags=() all_methods=() all_targets=() all_yolo=()
   local default_idx=0
 
   for entry in "${KNOWN_CLIS[@]}"; do
-    IFS='|' read -r bin name flag method target <<< "$entry"
+    IFS='|' read -r bin name flag method target yolo <<< "$entry"
     all_bins+=("$bin")
     all_names+=("$name")
     all_flags+=("$flag")
     all_methods+=("$method")
     all_targets+=("$target")
+    all_yolo+=("$yolo")
   done
 
   # Find default: first installed CLI, or 0 (claude) if none
@@ -204,6 +208,7 @@ detect_and_select_cli() {
   local idx=$(( choice - 1 ))
   SELECTED_CLI="${all_bins[$idx]}"
   SELECTED_PROMPT_FLAG="${all_flags[$idx]}"
+  SELECTED_YOLO_FLAG="${all_yolo[$idx]}"
 
   if ! have "$SELECTED_CLI"; then
     local confirm
@@ -224,6 +229,7 @@ write_cli_config() {
 # bizagent CLI config — written by installer, read by AGENT.md setup
 CLI_CMD=$SELECTED_CLI
 CLI_PROMPT_FLAG=$SELECTED_PROMPT_FLAG
+CLI_YOLO_FLAG=$SELECTED_YOLO_FLAG
 EOF
   ok "CLI config written (.cli)"
 }

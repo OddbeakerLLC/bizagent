@@ -15,8 +15,12 @@
 #   dispatcher launches agents with NO permission flag. To run truly unattended,
 #   the operator must deliberately opt in to autonomous (full-permission) mode:
 #     --allow-autonomous  (alias: --skip-permissions)
-#         write CLI_EXTRA_ARGS=--dangerously-skip-permissions into .cli so cron-
-#         driven agents act without prompting. UNSANDBOXED + FULL PERMISSIONS.
+#         write CLI_EXTRA_ARGS=<yolo_flag> into .cli so cron-driven agents act
+#         without prompting. UNSANDBOXED + FULL PERMISSIONS. The exact flag is
+#         per-CLI (e.g. --dangerously-skip-permissions for claude, --yolo for
+#         gemini, --full-auto for codex) and is read from CLI_YOLO_FLAG in .cli
+#         (written by install.sh). Falls back to --dangerously-skip-permissions
+#         for .cli files written by older installers.
 #   With no flag on an interactive terminal you are asked (default: NO). On a
 #   non-interactive run (no tty) the safe default (empty) is used unless the flag
 #   is given. Recommended hardening if you do opt in: run the CLI inside a sandbox
@@ -61,8 +65,8 @@ case "${BIZAGENT_ALLOW_AUTONOMOUS:-}" in 1|yes|YES|true|TRUE) ALLOW_AUTONOMOUS=1
 
 case "$INTERVAL" in (*[!0-9]*|'') echo "interval must be a whole number of minutes" >&2; exit 2;; esac
 
-# The flag we write into .cli when (and only when) the operator opts in.
-SKIP_PERMS_FLAG="--dangerously-skip-permissions"
+# Will be set by resolve_and_write_cli; fallback for backwards compat with old .cli files.
+YOLO_FLAG=""
 
 DISPATCH="$HUB/scripts/bizagent-dispatch.sh"
 
@@ -78,17 +82,20 @@ CRON_LINE="*/$INTERVAL * * * * PATH=$SAFE_PATH; cd $HUB && bash scripts/bizagent
 # resolve_permission_mode : decide what (if anything) goes into CLI_EXTRA_ARGS.
 # Echoes the chosen extra-args string (empty = safe default). Safe-by-default:
 #   - If --allow-autonomous/--skip-permissions (or BIZAGENT_ALLOW_AUTONOMOUS) was
-#     given, return the skip-permissions flag.
+#     given, return the yolo_flag for this CLI.
 #   - Else if a value was ALREADY recorded in .cli (an earlier explicit choice),
 #     preserve it (don't silently downgrade an operator's prior decision).
 #   - Else if interactive (a tty), warn loudly and ask, defaulting to NO.
 #   - Else (non-interactive, no flag, nothing recorded): empty (safe).
 # Diagnostics go to stderr so stdout stays just the chosen string.
 resolve_permission_mode() {
-  local recorded_extra="$1"
+  local recorded_extra="$1" yolo_flag="$2"
+
+  # Fallback for backwards compat: if no yolo_flag provided, use Claude's (safe fallback).
+  : "${yolo_flag:=--dangerously-skip-permissions}"
 
   if [ "$ALLOW_AUTONOMOUS" = "1" ]; then
-    echo "$SKIP_PERMS_FLAG"
+    echo "$yolo_flag"
     return 0
   fi
 
@@ -103,7 +110,7 @@ resolve_permission_mode() {
       echo
       echo "⚠  AUTONOMOUS DISPATCH — permission mode"
       echo "   The dispatcher launches agents from cron/systemd with NO human at"
-      echo "   the keyboard. Granting '$SKIP_PERMS_FLAG' lets those"
+      echo "   the keyboard. Granting '$yolo_flag' lets those"
       echo "   agents run UNSANDBOXED with FULL PERMISSIONS (edit files, run"
       echo "   commands, reach the network) with no prompt. This is powerful and"
       echo "   risky on a shared or internet-connected machine."
@@ -117,7 +124,7 @@ resolve_permission_mode() {
     local ans=""
     read -r ans
     case "$ans" in
-      y|Y|yes|YES) echo "$SKIP_PERMS_FLAG"; return 0 ;;
+      y|Y|yes|YES) echo "$yolo_flag"; return 0 ;;
     esac
   fi
 
@@ -135,7 +142,7 @@ resolve_permission_mode() {
 # install error now than mail silently never draining under cron later.
 resolve_and_write_cli() {
   local clifile="$HUB/.cli"
-  local recorded_cmd="" recorded_flag="" recorded_extra=""
+  local recorded_cmd="" recorded_flag="" recorded_extra="" recorded_yolo=""
 
   if [ -f "$clifile" ]; then
     # Read any values the main installer (or a previous run) left behind. Both
@@ -146,6 +153,7 @@ resolve_and_write_cli() {
     recorded_cmd="${CLI:-${CLI_CMD:-}}"
     recorded_flag="${CLI_PROMPT_FLAG:-}"
     recorded_extra="${CLI_EXTRA_ARGS:-}"
+    recorded_yolo="${CLI_YOLO_FLAG:-}"
   fi
 
   local candidate="${BIZAGENT_CLI:-${recorded_cmd:-claude}}"
@@ -181,8 +189,10 @@ resolve_and_write_cli() {
 
   # Permission mode is SAFE-BY-DEFAULT: only write the dangerous flag if the
   # operator explicitly opted in (flag/env/prompt) or had already recorded it.
+  # Pass the CLI's yolo_flag (e.g. --dangerously-skip-permissions for claude,
+  # --yolo for gemini, --full-auto for codex) to resolve_permission_mode.
   local extra
-  extra="$(resolve_permission_mode "$recorded_extra")"
+  extra="$(resolve_permission_mode "$recorded_extra" "$recorded_yolo")"
 
   cat > "$clifile" <<EOF
 # bizagent CLI config — CLI resolved to an absolute path by install-dispatch.sh.
@@ -192,6 +202,7 @@ resolve_and_write_cli() {
 CLI=$resolved
 CLI_CMD=$resolved
 CLI_PROMPT_FLAG=$recorded_flag
+CLI_YOLO_FLAG=$recorded_yolo
 CLI_EXTRA_ARGS=$extra
 EOF
   echo "Resolved CLI -> $resolved (written to .cli)"
