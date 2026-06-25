@@ -85,8 +85,14 @@ ensure() {
     ok "$cmd present"
   else
     note "installing $pkg..."
-    eval "$INSTALL $pkg"
-    have "$cmd" || die "Installed $pkg but '$cmd' isn't on PATH. Open a new terminal and re-run."
+    local install_exit=0
+    eval "$INSTALL $pkg" || install_exit=$?
+    if [[ $install_exit -ne 0 ]]; then
+      die "Failed to install $pkg (exit $install_exit). Check that you have permission to install packages and try again."
+    fi
+    if ! have "$cmd"; then
+      die "'$cmd' still not found after installing $pkg. Open a new terminal and re-run this installer."
+    fi
     ok "$cmd installed"
   fi
 }
@@ -135,7 +141,9 @@ ensure_npm() {
     pacman) $INSTALL nodejs npm ;;
     zypper) $INSTALL nodejs npm ;;
   esac
-  have npm || die "Node.js installed but 'npm' isn't on PATH. Open a new terminal and re-run."
+  if ! have npm; then
+    die "Node.js was installed but 'npm' still isn't on PATH. Open a new terminal and re-run this installer."
+  fi
   ok "npm ready"
 }
 
@@ -145,18 +153,42 @@ install_cli() {
   note "installing $bin..."
   case "$method" in
     curl)
-      curl -fsSL "$target" | bash
+      # Capture curl-piped-bash failures explicitly.
+      if ! curl -fsSL "$target" | bash; then
+        die "Failed to download or run the $bin installer from $target. Check your network connection and try again."
+      fi
       for p in "$HOME/.local/bin" "$HOME/.claude/bin" "$HOME/.grok/bin"; do
         [[ -d "$p" ]] && export PATH="$p:$PATH"
       done
       ;;
     npm)
       ensure_npm
-      npm install -g "$target"
+      # Try a global install first; fall back to a user-writable prefix on EACCES.
+      local npm_out npm_exit
+      npm_out=$(npm install -g "$target" 2>&1)
+      npm_exit=$?
+      if [[ $npm_exit -ne 0 ]]; then
+        if echo "$npm_out" | grep -qiE "EACCES|permission denied"; then
+          warn "Global npm install failed (permission denied). Retrying with --prefix=\$HOME/.npm-global ..."
+          local npm_global="$HOME/.npm-global"
+          mkdir -p "$npm_global"
+          if ! npm install -g --prefix "$npm_global" "$target"; then
+            die "Failed to install $bin even with --prefix=$npm_global. Try: sudo npm install -g $target\nOr add npm-global to your PATH and re-run this installer."
+          fi
+          export PATH="$npm_global/bin:$PATH"
+          note "Installed to $npm_global/bin — add this to your shell profile to make it permanent:"
+          note "  export PATH=\"\$HOME/.npm-global/bin:\$PATH\""
+        else
+          printf "%s\n" "$npm_out" >&2
+          die "Failed to install $bin via npm (exit $npm_exit). See error above."
+        fi
+      fi
       ;;
   esac
   hash -r 2>/dev/null || true
-  have "$bin" || die "Installed $bin but it isn't on PATH. Open a new terminal and re-run this installer."
+  if ! have "$bin"; then
+    die "$bin was not found on PATH after installation. Open a new terminal and re-run this installer, or add the install directory to your PATH."
+  fi
   ok "$bin installed"
 }
 
