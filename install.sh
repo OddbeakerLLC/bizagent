@@ -151,6 +151,8 @@ install_cli() {
   local bin="$1" method="$2" target="$3"
   have "$bin" && return
   note "installing $bin..."
+  local install_failed=0
+
   case "$method" in
     curl)
       # Capture curl-piped-bash failures explicitly.
@@ -172,22 +174,29 @@ install_cli() {
           warn "Global npm install failed (permission denied). Retrying with --prefix=\$HOME/.npm-global ..."
           local npm_global="$HOME/.npm-global"
           mkdir -p "$npm_global"
-          if ! npm install -g --prefix "$npm_global" "$target"; then
-            die "Failed to install $bin even with --prefix=$npm_global. Try: sudo npm install -g $target\nOr add npm-global to your PATH and re-run this installer."
+          if npm install -g --prefix "$npm_global" "$target" 2>&1; then
+            export PATH="$npm_global/bin:$PATH"
+            note "Installed to $npm_global/bin — add this to your shell profile to make it permanent:"
+            note "  export PATH=\"\$HOME/.npm-global/bin:\$PATH\""
+          else
+            install_failed=1
+            die "Failed to install $bin even with --prefix=$npm_global.\nTry adding npm-global to your PATH:\n  export PATH=\"\$HOME/.npm-global/bin:\$PATH\"\nOr use sudo: sudo npm install -g $target"
           fi
-          export PATH="$npm_global/bin:$PATH"
-          note "Installed to $npm_global/bin — add this to your shell profile to make it permanent:"
-          note "  export PATH=\"\$HOME/.npm-global/bin:\$PATH\""
         else
+          install_failed=1
           printf "%s\n" "$npm_out" >&2
-          die "Failed to install $bin via npm (exit $npm_exit). See error above."
+          die "Failed to install $bin via npm. If you see an EACCES error above, try:\n  npm install -g --prefix=\$HOME/.npm-global $target\nThen add to your shell profile:\n  export PATH=\"\$HOME/.npm-global/bin:\$PATH\""
         fi
       fi
       ;;
   esac
   hash -r 2>/dev/null || true
   if ! have "$bin"; then
-    die "$bin was not found on PATH after installation. Open a new terminal and re-run this installer, or add the install directory to your PATH."
+    if [[ $install_failed -eq 1 ]]; then
+      die "Installation of $bin failed. See error messages above for details."
+    else
+      die "$bin was installed but not found on PATH. Try opening a new terminal and re-running this installer, or manually add the install directory to your PATH."
+    fi
   fi
   ok "$bin installed"
 }
@@ -279,13 +288,25 @@ choose_dir() {
     fi
     die "$INSTALL_DIR exists and isn't a bizagent clone. Move it or set BIZAGENT_DIR to a different path and re-run."
   fi
+  # Ensure parent directory is writable before attempting clone.
+  local parent_dir
+  parent_dir=$(dirname "$INSTALL_DIR")
+  if [[ ! -d "$parent_dir" ]]; then
+    if ! mkdir -p "$parent_dir" 2>/dev/null; then
+      die "Cannot create $parent_dir. Check that you have write permission and try again, or set BIZAGENT_DIR to a different path."
+    fi
+  elif [[ ! -w "$parent_dir" ]]; then
+    die "Cannot write to $parent_dir. Set BIZAGENT_DIR to a directory you can write to and try again."
+  fi
   ALREADY_CLONED=0
 }
 
 clone_repo() {
   [[ "$ALREADY_CLONED" == "1" ]] && return
   note "cloning bizagent into $INSTALL_DIR..."
-  git clone --quiet https://github.com/OddbeakerLLC/bizagent "$INSTALL_DIR"
+  if ! git clone --quiet https://github.com/OddbeakerLLC/bizagent "$INSTALL_DIR" 2>/dev/null; then
+    die "Failed to clone bizagent. Check your network connection and ensure you have write permission to $INSTALL_DIR."
+  fi
   ok "cloned"
 }
 
