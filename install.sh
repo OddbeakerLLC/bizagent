@@ -116,7 +116,7 @@ ensure_cron() {
 #              Empty string means the flag is unknown; operator must set CLI_EXTRA_ARGS manually.
 KNOWN_CLIS=(
   "claude|Claude Code (Anthropic)|-p|curl|https://claude.ai/install.sh|--dangerously-skip-permissions"
-  "gemini|Gemini CLI (Google)|-p|npm|@google/gemini-cli|--yolo"
+  "agy|Antigravity CLI (Google)|-p|curl|https://antigravity.google/cli/install.sh|--dangerously-skip-permissions"
   "codex|Codex CLI (OpenAI)|exec|curl|https://chatgpt.com/codex/install.sh|--full-auto"
   "grok|Grok CLI (xAI)|-p|curl|https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh|"
 )

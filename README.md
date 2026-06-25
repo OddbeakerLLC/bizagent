@@ -137,7 +137,7 @@ scripts/install-dispatch.sh cron 2 --allow-autonomous
 
 Without the flag, an interactive install asks (defaulting to **no**). The
 autonomous flag is **per-CLI** (written to `.cli` as `CLI_YOLO_FLAG` by the
-installer): `--dangerously-skip-permissions` for Claude, `--yolo` for Gemini,
+installer): `--dangerously-skip-permissions` for Claude and Antigravity,
 `--full-auto` for Codex. The flag for Grok CLI is not yet confirmed — if you
 use Grok, set `CLI_EXTRA_ARGS` in `.cli` manually once you identify the correct
 flag from `grok --help`. Prefer hardening over a blanket grant: run the CLI
