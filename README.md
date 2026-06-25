@@ -53,7 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.
 ```
 
 This installs anything missing (`git`, `cron`, Claude Code), clones bizagent
-into `~/bizagent`, and hands you off to Claude Code. When it opens, tell it:
+into a `bizagent/` folder in your current directory, and hands you off to Claude Code. When it opens, tell it:
 
 > Read AGENT.md and set up my system.
 

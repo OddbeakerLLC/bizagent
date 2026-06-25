@@ -8,7 +8,7 @@
 # hands you off to Claude Code with the right opening instruction.
 #
 # Env vars (optional):
-#   BIZAGENT_DIR=/path/to/clone    Override the default install dir (~/bizagent)
+#   BIZAGENT_DIR=/path/to/clone    Override the default install dir (./bizagent)
 #   BIZAGENT_NO_LAUNCH=1           Skip auto-launching Claude Code at the end
 
 set -euo pipefail
@@ -276,7 +276,7 @@ EOF
 }
 
 # --- clone + handoff ---
-DEFAULT_DIR="$HOME/bizagent"
+DEFAULT_DIR="$PWD/bizagent"
 
 choose_dir() {
   INSTALL_DIR="${BIZAGENT_DIR:-$DEFAULT_DIR}"
