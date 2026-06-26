@@ -195,7 +195,8 @@ resolve_and_write_cli() {
 # bizagent CLI config — CLI resolved to an absolute path by install-dispatch.sh.
 # The dispatcher sources this under cron's minimal env, so CLI MUST be absolute.
 # Override at runtime with BIZAGENT_CLI / BIZAGENT_CLI_PROMPT_FLAG / BIZAGENT_CLI_EXTRA_ARGS.
-# CLI_EXTRA_ARGS is the permission mode; empty = safe (no auto-permission flag).
+# CLI_EXTRA_ARGS holds pre-prompt CLI options (model flags, permission flags, etc.);
+# empty = safe (no auto-permission flag).
 CLI=$resolved
 CLI_CMD=$resolved
 CLI_PROMPT_FLAG=$recorded_flag

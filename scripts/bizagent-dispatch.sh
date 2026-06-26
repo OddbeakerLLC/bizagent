@@ -25,7 +25,7 @@
 #   BIZAGENT_LOCK_LEASE_SECS   max lock age before reclaim, seconds  (default 1800)
 #   BIZAGENT_CLI               CLI command to launch an agent        (default from .cli, else "claude")
 #   BIZAGENT_CLI_PROMPT_FLAG   non-interactive prompt flag           (default from .cli, else "-p")
-#   BIZAGENT_CLI_EXTRA_ARGS    extra args (e.g. permission flag)     (default from .cli, else empty)
+#   BIZAGENT_CLI_EXTRA_ARGS    pre-prompt CLI options (e.g. model or permission flag, placed BEFORE the prompt) (default from .cli, else empty)
 #
 # Permission mode is SAFE-BY-DEFAULT: no permission flag is baked in. Unattended
 # cron-driven agents run unsandboxed with whatever permissions the CLI grants, so
@@ -185,7 +185,7 @@ handled message to agents/$slug/inbox/archive/ as you complete it (archive each 
 message immediately after acting on it). Journal per your config."
 
   if [ "$DRY_RUN" = "1" ]; then
-    log "DRY_RUN launch '$slug': setsid $CLI $CLI_PROMPT_FLAG <prompt> $CLI_EXTRA_ARGS"
+    log "DRY_RUN launch '$slug': setsid $CLI $CLI_PROMPT_FLAG $CLI_EXTRA_ARGS <prompt>"
     # In dry-run the agent never runs, so release the lock now to stay tidy.
     rm -rf "$lockdir" 2>/dev/null
     return 0
@@ -204,7 +204,7 @@ message immediately after acting on it). Journal per your config."
     trap "rm -rf \"$lockdir\"" EXIT
     cd "$HUB" || exit 1
     # shellcheck disable=SC2086
-    "$cli" $pflag "$prompt" $extra >> "$agentlog" 2>&1
+    "$cli" $pflag $extra "$prompt" >> "$agentlog" 2>&1
   ' _ "$HUB" "$slug" "$CLI" "$CLI_PROMPT_FLAG" "$CLI_EXTRA_ARGS" "$prompt" "$agentlog" \
     >> "$agentlog" 2>&1 &
   disown 2>/dev/null || true

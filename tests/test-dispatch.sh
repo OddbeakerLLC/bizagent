@@ -64,7 +64,7 @@ EOF
 }
 
 # A fake CLI that drains the inbox: archives every message, optionally writes a
-# reply to outbox. Invocation matches: <cli> <prompt_flag> <prompt> <extra...>
+# reply to outbox. Invocation matches: <cli> <prompt_flag> <extra...> <prompt>
 make_fake_cli() {
   # make_fake_cli <path> <behavior>
   #   behavior=drain        : archive all inbox msgs (with a reply for AC1)
@@ -119,8 +119,8 @@ make_wrapper_cli() {
   cat > "$path" <<EOF
 #!/usr/bin/env bash
 set -u
-# args: <prompt_flag> <prompt> <extra...>
-prompt="\$2"
+# args: <prompt_flag> [extra...] <prompt>  (prompt is always the last arg)
+prompt="\${@: -1}"
 # extract slug from "You are the '<slug>' agent."
 slug="\$(printf '%s' "\$prompt" | sed -n "s/.*You are the '\\([^']*\\)' agent.*/\\1/p")"
 export BIZAGENT_TEST_SLUG="\$slug"
@@ -441,6 +441,54 @@ EOF
   grep -q '^CLI_EXTRA_ARGS_DEFAULT=""$' "$DISPATCH_SRC" \
     || fail "bizagent-dispatch: CLI_EXTRA_ARGS_DEFAULT is not empty by default"
   echo "  ok: bizagent-dispatch default CLI_EXTRA_ARGS is empty (safe)"
+}
+
+# ----------------------------------------------------------------------------
+# CLI_EXTRA_ARGS order: extra args must appear BEFORE the prompt, not after.
+# A Codex-style invocation is: <cli> exec <extra> "<prompt>"
+# Verify the dispatcher places them correctly by capturing the arg list.
+# ----------------------------------------------------------------------------
+{
+  HUB="$(new_hub extraorder)"
+  new_agent "$HUB" alpha
+  msg "$HUB" alpha 2026-06-14-order.md hub
+
+  ORDER_LOG="$TMPROOT/order.log"
+  CLI="$TMPROOT/cli-order"
+  cat > "$CLI" <<'EOF'
+#!/usr/bin/env bash
+# Write all args (one per line) to the order log so the test can inspect.
+printf '%s\n' "$@" >> "$BIZAGENT_ORDER_LOG"
+# Archive the message so the dispatcher doesn't loop.
+IB="$(pwd)/agents/$(cat "$BIZAGENT_ORDER_SLUG_FILE")/inbox"
+for m in "$IB"/*.md; do
+  [ -f "$m" ] && mv "$m" "$IB/archive/"
+done
+EOF
+  chmod +x "$CLI"
+
+  SLUG_FILE="$TMPROOT/order-slug"
+  printf 'alpha' > "$SLUG_FILE"
+
+  env BIZAGENT_CLI="$CLI" BIZAGENT_CLI_PROMPT_FLAG="-p" \
+      BIZAGENT_CLI_EXTRA_ARGS="--extra-flag" \
+      BIZAGENT_ORDER_LOG="$ORDER_LOG" \
+      BIZAGENT_ORDER_SLUG_FILE="$SLUG_FILE" \
+      bash "$HUB/scripts/bizagent-dispatch.sh" >/dev/null 2>&1
+
+  wait_for 5 test -f "$ORDER_LOG" || fail "extra-order: fake CLI never ran"
+  # The args captured are those AFTER the cli itself: pflag, [extra...], prompt.
+  # With BIZAGENT_CLI_PROMPT_FLAG=-p and CLI_EXTRA_ARGS=--extra-flag, the sequence
+  # must be:  -p  --extra-flag  <prompt-text>
+  args="$(cat "$ORDER_LOG")"
+  first_arg="$(printf '%s' "$args" | head -1)"
+  second_arg="$(printf '%s' "$args" | sed -n '2p')"
+  last_arg="$(printf '%s' "$args" | tail -1)"
+  [ "$first_arg" = "-p" ]           || fail "extra-order: expected -p as arg1, got '$first_arg'"
+  [ "$second_arg" = "--extra-flag" ] || fail "extra-order: expected --extra-flag before prompt, got '$second_arg'"
+  printf '%s' "$last_arg" | grep -q "You are the" \
+    || fail "extra-order: prompt not last arg (got '$last_arg')"
+  echo "  ok: CLI_EXTRA_ARGS placed before prompt in dispatch invocation"
 }
 
 echo "  ok: bizagent-dispatch.sh"

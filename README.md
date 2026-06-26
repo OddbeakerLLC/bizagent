@@ -143,7 +143,9 @@ autonomous flag is **per-CLI** (written to `.cli` as `CLI_YOLO_FLAG` by the
 installer): `--dangerously-skip-permissions` for Claude and Antigravity,
 `--full-auto` for Codex. The flag for Grok CLI is not yet confirmed — if you
 use Grok, set `CLI_EXTRA_ARGS` in `.cli` manually once you identify the correct
-flag from `grok --help`. Prefer hardening over a blanket grant: run the CLI
+flag from `grok --help`. `CLI_EXTRA_ARGS` holds **pre-prompt** CLI options
+(model flags, permission flags, etc.) — they are inserted between the prompt
+flag and the prompt text. Prefer hardening over a blanket grant: run the CLI
 inside a sandbox (`firejail` / `bwrap` / `docker`), or set `CLI_EXTRA_ARGS` in
 `.cli` to a tool allowlist (e.g. `--allowedTools ...`).
 
