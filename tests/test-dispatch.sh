@@ -480,14 +480,16 @@ EOF
   # The args captured are those AFTER the cli itself: pflag, [extra...], prompt.
   # With BIZAGENT_CLI_PROMPT_FLAG=-p and CLI_EXTRA_ARGS=--extra-flag, the sequence
   # must be:  -p  --extra-flag  <prompt-text>
+  # Note: the dispatcher now makes two CLI calls (agent + notification), so we extract
+  # only the first call's args (lines 1-3, before the second -p).
   args="$(cat "$ORDER_LOG")"
   first_arg="$(printf '%s' "$args" | head -1)"
   second_arg="$(printf '%s' "$args" | sed -n '2p')"
-  last_arg="$(printf '%s' "$args" | tail -1)"
+  third_arg="$(printf '%s' "$args" | sed -n '3p')"
   [ "$first_arg" = "-p" ]           || fail "extra-order: expected -p as arg1, got '$first_arg'"
   [ "$second_arg" = "--extra-flag" ] || fail "extra-order: expected --extra-flag before prompt, got '$second_arg'"
-  printf '%s' "$last_arg" | grep -q "You are the" \
-    || fail "extra-order: prompt not last arg (got '$last_arg')"
+  printf '%s' "$third_arg" | grep -q "You are the" \
+    || fail "extra-order: prompt not third arg (got '$third_arg')"
   echo "  ok: CLI_EXTRA_ARGS placed before prompt in dispatch invocation"
 }
 

@@ -179,10 +179,19 @@ launch_agent() {
 
   local prompt
   prompt="You are the '$slug' agent. Read agents/$slug/agent.md for your role, \
-scope, and projects. Process EVERY message in agents/$slug/inbox/ (ignore \
-archive/): do the work, write replies to agents/$slug/outbox/, and move each \
-handled message to agents/$slug/inbox/archive/ as you complete it (archive each \
-message immediately after acting on it). Journal per your config."
+scope, and projects. Before making any change to a project: read that \
+project's sitemap.md (especially Active Work and Known Issues) and the most \
+recent 1-2 entries in its .agent/journal/, so you know current state, what \
+changed recently, and anything already flagged as fragile or in-progress — \
+you run with no memory of prior dispatches, so this is the only way to pick \
+up context that isn't in this message. In particular: before testing \
+anything end-to-end, identify which paths/URLs/files are live production \
+versus test/staging, and never exercise a write/deploy/publish action \
+against a production target just to verify it works. Process EVERY message \
+in agents/$slug/inbox/ (ignore archive/): do the work, write replies to \
+agents/$slug/outbox/, and move each handled message to \
+agents/$slug/inbox/archive/ as you complete it (archive each message \
+immediately after acting on it). Journal per your config."
 
   if [ "$DRY_RUN" = "1" ]; then
     log "DRY_RUN launch '$slug': setsid $CLI $CLI_PROMPT_FLAG $CLI_EXTRA_ARGS <prompt>"
@@ -205,6 +214,12 @@ message immediately after acting on it). Journal per your config."
     cd "$HUB" || exit 1
     # shellcheck disable=SC2086
     "$cli" $pflag $extra "$prompt" >> "$agentlog" 2>&1
+    run_status=$?
+    remaining=$(find "$HUB/agents/$slug/inbox" -maxdepth 1 -name "*.md" 2>/dev/null | wc -l)
+    notify_msg="$slug dispatch finished (exit $run_status, $remaining inbox msg(s) left) - check inbox/outbox."
+    notify_prompt="Call the PushNotification tool exactly once with status=proactive and message=\"$notify_msg\". Do nothing else."
+    # shellcheck disable=SC2086
+    "$cli" $pflag --allowedTools PushNotification "$notify_prompt" >> "$agentlog" 2>&1
   ' _ "$HUB" "$slug" "$CLI" "$CLI_PROMPT_FLAG" "$CLI_EXTRA_ARGS" "$prompt" "$agentlog" \
     >> "$agentlog" 2>&1 &
   disown 2>/dev/null || true
