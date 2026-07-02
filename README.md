@@ -157,6 +157,45 @@ simply retried next tick. See `docs/ARCHITECTURE.md → The dispatcher` for the
 full model. Tunables live under `settings.dispatch` in `registry.json` (or
 `BIZAGENT_*` env vars).
 
+### Near-instant dispatch (optional: file-watch based)
+
+For sub-second latency between message arrival and agent launch, enable the
+**event-driven watcher** instead of cron polling. It uses `inotifywait` to
+catch inbox file events and immediately dispatch the corresponding agent:
+
+```sh
+# install (requires inotify-tools and systemd)
+scripts/install-watch.sh
+
+# the watcher runs as a systemd service
+sudo systemctl status bizagent-watch
+sudo journalctl -u bizagent-watch -f   # view live logs
+```
+
+The watcher is **fully compatible with the cron dispatcher** — they share the
+same lock mechanism, so a message processed by the watcher is automatically
+skipped by the next cron tick. You can run both (cron as a fallback) or just
+the watcher.
+
+The watcher also optionally dispatches a **hub agent** for processing hub inbox
+messages (e.g., incoming issues or cross-product coordination). Set
+`settings.hub_agent` in `registry.json` to enable it:
+
+```json
+{
+  "settings": {
+    "hub_agent": {
+      "prompt": "You are the hub PTL agent...",
+      "model": "claude-haiku-4-5-20251001"
+    }
+  }
+}
+```
+
+If `hub_agent` is absent or has an empty prompt, the hub inbox is not watched.
+
+To uninstall: `scripts/install-watch.sh --uninstall`
+
 ---
 
 ## What the interview asks
@@ -190,7 +229,11 @@ bizagent/
 │   ├── router.sh              deliver messages between agent mailboxes
 │   ├── bizagent-dispatch.sh   one dispatcher tick: route + launch agents w/ mail
 │   ├── install-dispatch.sh    wire the dispatcher to cron / systemd (manual step)
+│   ├── bizagent-watch.sh      event-driven dispatcher (inotifywait-based, near-instant)
+│   ├── install-watch.sh       wire the watcher to systemd (manual step)
 │   └── nightly.sh             route + archive the mechanical nightly work
+├── install/
+│   └── bizagent-watch.service systemd unit template for the watcher
 ├── tests/                   shell tests for the scripts
 ├── templates/
 │   ├── agent.md.template    per-product agent config

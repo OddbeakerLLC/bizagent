@@ -1,0 +1,15 @@
+[Unit]
+Description=BizAgent event-driven inbox watcher
+Documentation=https://github.com/OddbeakerLLC/bizagent#event-driven-dispatch
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=__HUB_PATH__/scripts/bizagent-watch.sh
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
