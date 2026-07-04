@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd <HUB_ABS_PATH> && bash scripts/router.sh >/dev/null 2>&1; m=$(ls inbox/ 2>/dev/null | grep -v '^archive$'); if [ -n \"$m\" ]; then printf 'Hub inbox has unread messages:\\n%s\\n' \"$m\"; fi",
+            "timeout": 15,
+            "statusMessage": "Checking hub inbox…"
+          }
+        ]
+      }
+    ]
+  }
+}

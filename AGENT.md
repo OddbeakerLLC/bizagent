@@ -147,6 +147,23 @@ once exposed an operator's private data publicly — don't repeat it.)
    Sunday = 0). This modifies the user's crontab — a side effect outside
    this directory. Show the operator the exact lines and confirm before
    installing.
+9.5. **Set up the Claude Code inbox-check hook (optional, if Claude Code is
+    available).** This hook checks for unread hub inbox messages and injects
+    them into your context before each response. It is a quality-of-life
+    feature: agents send replies to your inbox, and you'll see them without
+    having to manually check.
+    - Create `.claude/settings.json` (if it doesn't exist) or update it to
+      merge in the hook configuration from `templates/claude-settings.json.template`,
+      substituting `<HUB_ABS_PATH>` with the hub's absolute path.
+    - **Idempotent merge:** If `.claude/settings.json` already exists (e.g. from
+      manual configuration), do NOT overwrite it. Instead, merge the hook config
+      into the existing structure. If the operator has other hooks or settings,
+      preserve them and layer this one in.
+    - **No-hook case:** If Claude Code is not available or the operator declines
+      to set up the hook, continue without it — inbox mail still flows and
+      agents still reply normally (they just aren't automatically injected into
+      your context). Document the fallback: "If you're using Claude Code, you
+      can manually check your inbox by running `ls inbox/`."
 10. **Offer the event-driven dispatcher (recommended).** The dispatcher
     (`scripts/bizagent-dispatch.sh`) is what makes agents react to inbox mail in
     near-real-time instead of waiting for the nightly run. Installing it is a
@@ -158,8 +175,9 @@ once exposed an operator's private data publicly — don't repeat it.)
     spawn an agent by hand or on the nightly route. See
     `docs/ARCHITECTURE.md → The dispatcher`.
 11. **Report.** Write a first hub journal entry, then summarize for the
-    operator: products and projects set up, anything deferred, cron status, and
-    whether the dispatcher is enabled.
+    operator: products and projects set up, anything deferred, cron status,
+    whether the dispatcher is enabled, and (if applicable) the inbox-check
+    hook status.
 
 ---
 
@@ -334,6 +352,20 @@ any not-yet-archived messages stay in the inbox and are retried on the next tick
 so keep that re-run window small and make per-message work safe to repeat. A
 message left *unactioned* past the stale threshold is auto-archived on the next
 nightly run, with a warning in the hub journal. `archive/` is never auto-purged.
+
+### Inbox-check hook (Claude Code only, optional)
+If you use Claude Code, the setup process can install a UserPromptSubmit hook
+that checks your hub inbox before responding to each prompt. When agents send
+you a reply, it lands in `inbox/`; the hook lists any unread messages, so you
+see them automatically rather than having to run `ls inbox/` manually. This is
+a quality-of-life feature—nothing breaks if you skip it. The hook:
+- Runs `scripts/router.sh` (which routes agent-to-agent mail) before listing.
+- Shows only unread files (excludes `inbox/archive/`).
+- Times out after 15 seconds; a slow router never blocks your response.
+
+If you decline the hook during setup or use a different CLI agent, you can
+always check manually: `ls inbox/`. The inbox still works completely—you just
+see messages when you explicitly look, not injected automatically.
 
 ---
 
