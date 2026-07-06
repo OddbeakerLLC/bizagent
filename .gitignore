@@ -15,6 +15,9 @@ logs/
 agents/*/.lock/
 .cli
 
+# Operator-specific leak markers for publish-check (holds your private strings)
+scripts/publish-check.patterns
+
 # Operational scaffolding must never land in the public framework repo.
 # (Agent B keeps this product's journal in the operational hub, not here.)
 .agent/

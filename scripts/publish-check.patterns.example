@@ -1,0 +1,28 @@
+# publish-check.patterns.example — template for operator-specific leak markers.
+#
+# Copy this to scripts/publish-check.patterns (which is gitignored) and replace
+# the placeholders with YOUR private strings. publish-check.sh ORs every line
+# below into its scan, on top of the generic built-in markers.
+#
+# Format: one POSIX extended-regex (ERE) per line. Blank lines and lines
+# starting with # are ignored. Escape literal dots as \.
+#
+# Do NOT commit the real file — it exists to name the strings you never want
+# pushed, so it necessarily contains them.
+
+# Your hub/server hostnames (short names or FQDNs):
+# myhost01
+# hub\.internal\.example
+
+# Your domains:
+# example\.com
+
+# Your operator usernames (as home-dir paths and as bare words):
+# /home/(alice|bob)
+# (^|[^a-zA-Z])(alice|bob)([^a-zA-Z]|$)
+
+# Public/static IPs tied to your infrastructure:
+# 203\.0\.113\.[0-9]
+
+# Internal project codenames or private directories:
+# \.myproject
