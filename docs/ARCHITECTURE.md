@@ -33,28 +33,57 @@ A deliberate split:
 
 - **Real-time** is the primary path. The operator raises something; the hub
   routes it and spawns the work immediately. Beyond operator-initiated work,
-  agent-to-agent mail is picked up in near-real-time by the **dispatcher** (see
-  below): an agent reacts to a new message in its inbox within a tick or two,
-  not at the next nightly run.
+  agent-to-agent mail is picked up in near-real-time by the **Node control
+  plane** (see below): an agent reacts to a new message in its inbox within a
+  poll or two, not at the next nightly run.
 - **Nightly / weekly** is maintenance only — journal entries, sitemap
   refreshes, a knowledge-stack refresh, and archiving of long-stale messages. It
   is time-based housekeeping; it never processes fresh inbox mail (that's the
-  dispatcher's job) and never blocks the operator.
+  control plane's job) and never blocks the operator.
 
 This split exists because the original design started schedule-only and that
 felt too slow: an operator reporting a problem wants it picked up now, not at
 11 PM, and a message handed agent-to-agent at 09:00 should not sit until 23:00.
 The nightly run remains, but only for housekeeping.
 
-## The dispatcher (event-driven inbox processing)
+## The control plane
 
-`bizagent-dispatch.sh` runs on a short interval (every 1–2 min via cron or a
-systemd `--user` timer; install with `scripts/install-dispatch.sh`). Each tick
-it: (1) runs `router.sh` to deliver any queued outbox mail, (2) scans
-`agents/<slug>/inbox/*.md` (excluding `archive/`) for agents with pending mail,
-and (3) launches each such agent **detached** (`setsid`) to drain its whole
-inbox in one run. A tick with no mail is just `ls` + lock checks — it launches
-no CLI and spends ~zero tokens.
+`scripts/bizagent-control-plane.js serve` runs a local Node.js server. It hosts
+the web UI, requires login for UI/API access, polls inboxes every 6 seconds,
+routes queued outbox mail, updates agent mail status, launches the hub when
+`inbox/*.md` has pending mail, and launches product agents with pending mail.
+Install it as a systemd user service with
+`scripts/install-control-plane.sh`.
+
+The listen address is per instance. Runtime config reads `BIZAGENT_HOST` /
+`BIZAGENT_PORT`, then `settings.control_plane.{host,port}` from `registry.json`,
+then defaults to `127.0.0.1:8787`. The service installer resolves the same
+values, writes them into the generated unit, and names the unit from the hub path
+plus a stable hash (or `--name`) so two hubs on one machine do not overwrite each
+other's service file.
+
+The server does not replace the hub filesystem with a database:
+
+- Mailboxes still live at `inbox/`, `outbox/`, and `agents/<slug>/...`.
+- The hub runtime prompt lives in `.bizagent/prompts/hub.md`, generated from
+  `AGENT.md §§ 3-4`. Runtime hub launches read that compact prompt file instead
+  of the whole setup manual.
+- Agent launch prompts live in `agents/<slug>/.dispatch.md`, generated from
+  `templates/dispatch.md.template`. Dispatch code reads this file instead of
+  embedding product-agent prompt text inline.
+- Current hub session memory lives in `.bizagent/hub-session.md` as markdown:
+  a rolling summary plus recent turns. Older turns are compacted into the
+  summary, and a new session file starts when the operator changes topic or
+  explicitly creates a new conversation.
+- Console-originated hub inbox messages carry `conversation_id`. The launched
+  hub appends its operator-visible response or delegation summary back to the
+  same session with `scripts/bizagent-control-plane.js append-hub-turn`, which
+  refreshes `.bizagent/hub-session.md`.
+- Login config and salted password hash live in `.bizagent/auth.json`.
+- Sessions live in `.bizagent/sessions.json` and are deleted on logout.
+- Named conversation history lives as JSON files under `.bizagent/conversations/`.
+  That UI history is bounded: older raw turns are compressed into a JSON summary
+  and the hub runtime reads the markdown session file, not an unbounded transcript.
 
 The design is deliberately minimal:
 
@@ -67,8 +96,8 @@ The design is deliberately minimal:
   next tick retries them. (So agent work should be safe to re-run; archiving
   each message right after acting on it keeps the re-run window small.)
 - **Per-agent lock = mutual exclusion** (the crux). Before launching an agent,
-  the dispatcher acquires `agents/<slug>/.lock` atomically with `mkdir` and
-  writes the PID + start-epoch. If the lock already exists, the dispatcher skips
+  the control plane acquires `agents/<slug>/.lock` atomically with `mkdir` and
+  writes the PID + start-epoch. If the lock already exists, the control plane skips
   that agent — *unless* the holder PID is dead **or** the lock is older than a
   max lease (default 30 min), in which case the stale lock is reclaimed. This is
   what stops a long run (spanning several ticks) from being launched twice, and
@@ -79,46 +108,16 @@ The design is deliberately minimal:
 Lease and cap are configurable via env (`BIZAGENT_*`) or
 `settings.dispatch.{max_concurrency,lock_lease_secs}` in `registry.json`.
 
-Bootstrapping note: enabling the dispatcher is a deliberate manual step, and the
-*first* tick after install is a manual kick (`bash scripts/bizagent-dispatch.sh`)
-— nothing can auto-dispatch the dispatcher into existence.
-
-Permission mode (safe-by-default): the dispatcher launches agents under cron with
-no human at the keyboard, so the permission flag it passes to the CLI is a real
-security decision. It is therefore **safe-by-default**: `bizagent-dispatch.sh`
-bakes in **no** permission flag (its `CLI_EXTRA_ARGS` default is empty), and
-`install-dispatch.sh` writes an **empty** `CLI_EXTRA_ARGS` into `.cli` unless the
-operator **opts in**. To run truly unattended you pass `--allow-autonomous` (alias
-`--skip-permissions`) at install — or answer *yes* to the interactive prompt,
-which defaults to **no** behind a warning. Only then does `.cli` get
-`CLI_EXTRA_ARGS=--dangerously-skip-permissions`, which lets cron-driven agents act
-**unsandboxed with full permissions** (edit files, run commands, reach the
-network) with no prompt. The tradeoff: with the safe default an interactive CLI
-under cron simply prompts and waits — so unattended dispatch won't *act* until you
-choose a mode. If you do opt in, harden it: run the CLI inside a sandbox
-(`firejail` / `bwrap` / `docker`) or set `CLI_EXTRA_ARGS` to a tool allowlist
-(e.g. `--allowedTools ...`) instead of blanket skip-permissions. An explicit
-choice already recorded in `.cli` is preserved across re-installs. (Runtime
-override: `BIZAGENT_CLI_EXTRA_ARGS`.)
-
-Absolute-CLI note: the dispatcher launches the agent CLI under cron's (or a
-systemd timer's) **minimal environment**, where the CLI's install directory is
-usually *not* on `PATH` — a per-user binary like `~/.local/bin/claude` is the
-common case. A bare command name then fails with "command not found" and mail
-silently never drains. To avoid this, `install-dispatch.sh` resolves the CLI to
-an **absolute** path at install time and writes it into the hub's `.cli` file
-(`CLI=`), and also exports a sane `PATH` in the generated cron line / timer unit
-as defense in depth. If you wire the dispatcher up by hand, make the CLI path
-absolute the same way. This is the same class of environment drift as a `PATH`
-that's fine in your login shell but empty under cron. (Runtime escape hatch:
-`BIZAGENT_CLI=/abs/path/to/cli`.)
+Permission mode remains operator-controlled through `.cli` and environment
+variables. The control plane launches the configured CLI command with
+`CLI_PROMPT_FLAG` and `CLI_EXTRA_ARGS`; it does not invent a permission flag.
 
 ## Messaging
 
 Plain markdown files moved between directories — no database, no broker. Each
 message carries a small `from / to / date / subject` header and a plain-English
-body kept as terse as the content allows. `router.sh` reads the `to:` slug and
-moves the file to that agent's inbox. An actioned message is moved to
+body kept as terse as the content allows. The control plane reads the `to:` slug
+and moves the file to that agent's inbox. An actioned message is moved to
 `inbox/archive/` by the agent that handled it; one left *unactioned* past the
 configured threshold is auto-archived by the nightly run as cleanup. Replies are
 new files — there are no threads.
@@ -140,15 +139,16 @@ project's state, or ask the hub to read every journal for the whole portfolio.
 
 ## The scripts
 
-Short, dependency-light bash scripts do the mechanical work:
+Small scripts do the mechanical work:
 
 - `onboard.sh <path>` — scaffold `.agent/journal/` and `sitemap.md` into a
   project repo. Idempotent.
-- `router.sh` — deliver messages from every outbox to the addressed inbox.
-- `bizagent-dispatch.sh` — one dispatcher tick: route, scan inboxes, lock, and
-  launch agents with mail (detached) under a concurrency cap. Cheap when idle.
-- `install-dispatch.sh` — a deliberate, manual one-time helper to wire the
-  dispatcher to cron or a systemd `--user` timer. Never run automatically.
+- `bizagent-control-plane.js` — serve the UI/API, route mail, dispatch agents,
+  initialize auth, and generate dispatch prompt files.
+- `install-control-plane.sh` — a deliberate, manual one-time helper to write the
+  systemd user service. Never run automatically.
+- `router.sh`, `bizagent-dispatch.sh`, and `bizagent-watch.sh` — compatibility
+  wrappers around the Node control plane.
 - `nightly.sh` — run the router, then archive messages past the stale
   threshold (time-based housekeeping only).
 

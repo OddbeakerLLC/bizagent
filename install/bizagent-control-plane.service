@@ -1,0 +1,16 @@
+[Unit]
+Description=BizAgent Node control plane
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__HUB_SETTING__
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=BIZAGENT_HOST=__HOST__
+Environment=BIZAGENT_PORT=__PORT__
+ExecStart=/usr/bin/env node "__HUB_EXEC__/scripts/bizagent-control-plane.js" serve --hub "__HUB_EXEC__"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

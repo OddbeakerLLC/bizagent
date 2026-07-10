@@ -7,8 +7,12 @@ trap 'rm -rf "$TMP"' EXIT
 fail() { echo "  FAIL: $1"; exit 1; }
 
 mkdir -p "$TMP/scripts" "$TMP/inbox" "$TMP/outbox" "$TMP/agents"
-cp "$SCRIPT_DIR/../scripts/router.sh"  "$TMP/scripts/"
 cp "$SCRIPT_DIR/../scripts/nightly.sh" "$TMP/scripts/"
+cat > "$TMP/scripts/router.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$TMP/scripts/router.sh"
 echo '{"settings":{"archive_after_days":30},"products":[]}' > "$TMP/registry.json"
 
 # one stale message (40 days old), one fresh

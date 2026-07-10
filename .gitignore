@@ -10,9 +10,11 @@
 *.log
 *.lock
 logs/
+.bizagent/
 
 # Dispatcher runtime artifacts (per-agent lock dirs, CLI choice)
 agents/*/.lock/
+agents/*/.dispatch.md
 .cli
 
 # Operator-specific leak markers for publish-check (holds your private strings)

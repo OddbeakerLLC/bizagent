@@ -10,13 +10,17 @@
     "archive_after_days": 30,
     "autonomy": "maintenance-only",
     "dispatch": {
-      "_comment": "Event-driven dispatcher tunables (scripts/bizagent-dispatch.sh). Enable via scripts/install-dispatch.sh — installation is a deliberate manual step.",
-      "interval_minutes": 2,
+      "_comment": "Node control-plane dispatch tunables. Enable the server via scripts/install-control-plane.sh.",
+      "poll_seconds": 6,
       "max_concurrency": 4,
       "lock_lease_secs": 1800
     },
+    "control_plane": {
+      "host": "127.0.0.1",
+      "port": 8787
+    },
     "hub_agent": {
-      "_comment": "Optional hub PTL agent for event-driven dispatch (bizagent-watch.sh). Enable via scripts/install-watch.sh and set prompt + optional model. If absent, hub inbox is not watched.",
+      "_comment": "Optional hub PTL agent settings for control-plane launches.",
       "prompt": "You are the hub PTL agent. Read inbox/*.md for incoming messages, process each one, then archive it. After processing all messages, send a single PushNotification with status=proactive summarizing what arrived and what you did.",
       "model": ""
     }

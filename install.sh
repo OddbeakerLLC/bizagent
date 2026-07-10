@@ -9,6 +9,7 @@
 #
 # Env vars (optional):
 #   BIZAGENT_DIR=/path/to/clone    Override the default install dir (./bizagent)
+#   BIZAGENT_SOURCE=/path/or/url    Override the source repo (local path, file:// URL, or git URL)
 #   BIZAGENT_NO_LAUNCH=1           Skip auto-launching Claude Code at the end
 
 set -euo pipefail
@@ -147,6 +148,47 @@ ensure_npm() {
   ok "npm ready"
 }
 
+ensure_node() {
+  if have node; then
+    ok "node present"
+    return
+  fi
+  note "node not found — installing Node.js..."
+  case "$PKG" in
+    brew)   brew install node ;;
+    apt)    $INSTALL nodejs npm ;;
+    dnf)    $INSTALL nodejs npm ;;
+    pacman) $INSTALL nodejs npm ;;
+    zypper) $INSTALL nodejs npm ;;
+  esac
+  if ! have node; then
+    die "Node.js was installed but 'node' still is not on PATH. Open a new terminal and re-run this installer."
+  fi
+  ok "node installed"
+}
+
+validate_source() {
+  local source="$1"
+  case "$source" in
+    ''|'-'*)
+      die "BIZAGENT_SOURCE must be a local path, file:// URL, http(s) URL, ssh:// URL, or scp-style git URL."
+      ;;
+    file://*|https://*|http://*|ssh://*)
+      return
+      ;;
+    *://*)
+      die "Unsupported BIZAGENT_SOURCE URL scheme. Use file://, https://, http://, ssh://, a local path, or scp-style git URL."
+      ;;
+    *@*:*)
+      return
+      ;;
+  esac
+  if [[ -e "$source" ]]; then
+    return
+  fi
+  die "BIZAGENT_SOURCE local path does not exist: $source"
+}
+
 install_cli() {
   local bin="$1" method="$2" target="$3"
   have "$bin" && return
@@ -277,11 +319,19 @@ EOF
 
 # --- clone + handoff ---
 DEFAULT_DIR="$PWD/bizagent"
+BIZAGENT_SOURCE_EXPLICIT=0
+if [[ -n "${BIZAGENT_SOURCE:-}" ]]; then
+  BIZAGENT_SOURCE_EXPLICIT=1
+fi
+BIZAGENT_SOURCE="${BIZAGENT_SOURCE:-https://github.com/OddbeakerLLC/bizagent.git}"
 
 choose_dir() {
   INSTALL_DIR="${BIZAGENT_DIR:-$DEFAULT_DIR}"
   if [[ -e "$INSTALL_DIR" ]]; then
     if [[ -d "$INSTALL_DIR/.git" ]] && grep -q "bizagent" "$INSTALL_DIR/README.md" 2>/dev/null; then
+      if [[ "$BIZAGENT_SOURCE_EXPLICIT" == "1" ]]; then
+        die "$INSTALL_DIR already exists and BIZAGENT_SOURCE is set. Remove it or set BIZAGENT_DIR to a fresh path so the requested source is tested."
+      fi
       warn "$INSTALL_DIR already exists — using existing clone."
       ALREADY_CLONED=1
       return
@@ -303,9 +353,10 @@ choose_dir() {
 
 clone_repo() {
   [[ "$ALREADY_CLONED" == "1" ]] && return
+  validate_source "$BIZAGENT_SOURCE"
   note "cloning bizagent into $INSTALL_DIR..."
-  if ! git clone --quiet https://github.com/OddbeakerLLC/bizagent "$INSTALL_DIR" 2>/dev/null; then
-    die "Failed to clone bizagent. Check your network connection and ensure you have write permission to $INSTALL_DIR."
+  if ! git clone --quiet -- "$BIZAGENT_SOURCE" "$INSTALL_DIR" 2>/dev/null; then
+    die "Failed to clone bizagent. Check that BIZAGENT_SOURCE is reachable and that you have write permission to $INSTALL_DIR."
   fi
   ok "cloned"
 }
@@ -348,6 +399,7 @@ main() {
   step "Installing dependencies"
   ensure git
   ensure python3
+  ensure_node
   ensure_cron
 
   step "Selecting AI CLI"

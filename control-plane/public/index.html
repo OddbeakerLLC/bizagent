@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BizAgent</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <aside class="agent-rail" aria-label="Agents">
+      <div class="rail-title">Agents</div>
+      <div id="agents"></div>
+    </aside>
+    <section class="chat-shell">
+      <header class="topbar">
+        <select id="conversationSelect" aria-label="Conversation"></select>
+        <button id="newConversation" type="button">New</button>
+        <button id="logout" type="button">Logout</button>
+      </header>
+      <div id="authPanel" class="auth-panel" hidden>
+        <input id="username" autocomplete="username" placeholder="Username">
+        <input id="password" autocomplete="current-password" placeholder="Password" type="password">
+        <button id="login" type="button">Login</button>
+      </div>
+      <div id="messages" class="messages" aria-live="polite"></div>
+      <form id="composer" class="fixed-composer">
+        <textarea id="messageInput" rows="2" placeholder="Message the hub"></textarea>
+        <button type="submit">Send</button>
+      </form>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

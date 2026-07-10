@@ -37,7 +37,7 @@ Each agent keeps a **journal** (plain-English "what changed and why",
 git-log-for-humans) and a **sitemap** (a living structure map) for every repo
 it owns. Agents talk to each other by dropping markdown messages in each
 other's mailboxes. Work happens two ways: **real-time** — the moment you raise
-an issue, and (via the event-driven dispatcher) the moment one agent sends
+an issue, and (via the local control plane) the moment one agent sends
 another a message — plus a light **nightly** maintenance pass for housekeeping.
 
 You ask the hub for the big picture; it digests every journal and reports back.
@@ -66,6 +66,40 @@ and (with your confirmation) install the nightly schedule.
 From then on, working in that directory, your agent _is_ your Digital Products
 Lead. Raise an issue and it routes the work; ask for the big picture and it
 summarizes across every product.
+
+### Install from a staging source
+
+The one-liner defaults to the public GitHub repo. For staging, set
+`BIZAGENT_SOURCE` to any source `git clone` can read: a local path, a `file://`
+URL, or another repo URL. `BIZAGENT_DIR` still controls where the install lands.
+
+```sh
+BIZAGENT_SOURCE=/path/to/bizagent-framework \
+BIZAGENT_DIR=$HOME/bizagent-stage \
+bash /path/to/bizagent-framework/install.sh
+
+BIZAGENT_SOURCE=file:///path/to/bizagent-framework \
+BIZAGENT_DIR=$HOME/bizagent-stage \
+bash /path/to/bizagent-framework/install.sh
+
+curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | BIZAGENT_SOURCE=ssh://git@example.com/staging/bizagent.git BIZAGENT_DIR=$HOME/bizagent-stage bash
+```
+
+To test on `ai-trainer` before pushing to GitHub, commit the framework changes
+locally, copy or mount that repo onto `ai-trainer`, then run:
+
+```sh
+BIZAGENT_SOURCE=/path/on/ai-trainer/bizagent-framework \
+BIZAGENT_DIR=$HOME/bizagent-stage \
+BIZAGENT_NO_LAUNCH=1 \
+bash /path/on/ai-trainer/bizagent-framework/install.sh
+```
+
+The local source must be a Git repository. `git clone` copies committed local
+history, so commit staging changes before running the installer. If you rerun a
+staging install with `BIZAGENT_SOURCE` set, use a fresh `BIZAGENT_DIR` or remove
+the previous install first; the installer will not silently reuse an existing
+clone when a source override is active.
 
 ### Windows
 
@@ -111,90 +145,58 @@ local-model-backed agent and the nightly pass runs fully local too.
 
 ---
 
-## Real-time dispatch (event-driven inbox)
+## Control plane
 
-By default the hub picks up work the moment *you* raise it. To also have agents
-react to each other's messages in near-real-time, enable the **dispatcher** — a
-tiny script that runs every 1–2 minutes, routes mail, and launches any agent
-that has a new inbox message (and isn't already running) to drain its inbox.
+BizAgent includes a local Node.js control plane:
 
-It's an opt-in, one-time manual step (the agent offers it during setup):
+- a login-protected web UI that feels like an LLM chat app
+- named conversations with file-backed history
+- compact hub session memory in markdown
+- an agent rail with mail status lights
+- inbox polling every 6 seconds
+- outbox routing
+- hub launches from the generated `.bizagent/prompts/hub.md` prompt
+- parallel agent launches with one live instance per agent
 
-```sh
-# install a cron line (or use 'systemd' for a user timer); default every 2 min
-scripts/install-dispatch.sh cron 2
-
-# bootstrap: the very first tick is a manual kick
-bash scripts/bizagent-dispatch.sh
-```
-
-**Permission mode is safe-by-default.** A default install grants agents **no**
-extra permissions, so cron-driven runs won't act unattended until you pick a
-mode. Running unattended needs an explicit opt-in — autonomous agents driven by
-cron run **unsandboxed with full permissions**, which is powerful and risky:
+Initialize the local UI login during setup:
 
 ```sh
-# opt in to autonomous (full-permission) dispatch — read the warning first
-scripts/install-dispatch.sh cron 2 --allow-autonomous
+node scripts/bizagent-control-plane.js auth-init --username <user> --password <password>
 ```
 
-Without the flag, an interactive install asks (defaulting to **no**). The
-autonomous flag is **per-CLI** (written to `.cli` as `CLI_YOLO_FLAG` by the
-installer): `--dangerously-skip-permissions` for Claude and Antigravity,
-`--full-auto` for Codex. The flag for Grok CLI is not yet confirmed — if you
-use Grok, set `CLI_EXTRA_ARGS` in `.cli` manually once you identify the correct
-flag from `grok --help`. `CLI_EXTRA_ARGS` holds **pre-prompt** CLI options
-(model flags, permission flags, etc.) — they are inserted between the prompt
-flag and the prompt text. Prefer hardening over a blanket grant: run the CLI
-inside a sandbox (`firejail` / `bwrap` / `docker`), or set `CLI_EXTRA_ARGS` in
-`.cli` to a tool allowlist (e.g. `--allowedTools ...`).
-
-It's cheap when idle — an empty tick is just `ls` + lock checks and launches no
-agent — so it only costs tokens when there's actual mail. A per-agent lock
-guarantees one run at a time, a global cap bounds concurrency, and the
-filesystem (inbox vs `inbox/archive/`) is the only ledger, so a crashed run is
-simply retried next tick. See `docs/ARCHITECTURE.md → The dispatcher` for the
-full model. Tunables live under `settings.dispatch` in `registry.json` (or
-`BIZAGENT_*` env vars).
-
-### Near-instant dispatch (optional: file-watch based)
-
-For sub-second latency between message arrival and agent launch, enable the
-**event-driven watcher** instead of cron polling. It uses `inotifywait` to
-catch inbox file events and immediately dispatch the corresponding agent:
+Then run it directly:
 
 ```sh
-# install (requires inotify-tools and systemd)
-scripts/install-watch.sh
-
-# the watcher runs as a systemd service
-sudo systemctl status bizagent-watch
-sudo journalctl -u bizagent-watch -f   # view live logs
+node scripts/bizagent-control-plane.js serve
 ```
 
-The watcher is **fully compatible with the cron dispatcher** — they share the
-same lock mechanism, so a message processed by the watcher is automatically
-skipped by the next cron tick. You can run both (cron as a fallback) or just
-the watcher.
+Or install the systemd user service:
 
-The watcher also optionally dispatches a **hub agent** for processing hub inbox
-messages (e.g., incoming issues or cross-product coordination). Set
-`settings.hub_agent` in `registry.json` to enable it:
-
-```json
-{
-  "settings": {
-    "hub_agent": {
-      "prompt": "You are the hub PTL agent...",
-      "model": "claude-haiku-4-5-20251001"
-    }
-  }
-}
+```sh
+scripts/install-control-plane.sh
+systemctl --user daemon-reload
+# use the instance-specific service name printed by the installer
+systemctl --user enable --now bizagent-control-plane-<instance>.service
 ```
 
-If `hub_agent` is absent or has an empty prompt, the hub inbox is not watched.
+The server uses the existing file layout as its source of truth. Mail stays in
+`inbox/`, `outbox/`, and `agents/<slug>/...`; conversations and sessions live
+under `.bizagent/`; the hub runtime prompt is generated at
+`.bizagent/prompts/hub.md`; current hub memory is kept compact in
+`.bizagent/hub-session.md`; older UI history is summarized instead of kept as
+an unbounded transcript; agent launches read `agents/<slug>/.dispatch.md`. The legacy
+`router.sh`, `bizagent-dispatch.sh`, and `bizagent-watch.sh` names remain only
+as compatibility wrappers around the Node control plane.
 
-To uninstall: `scripts/install-watch.sh --uninstall`
+Hub messages sent from the web UI include a `conversation_id`; the hub records
+its visible response back into that session with
+`node scripts/bizagent-control-plane.js append-hub-turn --conversation <id> --content-file <file>`.
+
+Multiple BizAgent hubs can run on one machine. Set
+`settings.control_plane.port` in each hub's `registry.json`, or install with
+`scripts/install-control-plane.sh --port <port> --name <instance>`. The service
+installer writes an instance-specific user service and carries `BIZAGENT_PORT`
+and `BIZAGENT_HOST` into the generated unit.
 
 ---
 
@@ -226,14 +228,14 @@ bizagent/
 ├── registry.example.json    the shape of the generated registry.json
 ├── scripts/
 │   ├── onboard.sh             scaffold .agent/ + sitemap.md into a project repo
-│   ├── router.sh              deliver messages between agent mailboxes
-│   ├── bizagent-dispatch.sh   one dispatcher tick: route + launch agents w/ mail
-│   ├── install-dispatch.sh    wire the dispatcher to cron / systemd (manual step)
-│   ├── bizagent-watch.sh      event-driven dispatcher (inotifywait-based, near-instant)
-│   ├── install-watch.sh       wire the watcher to systemd (manual step)
+│   ├── bizagent-control-plane.js Node control-plane CLI
+│   ├── install-control-plane.sh  wire the control plane to systemd
+│   ├── router.sh                 compatibility wrapper: route once
+│   ├── bizagent-dispatch.sh      compatibility wrapper: dispatch once
+│   ├── bizagent-watch.sh         compatibility wrapper: run server
 │   └── nightly.sh             route + archive the mechanical nightly work
 ├── install/
-│   └── bizagent-watch.service systemd unit template for the watcher
+│   └── bizagent-control-plane.service systemd unit template
 ├── tests/                   shell tests for the scripts
 ├── templates/
 │   ├── agent.md.template    per-product agent config

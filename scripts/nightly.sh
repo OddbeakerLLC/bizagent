@@ -42,8 +42,8 @@ while IFS= read -r rel; do
   fi
 done < <(pull_project_paths)
 
-# pull the hub itself if it has a remote
-if git -C "$HUB" remote | grep -q .; then
+# pull the hub itself if it is a git checkout with a remote
+if [ -d "$HUB/.git" ] && git -C "$HUB" remote | grep -q .; then
   git -C "$HUB" pull --ff-only 2>&1 || echo "hub pull skipped (continuing)"
 fi
 
