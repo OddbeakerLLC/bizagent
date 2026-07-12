@@ -11,6 +11,7 @@
 #   BIZAGENT_DIR=/path/to/clone    Override the default install dir (./bizagent)
 #   BIZAGENT_SOURCE=/path/or/url    Override the source repo (local path, file:// URL, or git URL)
 #   BIZAGENT_NO_LAUNCH=1           Skip auto-launching Claude Code at the end
+#   BIZAGENT_REINSTALL=1           Wipe an existing clone and reinstall from scratch
 
 set -euo pipefail
 
@@ -336,6 +337,18 @@ choose_dir() {
     note "Clearing $INSTALL_DIR (no .git found)..."
     rm -rf "$INSTALL_DIR"
   fi
+  if [[ -d "$INSTALL_DIR/.git" ]] && [[ -n "${BIZAGENT_REINSTALL:-}" ]]; then
+    if ! ([[ -f "$INSTALL_DIR/AGENT.md" ]] && grep -qi "bizagent" "$INSTALL_DIR/AGENT.md" 2>/dev/null); then
+      die "$INSTALL_DIR has a .git but isn't a bizagent clone — refusing to wipe. Unset BIZAGENT_REINSTALL or set BIZAGENT_DIR to a fresh path."
+    fi
+    if pgrep -f "bizagent-control-plane" >/dev/null 2>&1; then
+      note "Stopping running control plane..."
+      pkill -f "bizagent-control-plane" 2>/dev/null || true
+      sleep 1
+    fi
+    note "Wiping existing clone for reinstall..."
+    rm -rf "$INSTALL_DIR"
+  fi
   if [[ -e "$INSTALL_DIR" ]]; then
     if [[ -d "$INSTALL_DIR/.git" ]] && [[ -f "$INSTALL_DIR/AGENT.md" ]] && grep -qi "bizagent" "$INSTALL_DIR/AGENT.md" 2>/dev/null; then
       if [[ "$BIZAGENT_SOURCE_EXPLICIT" == "1" ]]; then
@@ -393,6 +406,7 @@ EOF
     exit 0
   fi
 
+  note "To reinstall from scratch:  BIZAGENT_REINSTALL=1 before the install command"
   read -r -p "Press Enter to launch $SELECTED_CLI now (Ctrl-C to launch it yourself later): " _ </dev/tty
   cd "$INSTALL_DIR"
   exec "$SELECTED_CLI"
