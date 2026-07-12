@@ -24,3 +24,4 @@ scripts/publish-check.patterns
 # (Agent B keeps this product's journal in the operational hub, not here.)
 .agent/
 sitemap.md
+registry.json
