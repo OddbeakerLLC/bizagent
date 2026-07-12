@@ -86,10 +86,33 @@ fi
 
 # --- 6. Open browser ---
 sleep 1
-if command -v xdg-open >/dev/null 2>&1; then
-  xdg-open "http://localhost:$PORT" >/dev/null 2>&1 &
-elif command -v open >/dev/null 2>&1; then
-  open "http://localhost:$PORT"
+
+_is_headless=0
+if [[ "$(uname -s)" == "Linux" ]]; then
+  if grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null; then
+    _is_headless=0
+  elif [[ -z "${DISPLAY:-}" ]] && [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+    _is_headless=1
+  fi
 fi
 
-printf "\nBizAgent is running. Opening http://localhost:%s …\n" "$PORT"
+if [[ "$_is_headless" -eq 1 ]]; then
+  _ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | head -3)
+  if [[ -n "$_ips" ]]; then
+    printf "\n${BOLD}Open one of these URLs in your browser to set up BizAgent:${NC}\n\n"
+    while IFS= read -r ip; do
+      printf "  ${BOLD}http://%s:%s${NC}\n" "$ip" "$PORT"
+    done <<< "$_ips"
+    printf "\n"
+  else
+    printf "\n${BOLD}Open this URL in your browser to set up BizAgent:${NC}\n\n"
+    printf "  ${BOLD}http://localhost:%s${NC} (or replace 'localhost' with this machine's IP)\n\n" "$PORT"
+  fi
+else
+  printf "\nBizAgent is running. Opening http://localhost:%s …\n" "$PORT"
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "http://localhost:$PORT" >/dev/null 2>&1 &
+  elif command -v open >/dev/null 2>&1; then
+    open "http://localhost:$PORT"
+  fi
+fi
