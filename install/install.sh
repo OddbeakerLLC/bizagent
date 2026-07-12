@@ -68,11 +68,35 @@ else
   ok "cron entry installed"
 fi
 
-# --- 4. Start the control plane ---
+# --- 4. Detect headless and patch registry if needed ---
+_is_headless=0
+if [[ "$(uname -s)" == "Linux" ]]; then
+  if grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null; then
+    _is_headless=0
+  elif [[ -z "${DISPLAY:-}" ]] && [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+    _is_headless=1
+  fi
+fi
+
+if [[ "$_is_headless" -eq 1 ]]; then
+  python3 - "$HUB/registry.json" <<'PY' 2>/dev/null || true
+import json, sys
+path = sys.argv[1]
+try:
+    d = json.load(open(path))
+    d.setdefault('settings', {}).setdefault('control_plane', {})['host'] = '0.0.0.0'
+    json.dump(d, open(path, 'w'), indent=2)
+except Exception:
+    pass
+PY
+  ok "registry: host set to 0.0.0.0 for headless install"
+fi
+
+# --- 5. Start the control plane ---
 step "Starting"
 bash "$HUB/scripts/control-plane.sh" start "$HUB"
 
-# --- 5. Drop first-run inbox seed ---
+# --- 6. Drop first-run inbox seed ---
 mkdir -p "$HUB/inbox"
 TODAY="$(date -u +%Y-%m-%d)"
 SEED_FILE="$HUB/inbox/${TODAY}-install-first-run.md"
@@ -84,17 +108,8 @@ if [ -z "$_EXISTING" ]; then
   ok "first-run message queued"
 fi
 
-# --- 6. Open browser ---
+# --- 7. Open browser ---
 sleep 1
-
-_is_headless=0
-if [[ "$(uname -s)" == "Linux" ]]; then
-  if grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null; then
-    _is_headless=0
-  elif [[ -z "${DISPLAY:-}" ]] && [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
-    _is_headless=1
-  fi
-fi
 
 if [[ "$_is_headless" -eq 1 ]]; then
   _ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | head -3)
