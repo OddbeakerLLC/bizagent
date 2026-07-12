@@ -318,7 +318,7 @@ EOF
 }
 
 # --- clone + handoff ---
-DEFAULT_DIR="$PWD/bizagent"
+DEFAULT_DIR="$HOME/bizagent"
 BIZAGENT_SOURCE_EXPLICIT=0
 if [[ -n "${BIZAGENT_SOURCE:-}" ]]; then
   BIZAGENT_SOURCE_EXPLICIT=1
@@ -328,7 +328,7 @@ BIZAGENT_SOURCE="${BIZAGENT_SOURCE:-https://github.com/OddbeakerLLC/bizagent.git
 choose_dir() {
   INSTALL_DIR="${BIZAGENT_DIR:-$DEFAULT_DIR}"
   if [[ -e "$INSTALL_DIR" ]]; then
-    if [[ -d "$INSTALL_DIR/.git" ]] && grep -q "bizagent" "$INSTALL_DIR/README.md" 2>/dev/null; then
+    if [[ -d "$INSTALL_DIR/.git" ]] && [[ -f "$INSTALL_DIR/AGENT.md" ]] && grep -qi "bizagent" "$INSTALL_DIR/AGENT.md" 2>/dev/null; then
       if [[ "$BIZAGENT_SOURCE_EXPLICIT" == "1" ]]; then
         die "$INSTALL_DIR already exists and BIZAGENT_SOURCE is set. Remove it or set BIZAGENT_DIR to a fresh path so the requested source is tested."
       fi
@@ -336,7 +336,7 @@ choose_dir() {
       ALREADY_CLONED=1
       return
     fi
-    die "$INSTALL_DIR exists and isn't a bizagent clone. Move it or set BIZAGENT_DIR to a different path and re-run."
+    die "$INSTALL_DIR exists but doesn't look like a bizagent clone. Remove it with:  rm -rf '$INSTALL_DIR'  — then re-run."
   fi
   # Ensure parent directory is writable before attempting clone.
   local parent_dir
@@ -356,6 +356,7 @@ clone_repo() {
   validate_source "$BIZAGENT_SOURCE"
   note "cloning bizagent into $INSTALL_DIR..."
   if ! git clone --quiet -- "$BIZAGENT_SOURCE" "$INSTALL_DIR" 2>/dev/null; then
+    rm -rf "$INSTALL_DIR" 2>/dev/null || true
     die "Failed to clone bizagent. Check that BIZAGENT_SOURCE is reachable and that you have write permission to $INSTALL_DIR."
   fi
   ok "cloned"
