@@ -30,7 +30,9 @@ body {
   gap: 10px;
   padding: 9px 8px;
   border-radius: 6px;
+  cursor: pointer;
 }
+.agent-row:hover { background: rgba(255,255,255,.05); }
 .status-light {
   width: 10px;
   height: 10px;
@@ -47,6 +49,56 @@ body {
 .agent-product {
   font-size: 11px;
   color: #9ca3af;
+}
+.expand-chevron {
+  margin-left: auto;
+  color: #9ca3af;
+  font-size: 11px;
+  flex: 0 0 auto;
+  transition: transform 200ms ease;
+}
+.agent-row[aria-expanded="true"] .expand-chevron { transform: rotate(90deg); }
+.agent-detail {
+  background: #0f1826;
+  border-left: 2px solid #4b5563;
+  margin: 0 8px 4px;
+  border-radius: 0 0 4px 4px;
+  overflow: hidden;
+  max-height: 0;
+  transition: max-height 200ms ease;
+}
+.agent-detail.expanded { max-height: 200px; }
+.agent-detail[data-status="on"] { border-left-color: #22c55e; }
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 10px;
+}
+.detail-row:first-child { padding-top: 8px; }
+.detail-row:last-child { padding-bottom: 8px; }
+.detail-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: #9ca3af;
+  flex: 0 0 auto;
+}
+.detail-value {
+  font-size: 13px;
+  color: #e2e8f0;
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+}
+.detail-value--journal {
+  font-size: 11px;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
 }
 .chat-shell {
   position: relative;

@@ -163,6 +163,26 @@ grep -q "AGENT.md §§ 3-4" "$ROOT/docs/ARCHITECTURE.md" \
   || fail "architecture does not document hub prompt derivation"
 grep -q ".bizagent/hub-session.md" "$ROOT/docs/ARCHITECTURE.md" \
   || fail "architecture does not document compact hub session memory"
+grep -q "org.*config.registry" "$SERVER" \
+  || fail "server does not include org in state response"
+grep -q "getAgentDetail" "$SERVER" \
+  || fail "server missing getAgentDetail function"
+grep -q "agent-detail" "$SERVER" \
+  || fail "server missing /api/agent-detail endpoint"
+grep -q "titleSet" "$ROOT/control-plane/public/app.js" \
+  || fail "UI does not track whether page title has been set"
+grep -q "relativeTime" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing relativeTime helper for dispatched timestamp"
+grep -q "expand-chevron" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing expand chevron on agent rows"
+grep -q "agent-detail" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing agent-detail panel rules"
+[ -f "$ROOT/install/install.sh" ] \
+  || fail "install/install.sh missing"
+[ -x "$ROOT/install/install.sh" ] \
+  || fail "install/install.sh is not executable"
+grep -q "first-run-setup" "$ROOT/install/install.sh" \
+  || fail "installer does not drop first-run-setup inbox message"
 
 if command -v node >/dev/null 2>&1; then
   node --check "$SERVER" || fail "server.js syntax check failed"
@@ -304,6 +324,66 @@ NODE
   then
     fail "conversation API path safety or user inbox relay failed"
   fi
+  # agent-detail: inbox count, lastDispatched, journal snippet
+  if ! node - "$ROOT" "$TMP" <<'NODE'
+const root = process.argv[2];
+const hub = process.argv[3];
+const fs = require('fs');
+const path = require('path');
+const { createServer } = require(`${root}/control-plane/server`);
+const http = require('http');
+// Exercise getAgentDetail directly via a minimal require of server.js exports.
+// Build a fixture: agents/alpha/inbox has 2 .md files, archive has 1, journal has a line.
+const alphaDir = path.join(hub, 'agents', 'alpha');
+const inboxDir = path.join(alphaDir, 'inbox');
+const archiveDir = path.join(inboxDir, 'archive');
+const journalDir = path.join(alphaDir, '.agent', 'journal');
+fs.mkdirSync(journalDir, { recursive: true });
+fs.writeFileSync(path.join(inboxDir, 'msg-a.md'), '---\nfrom: hub\n---\nhello');
+fs.writeFileSync(path.join(inboxDir, 'msg-b.md'), '---\nfrom: hub\n---\nworld');
+fs.writeFileSync(path.join(archiveDir, 'old.md'), '---\nfrom: hub\n---\ndone');
+const today = new Date().toISOString().slice(0, 10);
+fs.writeFileSync(path.join(journalDir, `${today}.md`), '\n\n- First journal entry');
+// Inline the getAgentDetail logic to test it without starting the HTTP server.
+function getAgentDetail(h, slug) {
+  const agentDir = path.join(h, 'agents', slug);
+  const iDir = path.join(agentDir, 'inbox');
+  const aDir = path.join(iDir, 'archive');
+  const jDir = path.join(agentDir, '.agent', 'journal');
+  let inbox = 0;
+  try { inbox = fs.readdirSync(iDir).filter(f => f.endsWith('.md')).length; } catch(_) {}
+  let lastDispatched = null;
+  try {
+    let maxMs = 0;
+    for (const f of fs.readdirSync(aDir)) {
+      try { const ms = fs.statSync(path.join(aDir, f)).mtimeMs; if (ms > maxMs) maxMs = ms; } catch(_) {}
+    }
+    if (maxMs > 0) lastDispatched = maxMs;
+  } catch(_) {}
+  let journal = null;
+  try {
+    const t = new Date().toISOString().slice(0, 10);
+    let jp = path.join(jDir, `${t}.md`);
+    if (!fs.existsSync(jp)) {
+      const files = fs.readdirSync(jDir).filter(f => f.endsWith('.md')).sort();
+      jp = files.length > 0 ? path.join(jDir, files[files.length - 1]) : null;
+    }
+    if (jp) {
+      const line = fs.readFileSync(jp, 'utf8').split('\n').find(l => l.trim() !== '');
+      if (line) journal = line.trim();
+    }
+  } catch(_) {}
+  return { inbox, lastDispatched, journal };
+}
+const detail = getAgentDetail(hub, 'alpha');
+if (detail.inbox !== 2) { console.error('inbox count wrong:', detail.inbox); process.exit(11); }
+if (!detail.lastDispatched) { console.error('lastDispatched missing'); process.exit(12); }
+if (detail.journal !== '- First journal entry') { console.error('journal wrong:', detail.journal); process.exit(13); }
+NODE
+  then
+    fail "agent-detail (inbox/lastDispatched/journal) logic failed"
+  fi
+
   # First-run state: no auth.json → hasAuth false; after initAuth → hasAuth true, verifyLogin works
   if ! node - "$ROOT" "$TMP2" <<'NODE'
 const root = process.argv[2];

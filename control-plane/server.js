@@ -82,7 +82,53 @@ function currentState(config) {
     ...agent,
     active: isAgentActive(config.hub, agent.slug, config.lockLeaseSecs),
   }));
-  return { agents };
+  return { agents, org: config.registry.org || '' };
+}
+
+function getAgentDetail(hub, slug) {
+  const agentDir = path.join(hub, 'agents', slug);
+  const inboxDir = path.join(agentDir, 'inbox');
+  const archiveDir = path.join(inboxDir, 'archive');
+  const journalDir = path.join(agentDir, '.agent', 'journal');
+
+  let inbox = 0;
+  try {
+    inbox = fs.readdirSync(inboxDir).filter((f) => f.endsWith('.md')).length;
+  } catch (_) {}
+
+  let lastDispatched = null;
+  try {
+    let maxMs = 0;
+    for (const f of fs.readdirSync(archiveDir)) {
+      try {
+        const ms = fs.statSync(path.join(archiveDir, f)).mtimeMs;
+        if (ms > maxMs) maxMs = ms;
+      } catch (_) {}
+    }
+    if (maxMs > 0) lastDispatched = maxMs;
+  } catch (_) {}
+
+  let journal = null;
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    let journalPath = path.join(journalDir, `${today}.md`);
+    if (!fs.existsSync(journalPath)) {
+      const files = fs.readdirSync(journalDir).filter((f) => f.endsWith('.md')).sort();
+      journalPath = files.length > 0 ? path.join(journalDir, files[files.length - 1]) : null;
+    }
+    if (journalPath) {
+      const lines = fs.readFileSync(journalPath, 'utf8').split('\n');
+      let start = 0;
+      if (lines[0] && lines[0].trim() === '---') {
+        const close = lines.findIndex((l, i) => i > 0 && l.trim() === '---');
+        if (close > 0) start = close + 1;
+      }
+      const line = lines.slice(start).find((l) => l.trim() !== '');
+      if (line) journal = line.trim();
+    }
+  } catch (_) {}
+
+  return { inbox, lastDispatched, journal };
 }
 
 function syncUserInbox(config) {
@@ -124,6 +170,12 @@ async function handleApi(config, req, res) {
   if (url.pathname === '/api/conversations' && req.method === 'POST') {
     const body = await parseBody(req);
     return send(res, 200, createConversation(config.hub, body.name));
+  }
+
+  const agentDetailMatch = url.pathname.match(/^\/api\/agent-detail\/([^/]+)$/);
+  if (agentDetailMatch && req.method === 'GET') {
+    const slug = decodeURIComponent(agentDetailMatch[1]);
+    return send(res, 200, getAgentDetail(config.hub, slug));
   }
 
   const conversationMatch = url.pathname.match(/^\/api\/conversations\/([^/]+)$/);
