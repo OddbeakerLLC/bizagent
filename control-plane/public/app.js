@@ -253,7 +253,7 @@ async function login() {
     setAuthenticated(true, `Signed in as ${username}`);
     await boot();
   } catch (err) {
-    setAuthenticated(false, err.message || 'Login failed');
+    if (!needsSetup) setAuthenticated(false, err.message || 'Login failed');
   }
 }
 
@@ -267,8 +267,8 @@ async function setup() {
   setAuthStatus('Creating login...', 'pending');
   try {
     await api('/api/setup', { method: 'POST', body: JSON.stringify({ username, password }) });
-    setSetupMode(false);
     await api('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) });
+    setSetupMode(false);
     setAuthenticated(true, `Signed in as ${username}`);
     await boot();
   } catch (err) {
@@ -277,13 +277,15 @@ async function setup() {
 }
 
 async function boot() {
+  let sessionActive = false;
   try {
     setAuthStatus('Checking session...', 'pending');
     await refreshStatus();
+    sessionActive = true;
     await loadConversations();
     setAuthenticated(true, 'Signed in');
   } catch (_err) {
-    if (!needsSetup) {
+    if (!sessionActive && !needsSetup) {
       setAuthenticated(false, 'Login required');
     }
   }
@@ -317,7 +319,6 @@ document.getElementById('composer').addEventListener('submit', async (event) => 
   });
   currentConversation = conv.id;
   await loadConversations();
-  renderMessages(conv.messages || []);
 });
 document.getElementById('messageInput').addEventListener('keydown', (event) => {
   // Shift+Enter remains the native textarea newline; Enter sends the message.
