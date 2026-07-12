@@ -43,7 +43,7 @@ function loadRuntimeConfig(hubInput) {
     || (cliFile.CLI_EXTRA_ARGS !== undefined ? cliFile.CLI_EXTRA_ARGS : cliFile.CLI_YOLO_FLAG)
     || '';
   const port = Number(process.env.BIZAGENT_PORT || (registry.settings && registry.settings.control_plane && registry.settings.control_plane.port) || 8787);
-  const host = process.env.BIZAGENT_HOST || (registry.settings && registry.settings.control_plane && registry.settings.control_plane.host) || '127.0.0.1';
+  const host = process.env.BIZAGENT_HOST || (registry.settings && registry.settings.control_plane && registry.settings.control_plane.host) || '0.0.0.0';
 
   const hubAgent = (registry.settings && registry.settings.hub_agent) || {};
   const models = (registry.settings && registry.settings.models) || {};
