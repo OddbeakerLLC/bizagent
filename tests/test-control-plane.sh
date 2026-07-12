@@ -105,6 +105,16 @@ grep -q "pollConversation" "$ROOT/control-plane/public/app.js" \
   || fail "UI does not poll conversations for user inbox replies"
 ! grep -q "renderActivity\\|refreshActivity\\|/api/activity" "$ROOT/control-plane/public/app.js" \
   || fail "UI still renders the removed Activity field"
+grep -q "setupHint" "$ROOT/control-plane/public/index.html" \
+  || fail "UI missing setup hint element for first-run state"
+grep -q "setSetupMode" "$ROOT/control-plane/public/app.js" \
+  || fail "UI does not handle first-run setup mode"
+grep -q "/api/setup" "$ROOT/control-plane/public/app.js" \
+  || fail "UI does not call setup endpoint on first run"
+grep -q "needsSetup" "$ROOT/control-plane/public/app.js" \
+  || fail "UI does not track setup-required state separately from login"
+grep -q "lastMessageCount" "$ROOT/control-plane/public/app.js" \
+  || fail "poll does not track last message count to skip unchanged renders"
 grep -q "dispatchFingerprint" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not fingerprint pending mail"
 grep -q "dispatchedAt" "$ROOT/control-plane/lib/dispatcher.js" \
@@ -161,7 +171,8 @@ if command -v node >/dev/null 2>&1; then
   done
 
   TMP="$(mktemp -d)"
-  trap 'rm -rf "$TMP"' EXIT
+  TMP2="$(mktemp -d)"
+  trap 'rm -rf "$TMP" "$TMP2"' EXIT
   mkdir -p "$TMP/agents/alpha/inbox/archive" "$TMP/agents/alpha/outbox" "$TMP/agents/beta/inbox/archive" "$TMP/agents/beta/outbox" "$TMP/outbox" "$TMP/inbox" "$TMP/logs"
   cat > "$TMP/registry.json" <<'JSON'
 {"settings":{"dispatch":{"max_concurrency":2,"lock_lease_secs":60}},"products":[{"slug":"alpha","name":"Alpha","agent_name":"Agent A","projects":[]},{"slug":"beta","name":"Beta","agent_name":"Agent B","projects":[]}]}
@@ -292,6 +303,20 @@ if (afterReject.messages.some((msg) => msg.content === 'spoofed reply')) process
 NODE
   then
     fail "conversation API path safety or user inbox relay failed"
+  fi
+  # First-run state: no auth.json → hasAuth false; after initAuth → hasAuth true, verifyLogin works
+  if ! node - "$ROOT" "$TMP2" <<'NODE'
+const root = process.argv[2];
+const hub = process.argv[3];
+const { hasAuth, initAuth, verifyLogin } = require(`${root}/control-plane/lib/auth`);
+if (hasAuth(hub)) process.exit(1);
+initAuth(hub, 'admin', 'testpass');
+if (!hasAuth(hub)) process.exit(2);
+if (!verifyLogin(hub, 'admin', 'testpass')) process.exit(3);
+if (verifyLogin(hub, 'admin', 'wrong')) process.exit(4);
+NODE
+  then
+    fail "first-run auth flow (hasAuth/initAuth/verifyLogin) failed"
   fi
 fi
 
