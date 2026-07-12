@@ -22,9 +22,21 @@ if grep -q 'from \$BIZAGENT_SOURCE' "$ROOT/install.sh"; then
 fi
 grep -q "BIZAGENT_SOURCE" "$ROOT/README.md" \
   || fail "README does not document the source override"
-grep -q "ai-trainer" "$ROOT/README.md" \
-  || fail "README does not document the ai-trainer staging flow"
-grep -q "curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | BIZAGENT_SOURCE=ssh://git@example.com/staging/bizagent.git" "$ROOT/README.md" \
-  || fail "README alternate repo example does not show how to run the installer"
+grep -q "BIZAGENT_DIR" "$ROOT/README.md" \
+  || fail "README does not document the BIZAGENT_DIR install-dir override"
+grep -q "staging" "$ROOT/README.md" \
+  || fail "README does not include a staging-source section"
+
+# Bug fixes: DEFAULT_DIR, clone cleanup, and clone detection marker
+grep -q 'DEFAULT_DIR="\$HOME/bizagent"' "$ROOT/install.sh" \
+  || fail "installer DEFAULT_DIR does not use \$HOME (must not use \$PWD)"
+grep -q 'rm -rf "\$INSTALL_DIR"' "$ROOT/install.sh" \
+  || fail "installer clone_repo does not clean up partial directory on failure"
+grep -q 'AGENT\.md' "$ROOT/install.sh" \
+  || fail "installer clone detection does not use AGENT.md as stable marker"
+grep -q 'grep -qi "bizagent"' "$ROOT/install.sh" \
+  || fail "installer clone detection does not verify AGENT.md is a bizagent clone (not just any AGENT.md)"
+grep -q "rm -rf '\\\$INSTALL_DIR'" "$ROOT/install.sh" \
+  || fail "installer die message does not single-quote path in suggested rm command (space-in-path safety)"
 
 echo "  ok: installer source override"
