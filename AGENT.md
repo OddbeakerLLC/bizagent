@@ -253,6 +253,14 @@ in `outbox/` addressed to `user` and include the same `conversation_id`; the
 control plane routes it into `user/inbox/` and relays it into the web
 conversation.
 
+**Interim messages (unbounded delays only).** Before delegating to a product
+agent, fetching a URL, or doing any work with an unbounded delay: write a brief
+outbox message first ("Dispatching to Agent B, stand by" / "Checking now" /
+"Searching the web"), then proceed and write the full response as a second
+outbox file — same `conversation_id`, the control plane routes both in order.
+Do not send interim messages for quick synthesis or file reads; the green
+activity indicator covers those.
+
 For manual repair or imports, append a hub turn directly with:
 
 ```sh
