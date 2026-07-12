@@ -2,6 +2,7 @@ let currentConversation = null;
 let needsSetup = false;
 let lastMessageCount = 0;
 let lastAgentsJson = '';
+let titleSet = false;
 
 function setAuthStatus(message, kind = 'neutral') {
   const status = document.getElementById('authStatus');
@@ -57,15 +58,45 @@ async function api(path, options = {}) {
   return res.json();
 }
 
+function relativeTime(ms) {
+  const diff = Date.now() - ms;
+  const m = Math.round(diff / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+function makeDetailRow(label, field, isJournal) {
+  const dr = document.createElement('div');
+  dr.className = isJournal ? 'detail-row detail-row--journal' : 'detail-row';
+  const lbl = document.createElement('span');
+  lbl.className = 'detail-label';
+  lbl.textContent = label;
+  const val = document.createElement('span');
+  val.className = isJournal ? 'detail-value detail-value--journal' : 'detail-value';
+  val.dataset.field = field;
+  val.textContent = '—';
+  dr.appendChild(lbl);
+  dr.appendChild(val);
+  return dr;
+}
+
 function renderAgents(agents) {
   const root = document.getElementById('agents');
   root.innerHTML = '';
   agents.forEach((agent) => {
     const row = document.createElement('div');
     row.className = 'agent-row';
+    row.setAttribute('role', 'button');
+    row.setAttribute('aria-expanded', 'false');
+    row.tabIndex = 0;
+
     const light = document.createElement('span');
     light.className = `status-light ${agent.hasMail ? 'on' : ''}`;
-    const labels = document.createElement('span');
+
+    const labels = document.createElement('div');
     labels.className = 'agent-labels';
     const name = document.createElement('span');
     name.className = 'agent-name';
@@ -77,9 +108,50 @@ function renderAgents(agents) {
       product.textContent = agent.name;
       labels.appendChild(product);
     }
+
+    const chevron = document.createElement('span');
+    chevron.className = 'expand-chevron';
+    chevron.textContent = '▸';
+    chevron.setAttribute('aria-hidden', 'true');
+
     row.appendChild(light);
     row.appendChild(labels);
+    row.appendChild(chevron);
+
+    const detail = document.createElement('div');
+    detail.className = 'agent-detail';
+    detail.dataset.status = agent.hasMail ? 'on' : '';
+    detail.appendChild(makeDetailRow('INBOX', 'inbox', false));
+    detail.appendChild(makeDetailRow('DISPATCHED', 'lastDispatched', false));
+    detail.appendChild(makeDetailRow('JOURNAL', 'journal', true));
+
+    let loaded = false;
+    const toggle = () => {
+      const expanded = row.getAttribute('aria-expanded') === 'true';
+      row.setAttribute('aria-expanded', String(!expanded));
+      detail.classList.toggle('expanded', !expanded);
+      if (!expanded && !loaded) {
+        loaded = true;
+        detail.querySelector('[data-field="inbox"]').textContent = 'Loading…';
+        api(`/api/agent-detail/${encodeURIComponent(agent.slug)}`).then((data) => {
+          detail.querySelector('[data-field="inbox"]').textContent =
+            data.inbox > 0 ? String(data.inbox) : '—';
+          detail.querySelector('[data-field="lastDispatched"]').textContent =
+            data.lastDispatched ? relativeTime(data.lastDispatched) : '—';
+          detail.querySelector('[data-field="journal"]').textContent =
+            data.journal || '—';
+        }).catch(() => {
+          detail.querySelector('[data-field="inbox"]').textContent = '—';
+        });
+      }
+    };
+    row.addEventListener('click', toggle);
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+
     root.appendChild(row);
+    root.appendChild(detail);
   });
 }
 
@@ -229,6 +301,10 @@ async function loadConversation(id) {
 
 async function refreshStatus() {
   const state = await api('/api/state');
+  if (!titleSet && state.org) {
+    document.title = `BizAgent — ${state.org}`;
+    titleSet = true;
+  }
   const json = JSON.stringify(state.agents);
   if (json === lastAgentsJson) return;
   lastAgentsJson = json;
