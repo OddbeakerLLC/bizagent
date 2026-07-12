@@ -40,7 +40,7 @@ function deriveHubRuntimePrompt(hub) {
     '',
     `Before responding to the operator, read ${sessionRel}. Treat it as the current chat session memory: a compact rolling summary plus the recent turns needed for continuity.`,
     'Keep that file compact. Compress older turns into the rolling summary, retain only recent turns verbatim, and start a new session when the operator changes topic or explicitly begins a new conversation.',
-    'Console-originated inbox messages include a conversation_id frontmatter field. After you finish the operator-visible response or delegation summary, append that hub turn with: node scripts/bizagent-control-plane.js append-hub-turn --conversation <conversation_id> --content-file <path-to-response-markdown>.',
+    'Console-originated inbox messages include a conversation_id frontmatter field. After you finish the operator-visible response or delegation summary, write it as a new markdown message in outbox/ addressed to user and include the same conversation_id so the control plane can relay it into the web conversation.',
     '',
   ].join('\n');
 }

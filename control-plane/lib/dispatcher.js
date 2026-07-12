@@ -40,6 +40,66 @@ function lockDir(hub, slug) {
   return path.join(hub, 'agents', slug, '.lock');
 }
 
+function dispatchStateFile(hub, slug) {
+  return path.join(appDir(hub), 'dispatch-state', `${slug}.json`);
+}
+
+function dispatchFingerprint(file) {
+  const stat = fs.statSync(file);
+  return {
+    file: path.basename(file),
+    size: stat.size,
+    mtimeMs: Math.floor(stat.mtimeMs),
+  };
+}
+
+function readDispatchState(hub, slug) {
+  try {
+    const state = JSON.parse(fs.readFileSync(dispatchStateFile(hub, slug), 'utf8'));
+    return Array.isArray(state.handled) ? state.handled : [];
+  } catch (_err) {
+    return [];
+  }
+}
+
+function sameFingerprint(left, right) {
+  return left.file === right.file && left.size === right.size && left.mtimeMs === right.mtimeMs;
+}
+
+function dispatchRetrySecs(config) {
+  return Math.max(1, Math.min(60, Number(config.lockLeaseSecs || 60)));
+}
+
+function activeDispatchMarker(item, fingerprint, now, retrySecs) {
+  const dispatchedAt = Number(item.dispatchedAt || 0);
+  return sameFingerprint(item, fingerprint) && dispatchedAt > 0 && now - dispatchedAt < retrySecs;
+}
+
+function pendingUndispatchedMail(hub, slug, retrySecs = 0) {
+  const handled = readDispatchState(hub, slug);
+  const now = Math.floor(Date.now() / 1000);
+  return pendingMail(hub, slug).filter((file) => {
+    const fingerprint = dispatchFingerprint(file);
+    return !handled.some((item) => activeDispatchMarker(item, fingerprint, now, retrySecs));
+  });
+}
+
+function markMailDispatched(hub, slug, files, retrySecs = 0) {
+  const target = dispatchStateFile(hub, slug);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const handled = readDispatchState(hub, slug);
+  const now = Math.floor(Date.now() / 1000);
+  const mailDir = path.dirname(files[0] || '');
+  const next = handled.filter((item) => (
+    fs.existsSync(path.join(mailDir, item.file)) && Number(item.dispatchedAt || 0) > now - retrySecs
+  ));
+  for (const file of files) {
+    const fingerprint = dispatchFingerprint(file);
+    if (!next.some((item) => sameFingerprint(item, fingerprint))) next.push({ ...fingerprint, dispatchedAt: now });
+  }
+  fs.writeFileSync(target, JSON.stringify({ handled: next.slice(-200) }, null, 2));
+}
+
 function lockAgeSecs(lock) {
   const startFile = path.join(lock, 'start');
   const now = Math.floor(Date.now() / 1000);
@@ -180,11 +240,14 @@ function dispatchPendingAgents(config) {
   let launched = 0;
   let skippedLocked = 0;
   let skippedCap = 0;
+  const retrySecs = dispatchRetrySecs(config);
 
-  if (pendingMail(config.hub, 'hub').length > 0) {
+  const hubNew = pendingUndispatchedMail(config.hub, 'hub', retrySecs);
+  if (hubNew.length > 0) {
     if (running >= config.maxConcurrency) {
       skippedCap += 1;
     } else if (tryLock(config.hub, 'hub', config.lockLeaseSecs)) {
+      markMailDispatched(config.hub, 'hub', hubNew, retrySecs);
       launchHub(config);
       launched += 1;
       running += 1;
@@ -194,13 +257,18 @@ function dispatchPendingAgents(config) {
   }
 
   for (const agent of agents) {
-    const pending = pendingMail(config.hub, agent.slug).length;
-    if (pending === 0) continue;
+    const pending = pendingMail(config.hub, agent.slug);
+    if (pending.length === 0) continue;
+    const fresh = pendingUndispatchedMail(config.hub, agent.slug, retrySecs);
+    if (fresh.length === 0) {
+      continue;
+    }
     if (running >= config.maxConcurrency) {
       skippedCap += 1;
       continue;
     }
     if (tryLock(config.hub, agent.slug, config.lockLeaseSecs)) {
+      markMailDispatched(config.hub, agent.slug, fresh, retrySecs);
       launchAgent(config, agent.slug);
       launched += 1;
       running += 1;
@@ -209,18 +277,19 @@ function dispatchPendingAgents(config) {
     }
   }
 
-  if (launched || skippedLocked || skippedCap) {
-    appendLog(config.hub, `dispatch tick launched=${launched} skipped_locked=${skippedLocked} skipped_cap=${skippedCap}`);
-  }
   return { launched, skippedLocked, skippedCap, running };
 }
 
 module.exports = {
   dispatchPendingAgents,
+  dispatchFingerprint,
+  dispatchRetrySecs,
   ensureDispatchPrompt,
   isAgentActive,
   launchHub,
   liveRunCount,
+  markMailDispatched,
+  pendingUndispatchedMail,
   promptFileFor,
   tryLock,
 };
