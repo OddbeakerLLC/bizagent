@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { agentsFromRegistry, loadRegistry } = require('./config');
+const { recordUserInboxDelivery, userInbox } = require('./conversations');
 const { appendLog } = require('./log');
 
 function frontmatterValue(text, key) {
@@ -9,11 +10,12 @@ function frontmatterValue(text, key) {
 }
 
 function inboxFor(hub, slug) {
+  if (slug === 'user') return userInbox(hub);
   return slug === 'hub' ? path.join(hub, 'inbox') : path.join(hub, 'agents', slug, 'inbox');
 }
 
 function recipientSlugs(hub) {
-  return new Set(['hub', ...agentsFromRegistry(loadRegistry(hub)).map((agent) => agent.slug)]);
+  return new Set(['hub', 'user', ...agentsFromRegistry(loadRegistry(hub)).map((agent) => agent.slug)]);
 }
 
 function safeInboxFor(hub, slug) {
@@ -36,6 +38,10 @@ function outboxes(hub) {
     }
   }
   return boxes;
+}
+
+function canRouteToUser(hub, outbox) {
+  return path.resolve(outbox) === path.resolve(path.join(hub, 'outbox'));
 }
 
 function markdownFiles(dir) {
@@ -69,6 +75,11 @@ function routeOutboxes(hub) {
     for (const file of markdownFiles(outbox)) {
       const text = fs.readFileSync(file, 'utf8');
       const to = frontmatterValue(text, 'to');
+      if (to === 'user' && !canRouteToUser(hub, outbox)) {
+        warnings += 1;
+        appendLog(hub, `WARN user recipient is only allowed from hub outbox in ${path.basename(file)}`);
+        continue;
+      }
       if (!to) {
         warnings += 1;
         appendLog(hub, `WARN no to field in ${path.basename(file)}`);
@@ -76,11 +87,15 @@ function routeOutboxes(hub) {
       }
       const dest = safeInboxFor(hub, to);
       if (!dest || !fs.existsSync(dest)) {
+        if (to === 'user' && dest) fs.mkdirSync(dest, { recursive: true });
+      }
+      if (!dest || !fs.existsSync(dest)) {
         warnings += 1;
         appendLog(hub, `WARN unknown recipient ${to} in ${path.basename(file)}`);
         continue;
       }
-      writeFileUnique(dest, path.basename(file), file);
+      const deliveredFile = writeFileUnique(dest, path.basename(file), file);
+      if (to === 'user') recordUserInboxDelivery(hub, deliveredFile);
       delivered += 1;
       appendLog(hub, `routed ${path.basename(file)} -> ${to}`);
     }
@@ -102,6 +117,7 @@ function agentMailStatus(hub, agents) {
 
 module.exports = {
   agentMailStatus,
+  canRouteToUser,
   frontmatterValue,
   inboxFor,
   pendingMail,

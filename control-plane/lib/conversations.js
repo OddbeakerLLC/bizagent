@@ -7,9 +7,14 @@ const MAX_STORED_MESSAGES = 48;
 const KEEP_RECENT_MESSAGES = 24;
 const MAX_SUMMARY_CHARS = 6000;
 const VALID_CONVERSATION_ID = /^\d{4}-\d{2}-\d{2}-[a-z0-9-]+-[a-f0-9]{6}$/;
+const userInboxDeliveries = new Map();
 
 function conversationsDir(hub) {
   return path.join(appDir(hub), 'conversations');
+}
+
+function userInbox(hub) {
+  return path.join(hub, 'user', 'inbox');
 }
 
 function slugify(value) {
@@ -139,6 +144,77 @@ function writeHubInboxMessage(hub, content, conversationId) {
   return writeFileUnique(path.join(hub, 'inbox'), `${date}-operator-console-message-${stamp}`, `${header}\n\n${content}\n`);
 }
 
+function frontmatterValue(text, key) {
+  const match = text.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, 'm'));
+  return match ? match[1].trim() : '';
+}
+
+function userInboxFingerprint(file) {
+  const stat = fs.statSync(file);
+  return {
+    file: path.basename(file),
+    size: stat.size,
+    mtimeMs: Math.floor(stat.mtimeMs),
+  };
+}
+
+function sameUserInboxFingerprint(left, right) {
+  return left.file === right.file && left.size === right.size && left.mtimeMs === right.mtimeMs;
+}
+
+function userInboxDeliveryKey(hub) {
+  return path.resolve(hub);
+}
+
+function recordUserInboxDelivery(hub, file) {
+  const key = userInboxDeliveryKey(hub);
+  const delivered = (userInboxDeliveries.get(key) || [])
+    .filter((item) => fs.existsSync(path.join(userInbox(hub), item.file)));
+  const fingerprint = userInboxFingerprint(file);
+  if (!delivered.some((item) => sameUserInboxFingerprint(item, fingerprint))) {
+    delivered.push(fingerprint);
+  }
+  userInboxDeliveries.set(key, delivered.slice(-200));
+}
+
+function wasUserInboxDelivered(hub, file) {
+  const fingerprint = userInboxFingerprint(file);
+  return (userInboxDeliveries.get(userInboxDeliveryKey(hub)) || [])
+    .some((item) => sameUserInboxFingerprint(item, fingerprint));
+}
+
+function markdownBody(text) {
+  const match = String(text || '').match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?([\s\S]*)$/);
+  return (match ? match[1] : text).trim();
+}
+
+function archiveUserInboxMessage(hub, file) {
+  const archive = path.join(userInbox(hub), 'archive');
+  ensureDir(archive);
+  fs.renameSync(file, path.join(archive, path.basename(file)));
+}
+
+function readUserInboxMessages(hub) {
+  const inbox = userInbox(hub);
+  ensureDir(inbox);
+  ensureDir(path.join(inbox, 'archive'));
+  let relayed = 0;
+  for (const name of fs.readdirSync(inbox).filter((entry) => entry.endsWith('.md')).sort()) {
+    const file = path.join(inbox, name);
+    const text = fs.readFileSync(file, 'utf8');
+    const from = frontmatterValue(text, 'from');
+    const conversationId = frontmatterValue(text, 'conversation_id');
+    if (!wasUserInboxDelivered(hub, file) || from !== 'hub' || !conversationId || !getConversation(hub, conversationId)) {
+      archiveUserInboxMessage(hub, file);
+      continue;
+    }
+    appendMessage(hub, conversationId, 'hub', markdownBody(text));
+    archiveUserInboxMessage(hub, file);
+    relayed += 1;
+  }
+  return relayed;
+}
+
 module.exports = {
   appendMessage,
   assertValidConversationId,
@@ -146,8 +222,11 @@ module.exports = {
   createConversation,
   getConversation,
   listConversations,
+  readUserInboxMessages,
+  recordUserInboxDelivery,
   shouldStartNewConversation,
   safeConversationFile,
+  userInbox,
   writeFileUnique,
   writeHubInboxMessage,
 };

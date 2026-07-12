@@ -9,6 +9,7 @@ const {
   createConversation,
   getConversation,
   listConversations,
+  readUserInboxMessages,
   shouldStartNewConversation,
   writeHubInboxMessage,
 } = require('./lib/conversations');
@@ -71,12 +72,21 @@ function requireAuth(config, req, res) {
   return true;
 }
 
+function hubAgentEntry(registry) {
+  const hub = registry.hub || {};
+  return { slug: 'hub', name: hub.name || 'hub', agentName: hub.agent_name || hub.name || 'PTL' };
+}
+
 function currentState(config) {
-  const agents = agentMailStatus(config.hub, agentsFromRegistry(config.registry)).map((agent) => ({
+  const agents = agentMailStatus(config.hub, [hubAgentEntry(config.registry), ...agentsFromRegistry(config.registry)]).map((agent) => ({
     ...agent,
     active: isAgentActive(config.hub, agent.slug, config.lockLeaseSecs),
   }));
   return { agents };
+}
+
+function syncUserInbox(config) {
+  return readUserInboxMessages(config.hub);
 }
 
 async function handleApi(config, req, res) {
@@ -140,6 +150,7 @@ async function handleApi(config, req, res) {
 
 function runTick(config) {
   routeOutboxes(config.hub);
+  syncUserInbox(config);
   dispatchPendingAgents(config);
 }
 
@@ -158,7 +169,7 @@ function start(hubInput) {
   const server = createServer(config);
   ensureHubRuntimePrompt(config.hub);
   runTick(config);
-  setInterval(() => runTick(config), 6000);
+  setInterval(() => runTick(config), 2000);
   server.listen(config.port, config.host, () => {
     appendLog(config.hub, `bizagent-control-plane listening on http://${config.host}:${config.port}`);
     console.log(`bizagent-control-plane listening on http://${config.host}:${config.port}`);

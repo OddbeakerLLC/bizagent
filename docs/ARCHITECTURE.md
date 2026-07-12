@@ -20,11 +20,12 @@ and aggregates journals into a "big picture" on request.
 
 A deliberate split:
 
-- **Mailboxes are per agent**, and live in the hub: `inbox/` and `outbox/` at
-  the hub root for the hub itself, and `agents/<slug>/inbox` + `outbox` for
-  each product agent. Messages are addressed agent-to-agent, so the mailbox
-  belongs with the agent. This removes any ambiguity about *where* a message
-  addressed to a multi-repo product should land.
+- **Mailboxes are per recipient**, and live in the hub: `inbox/` and `outbox/`
+  at the hub root for the hub itself, `user/inbox` for browser-visible replies,
+  and `agents/<slug>/inbox` + `outbox` for each product agent. Messages are
+  addressed to known recipient slugs, so the mailbox belongs with the recipient.
+  This removes any ambiguity about *where* a message addressed to a multi-repo
+  product should land.
 - **Journals and sitemaps are per project**, and live in each project repo:
   `.agent/journal/` and a root `sitemap.md`. These describe a specific
   codebase, so they belong with that codebase and travel with it.
@@ -50,8 +51,9 @@ The nightly run remains, but only for housekeeping.
 
 `scripts/bizagent-control-plane.js serve` runs a local Node.js server. It hosts
 the web UI, requires login for UI/API access, polls inboxes every 6 seconds,
-routes queued outbox mail, updates agent mail status, launches the hub when
-`inbox/*.md` has pending mail, and launches product agents with pending mail.
+routes queued outbox mail, relays `user/inbox/*.md` replies into web
+conversations, updates agent mail status, launches the hub when `inbox/*.md`
+has pending mail, and launches product agents with pending mail.
 Install it as a systemd user service with
 `scripts/install-control-plane.sh`.
 
@@ -64,7 +66,8 @@ other's service file.
 
 The server does not replace the hub filesystem with a database:
 
-- Mailboxes still live at `inbox/`, `outbox/`, and `agents/<slug>/...`.
+- Mailboxes still live at `inbox/`, `outbox/`, `user/inbox/`, and
+  `agents/<slug>/...`.
 - The hub runtime prompt lives in `.bizagent/prompts/hub.md`, generated from
   `AGENT.md §§ 3-4`. Runtime hub launches read that compact prompt file instead
   of the whole setup manual.
@@ -76,9 +79,12 @@ The server does not replace the hub filesystem with a database:
   summary, and a new session file starts when the operator changes topic or
   explicitly creates a new conversation.
 - Console-originated hub inbox messages carry `conversation_id`. The launched
-  hub appends its operator-visible response or delegation summary back to the
-  same session with `scripts/bizagent-control-plane.js append-hub-turn`, which
-  refreshes `.bizagent/hub-session.md`.
+  hub sends its operator-visible response or delegation summary as a markdown
+  file in `outbox/` addressed to `user` with the same `conversation_id`; the
+  router delivers it to `user/inbox/`, and the server relays it into the same
+  web conversation. Only the hub root `outbox/` may address `user`; product
+  agents still report to the hub. `scripts/bizagent-control-plane.js
+  append-hub-turn` remains available for manual repair/imports.
 - Login config and salted password hash live in `.bizagent/auth.json`.
 - Sessions live in `.bizagent/sessions.json` and are deleted on logout.
 - Named conversation history lives as JSON files under `.bizagent/conversations/`.
@@ -117,10 +123,11 @@ variables. The control plane launches the configured CLI command with
 Plain markdown files moved between directories — no database, no broker. Each
 message carries a small `from / to / date / subject` header and a plain-English
 body kept as terse as the content allows. The control plane reads the `to:` slug
-and moves the file to that agent's inbox. An actioned message is moved to
-`inbox/archive/` by the agent that handled it; one left *unactioned* past the
-configured threshold is auto-archived by the nightly run as cleanup. Replies are
-new files — there are no threads.
+and moves the file to that recipient's inbox. An actioned message is moved to
+`inbox/archive/` by the agent that handled it; user reply messages are archived
+by the server after relay into the matching conversation. One left *unactioned*
+past the configured threshold is auto-archived by the nightly run as cleanup.
+Replies are new files — there are no threads.
 
 File-based messaging was chosen over a database or git-commit log because it is
 trivially auditable (every message is a file you can open), needs no

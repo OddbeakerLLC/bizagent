@@ -153,8 +153,11 @@ BizAgent includes a local Node.js control plane:
 - named conversations with file-backed history
 - compact hub session memory in markdown
 - an agent rail with mail status lights
-- inbox polling every 6 seconds
+- inbox polling every 2 seconds
+- dispatch fingerprints so the same inbox file does not relaunch an agent on every poll
 - outbox routing
+- meaningful server activity logs in `logs/control-plane.log`
+- a `user/inbox` reply mailbox relayed back into web conversations
 - hub launches from the generated `.bizagent/prompts/hub.md` prompt
 - parallel agent launches with one live instance per agent
 
@@ -170,6 +173,14 @@ Then run it directly:
 node scripts/bizagent-control-plane.js serve
 ```
 
+Or use the local start/stop wrapper:
+
+```sh
+scripts/control-plane.sh start
+scripts/control-plane.sh status
+scripts/control-plane.sh stop
+```
+
 Or install the systemd user service:
 
 ```sh
@@ -180,17 +191,20 @@ systemctl --user enable --now bizagent-control-plane-<instance>.service
 ```
 
 The server uses the existing file layout as its source of truth. Mail stays in
-`inbox/`, `outbox/`, and `agents/<slug>/...`; conversations and sessions live
-under `.bizagent/`; the hub runtime prompt is generated at
+`inbox/`, `outbox/`, `user/inbox/`, and `agents/<slug>/...`; conversations and
+sessions live under `.bizagent/`; the hub runtime prompt is generated at
 `.bizagent/prompts/hub.md`; current hub memory is kept compact in
 `.bizagent/hub-session.md`; older UI history is summarized instead of kept as
 an unbounded transcript; agent launches read `agents/<slug>/.dispatch.md`. The legacy
 `router.sh`, `bizagent-dispatch.sh`, and `bizagent-watch.sh` names remain only
 as compatibility wrappers around the Node control plane.
 
-Hub messages sent from the web UI include a `conversation_id`; the hub records
-its visible response back into that session with
-`node scripts/bizagent-control-plane.js append-hub-turn --conversation <id> --content-file <file>`.
+Hub messages sent from the web UI include a `conversation_id`; the hub sends
+visible replies as markdown files in `outbox/` addressed to `user` with that
+same `conversation_id`. The router delivers them to `user/inbox/`, and the
+server relays them into the matching web conversation. Only the hub root outbox
+may address `user`; product agents still reply through the hub. For manual
+repair, use `node scripts/bizagent-control-plane.js append-hub-turn --conversation <id> --content-file <file>`.
 
 Multiple BizAgent hubs can run on one machine. Set
 `settings.control_plane.port` in each hub's `registry.json`, or install with

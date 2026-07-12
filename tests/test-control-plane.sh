@@ -25,7 +25,7 @@ grep -q "agents/.*/.dispatch.md" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not launch from agents/<slug>/.dispatch.md"
 grep -q "launchHub" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not launch the hub runtime prompt"
-grep -q "pendingMail(config.hub, 'hub')" "$ROOT/control-plane/lib/dispatcher.js" \
+grep -q "pendingUndispatchedMail(config.hub, 'hub'" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not watch the hub inbox"
 grep -q "deriveHubRuntimePrompt" "$ROOT/control-plane/lib/hub-memory.js" \
   || fail "hub runtime prompt is not derived from AGENT.md sections"
@@ -43,8 +43,20 @@ grep -q "safeConversationFile" "$ROOT/control-plane/lib/conversations.js" \
   || fail "conversation file paths are not constrained to the conversations dir"
 grep -q "conversation_id" "$ROOT/control-plane/lib/conversations.js" \
   || fail "hub inbox messages do not identify their conversation"
+grep -q "userInbox" "$ROOT/control-plane/lib/conversations.js" \
+  || fail "control plane does not define a user inbox"
+grep -q "readUserInboxMessages" "$ROOT/control-plane/lib/conversations.js" \
+  || fail "control plane does not relay user inbox messages into conversations"
+grep -q "recordUserInboxDelivery" "$ROOT/control-plane/lib/conversations.js" \
+  || fail "control plane does not track router-delivered user inbox messages"
+! grep -q "user-inbox-deliveries" "$ROOT/control-plane/lib/conversations.js" \
+  || fail "user inbox delivery markers are still forgeable filesystem state"
 grep -q "recipientSlugs" "$ROOT/control-plane/lib/mail.js" \
   || fail "router does not validate recipients against registry slugs"
+grep -q "'user'" "$ROOT/control-plane/lib/mail.js" \
+  || fail "router does not accept user as a message recipient"
+grep -q "canRouteToUser" "$ROOT/control-plane/lib/mail.js" \
+  || fail "router does not restrict user replies to the hub outbox"
 grep -q "writeFileUnique" "$ROOT/control-plane/lib/mail.js" \
   || fail "router delivery is not collision-safe"
 grep -q "safeInboxFor" "$ROOT/control-plane/lib/mail.js" \
@@ -57,16 +69,62 @@ grep -q "setInterval(.*6000" "$SERVER" \
   || fail "server does not poll every 6 seconds"
 grep -q "routeOutboxes" "$SERVER" \
   || fail "server does not route mail"
+! grep -q "route result delivered=" "$SERVER" \
+  || fail "server still emits noisy route summary logs"
+grep -q "syncUserInbox" "$SERVER" \
+  || fail "server does not relay user inbox replies into conversations"
+grep -q "runTick(config)" "$SERVER" \
+  || fail "server does not visibly route/dispatch after user messages"
 grep -q "dispatchPendingAgents" "$SERVER" \
   || fail "server does not dispatch pending agents"
 grep -q "isAgentActive" "$SERVER" \
   || fail "server does not update agent active state"
+! grep -q "/api/activity" "$SERVER" \
+  || fail "server still exposes the removed UI activity endpoint"
 grep -q "fixed-composer" "$ROOT/control-plane/public/index.html" \
   || fail "UI missing fixed composer"
 grep -q "agent-rail" "$ROOT/control-plane/public/index.html" \
   || fail "UI missing agent rail"
+grep -q "conversationMenu" "$ROOT/control-plane/public/index.html" \
+  || fail "UI missing clear conversation selector"
+grep -q "authStatus" "$ROOT/control-plane/public/index.html" \
+  || fail "UI missing visible auth status"
+! grep -q "activityLog\\|Activity" "$ROOT/control-plane/public/index.html" \
+  || fail "UI still exposes the removed Activity field"
 grep -q "status-light" "$ROOT/control-plane/public/app.js" \
   || fail "UI missing agent mail status light"
+grep -q "Shift.*Enter" "$ROOT/control-plane/public/app.js" \
+  || fail "composer does not document Shift+Enter newline behavior"
+grep -q "messageInput.*keydown" "$ROOT/control-plane/public/app.js" \
+  || fail "Enter does not send messages from the composer"
+grep -q "setAuthStatus" "$ROOT/control-plane/public/app.js" \
+  || fail "login feedback is not immediate and visible"
+grep -q "Credentials were not accepted" "$ROOT/control-plane/public/app.js" \
+  || fail "failed login feedback is not human-readable"
+grep -q "pollConversation" "$ROOT/control-plane/public/app.js" \
+  || fail "UI does not poll conversations for user inbox replies"
+! grep -q "renderActivity\\|refreshActivity\\|/api/activity" "$ROOT/control-plane/public/app.js" \
+  || fail "UI still renders the removed Activity field"
+grep -q "dispatchFingerprint" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher does not fingerprint pending mail"
+grep -q "dispatchedAt" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher dispatch markers are not time-limited"
+grep -q "dispatchRetrySecs" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher does not retry marked mail after a launch failure window"
+grep -q "Math.min(60" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher can suppress failed launches for the full lock lease"
+grep -q "pendingUndispatchedMail" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher does not distinguish new mail from already-dispatched mail"
+grep -q "markMailDispatched" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher does not mark inbox mail as handled for dispatch"
+! grep -q "skipped_handled" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher still logs repeated already-handled inbox items"
+grep -q "control-plane.sh" "$ROOT/README.md" \
+  || fail "README does not document easy start/stop control-plane command"
+[ -x "$ROOT/scripts/control-plane.sh" ] \
+  || fail "easy start/stop script missing or not executable"
+grep -q "serve --hub" "$ROOT/scripts/control-plane.sh" \
+  || fail "start/stop script does not pass the hub path through the control-plane CLI"
 grep -q "control-plane" "$ROOT/scripts/router.sh" \
   || fail "router.sh is not a control-plane wrapper"
 grep -q "control-plane" "$ROOT/scripts/bizagent-dispatch.sh" \
@@ -122,6 +180,36 @@ MSG
   [ -f "$TMP/agents/beta/inbox/2026-07-09-alpha-beta.md" ] \
     || fail "route-once did not deliver alpha -> beta"
 
+  cat > "$TMP/outbox/2026-07-09-hub-user.md" <<'MSG'
+---
+from: hub
+to: user
+date: 2026-07-09
+subject: reply
+conversation_id: 2026-07-09-main-abcdef
+---
+visible reply
+MSG
+  node "$ROOT/scripts/bizagent-control-plane.js" route-once --hub "$TMP" >/dev/null \
+    || fail "route-once failed for hub -> user"
+  [ -f "$TMP/user/inbox/2026-07-09-hub-user.md" ] \
+    || fail "route-once did not deliver hub -> user"
+
+  cat > "$TMP/agents/alpha/outbox/2026-07-09-alpha-user.md" <<'MSG'
+---
+from: alpha
+to: user
+date: 2026-07-09
+subject: bad user route
+conversation_id: 2026-07-09-main-abcdef
+---
+agent bypass
+MSG
+  node "$ROOT/scripts/bizagent-control-plane.js" route-once --hub "$TMP" >/dev/null \
+    || fail "route-once rejected agent -> user with non-zero status"
+  [ -f "$TMP/agents/alpha/outbox/2026-07-09-alpha-user.md" ] \
+    || fail "route-once allowed agent outbox to deliver directly to user"
+
   cat > "$TMP/agents/alpha/outbox/2026-07-09-alpha-traverse.md" <<'MSG'
 ---
 from: alpha
@@ -142,11 +230,68 @@ MSG
   if ! node - "$ROOT" "$TMP" <<'NODE'
 const root = process.argv[2];
 const hub = process.argv[3];
-const { getConversation } = require(`${root}/control-plane/lib/conversations`);
+const fs = require('fs');
+const path = require('path');
+const { routeOutboxes } = require(`${root}/control-plane/lib/mail`);
+const {
+  createConversation,
+  getConversation,
+  readUserInboxMessages,
+  userInbox,
+} = require(`${root}/control-plane/lib/conversations`);
 if (getConversation(hub, '../auth') !== null) process.exit(1);
+fs.rmSync(userInbox(hub), { recursive: true, force: true });
+fs.mkdirSync(userInbox(hub), { recursive: true });
+const conv = createConversation(hub, 'Relay Test');
+fs.writeFileSync(path.join(userInbox(hub), '2026-07-09-direct-hub-user.md'), `---
+from: hub
+to: user
+date: 2026-07-09
+subject: reply
+conversation_id: ${conv.id}
+---
+
+hello from hub
+`);
+let relayed = readUserInboxMessages(hub);
+if (relayed !== 0) process.exit(2);
+let afterDirect = getConversation(hub, conv.id);
+if (afterDirect.messages.some((msg) => msg.content === 'hello from hub')) process.exit(3);
+fs.writeFileSync(path.join(hub, 'outbox', '2026-07-09-hub-user.md'), `---
+from: hub
+to: user
+date: 2026-07-09
+subject: reply
+conversation_id: ${conv.id}
+---
+
+hello from hub
+`);
+const routed = routeOutboxes(hub);
+if (routed.delivered !== 1) process.exit(4);
+relayed = readUserInboxMessages(hub);
+if (relayed !== 1) process.exit(5);
+const updated = getConversation(hub, conv.id);
+if (!updated.messages.some((msg) => msg.role === 'hub' && msg.content === 'hello from hub')) process.exit(6);
+if (fs.existsSync(path.join(userInbox(hub), '2026-07-09-hub-user.md'))) process.exit(7);
+if (!fs.existsSync(path.join(userInbox(hub), 'archive', '2026-07-09-hub-user.md'))) process.exit(8);
+fs.writeFileSync(path.join(userInbox(hub), '2026-07-09-alpha-user.md'), `---
+from: alpha
+to: user
+date: 2026-07-09
+subject: spoof
+conversation_id: ${conv.id}
+---
+
+spoofed reply
+`);
+const rejected = readUserInboxMessages(hub);
+if (rejected !== 0) process.exit(9);
+const afterReject = getConversation(hub, conv.id);
+if (afterReject.messages.some((msg) => msg.content === 'spoofed reply')) process.exit(10);
 NODE
   then
-    fail "conversation API accepts path traversal ids"
+    fail "conversation API path safety or user inbox relay failed"
   fi
 fi
 

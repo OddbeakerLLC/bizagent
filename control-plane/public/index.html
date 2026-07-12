@@ -14,9 +14,15 @@
     </aside>
     <section class="chat-shell">
       <header class="topbar">
-        <select id="conversationSelect" aria-label="Conversation"></select>
-        <button id="newConversation" type="button">New</button>
-        <button id="logout" type="button">Logout</button>
+        <div id="conversationMenu" class="conversation-menu">
+          <label for="conversationSelect">Conversation</label>
+          <select id="conversationSelect"></select>
+          <button id="newConversation" type="button" title="New conversation" aria-label="New conversation">+</button>
+        </div>
+        <div class="auth-controls">
+          <span id="authStatus" class="auth-status">Checking session...</span>
+          <button id="logout" type="button" hidden>Logout</button>
+        </div>
       </header>
       <div id="authPanel" class="auth-panel" hidden>
         <input id="username" autocomplete="username" placeholder="Username">

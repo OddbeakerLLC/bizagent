@@ -112,8 +112,8 @@ once exposed an operator's private data publicly — don't repeat it.)
 1. **Write `registry.json`.** Use the schema in `registry.example.json`,
    populated from the interview answers. Include the `agent_name` confirmed
    in step 3 of the interview on each product entry.
-2. **Create the hub mailbox:** `inbox/`, `inbox/archive/`, `outbox/`,
-   `journal/`, `logs/`.
+2. **Create the hub and user mailboxes:** `inbox/`, `inbox/archive/`, `outbox/`,
+   `user/inbox/archive/`, `journal/`, `logs/`.
 3. **Create one agent per product:** for each product, make
    `agents/<slug>/agent.md`, `agents/<slug>/.dispatch.md`,
    `agents/<slug>/inbox/archive/`, and `agents/<slug>/outbox/`. Fill
@@ -179,7 +179,7 @@ once exposed an operator's private data publicly — don't repeat it.)
       can manually check your inbox by running `ls inbox/`."
 11. **Offer the control-plane service (recommended).** The Node control plane
     is what hosts the local UI, routes outbox mail, and launches agents with
-    pending inbox mail every 6 seconds. Installing it is a **deliberate,
+    pending inbox mail every 2 seconds. Installing it is a **deliberate,
     opt-in** step — never enable it silently. Show the operator the service
     setup and confirm, then install with `scripts/install-control-plane.sh`.
     If multiple BizAgent hubs will run on the same machine, choose a distinct
@@ -248,8 +248,12 @@ only the recent turns needed for continuity, and start a new session when the
 operator changes topic or explicitly begins a new conversation.
 
 Console-originated inbox messages include `conversation_id` frontmatter. After
-an operator-visible response or delegation summary, append that hub turn to the
-same session with:
+an operator-visible response or delegation summary, write a new markdown message
+in `outbox/` addressed to `user` and include the same `conversation_id`; the
+control plane routes it into `user/inbox/` and relays it into the web
+conversation.
+
+For manual repair or imports, append a hub turn directly with:
 
 ```sh
 node scripts/bizagent-control-plane.js append-hub-turn --conversation <conversation_id> --content-file <path-to-response-markdown>
@@ -264,7 +268,7 @@ back. The operator never waits longer than the work itself takes.
 Agent-to-agent mail does not wait for you to spawn it. The **Node control
 plane** routes outbox mail, launches the hub when `inbox/*.md` has pending mail
 using `.bizagent/prompts/hub.md`, and launches any product agent that has a new
-inbox message every 6 seconds, with a per-agent lock so only one instance of a
+inbox message every 2 seconds, with a per-agent lock so only one instance of a
 given agent is live. So a reply one agent writes to another, or work you queue
 into an agent's inbox, is picked up in near-real-time without a manual spawn. See
 `docs/ARCHITECTURE.md → The control plane` for the locking/at-least-once model.
