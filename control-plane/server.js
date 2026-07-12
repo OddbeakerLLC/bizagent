@@ -287,15 +287,14 @@ function start(hubInput) {
   ensureHubRuntimePrompt(config.hub);
   runTick(config);
   setInterval(() => runTick(config), 2000);
-  const displayHost = config.host === '0.0.0.0' ? 'localhost' : config.host;
   server.listen(config.port, config.host, () => {
-    appendLog(
-      config.hub,
-      `bizagent-control-plane listening on http://${displayHost}:${config.port}`,
-    );
-    console.log(
-      `bizagent-control-plane listening on http://${displayHost}:${config.port}`,
-    );
+    const bindUrl = `http://${config.host}:${config.port}`;
+    const openUrl = config.host === '0.0.0.0' ? `http://localhost:${config.port}` : bindUrl;
+    const logLine = openUrl !== bindUrl
+      ? `bizagent-control-plane listening on ${config.host}:${config.port} (open ${openUrl})`
+      : `bizagent-control-plane listening on ${bindUrl}`;
+    appendLog(config.hub, logLine);
+    console.log(logLine);
   });
   return server;
 }
