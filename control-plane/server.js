@@ -175,6 +175,13 @@ async function handleApi(config, req, res) {
   const agentDetailMatch = url.pathname.match(/^\/api\/agent-detail\/([^/]+)$/);
   if (agentDetailMatch && req.method === 'GET') {
     const slug = decodeURIComponent(agentDetailMatch[1]);
+    if (!/^[a-zA-Z0-9._-]+$/.test(slug) || slug === '.' || slug === '..') {
+      return send(res, 400, { error: 'invalid slug' });
+    }
+    const agentDir = path.resolve(config.hub, 'agents', slug);
+    if (!agentDir.startsWith(path.resolve(config.hub, 'agents') + path.sep)) {
+      return send(res, 400, { error: 'invalid slug' });
+    }
     return send(res, 200, getAgentDetail(config.hub, slug));
   }
 
