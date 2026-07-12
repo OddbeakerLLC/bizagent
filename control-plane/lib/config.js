@@ -39,9 +39,14 @@ function loadRuntimeConfig(hubInput) {
   const cliFile = readCliFile(hub);
   const cli = process.env.BIZAGENT_CLI || cliFile.CLI || cliFile.CLI_CMD || 'claude';
   const promptFlag = process.env.BIZAGENT_CLI_PROMPT_FLAG || cliFile.CLI_PROMPT_FLAG || '-p';
-  const extraArgs = process.env.BIZAGENT_CLI_EXTRA_ARGS || cliFile.CLI_EXTRA_ARGS || '';
+  const extraArgs = process.env.BIZAGENT_CLI_EXTRA_ARGS
+    || (cliFile.CLI_EXTRA_ARGS !== undefined ? cliFile.CLI_EXTRA_ARGS : cliFile.CLI_YOLO_FLAG)
+    || '';
   const port = Number(process.env.BIZAGENT_PORT || (registry.settings && registry.settings.control_plane && registry.settings.control_plane.port) || 8787);
   const host = process.env.BIZAGENT_HOST || (registry.settings && registry.settings.control_plane && registry.settings.control_plane.host) || '127.0.0.1';
+
+  const hubAgent = (registry.settings && registry.settings.hub_agent) || {};
+  const models = (registry.settings && registry.settings.models) || {};
 
   return {
     hub,
@@ -54,6 +59,8 @@ function loadRuntimeConfig(hubInput) {
     maxConcurrency: Number(process.env.BIZAGENT_MAX_CONCURRENCY || dispatch.max_concurrency || 4),
     lockLeaseSecs: Number(process.env.BIZAGENT_LOCK_LEASE_SECS || dispatch.lock_lease_secs || 1800),
     dryRun: process.env.BIZAGENT_DRY_RUN === '1',
+    hubModel: process.env.BIZAGENT_HUB_MODEL || hubAgent.model || '',
+    agentDefaultModel: process.env.BIZAGENT_AGENT_DEFAULT_MODEL || models.agent_default || '',
   };
 }
 
@@ -62,6 +69,7 @@ function agentsFromRegistry(registry) {
     slug: product.slug,
     name: product.name || product.slug,
     agentName: product.agent_name || product.name || product.slug,
+    model: product.model || '',
   })).filter((agent) => agent.slug);
 }
 

@@ -78,7 +78,7 @@ function hubAgentEntry(registry) {
 }
 
 function currentState(config) {
-  const agents = agentMailStatus(config.hub, [hubAgentEntry(config.registry), ...agentsFromRegistry(config.registry)]).map((agent) => ({
+  const agents = agentMailStatus(config.hub, [hubAgentEntry(config.registry), ...agentsFromRegistry(config.registry)]).map(({ model: _m, ...agent }) => ({
     ...agent,
     active: isAgentActive(config.hub, agent.slug, config.lockLeaseSecs),
   }));
@@ -169,7 +169,7 @@ function start(hubInput) {
   const server = createServer(config);
   ensureHubRuntimePrompt(config.hub);
   runTick(config);
-  setInterval(() => runTick(config), 2000);
+  setInterval(() => runTick(config), 6000);
   server.listen(config.port, config.host, () => {
     appendLog(config.hub, `bizagent-control-plane listening on http://${config.host}:${config.port}`);
     console.log(`bizagent-control-plane listening on http://${config.host}:${config.port}`);

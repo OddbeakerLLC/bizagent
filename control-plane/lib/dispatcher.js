@@ -169,8 +169,18 @@ function isAgentActive(hub, slug, leaseSecs) {
   return pidAlive(pid) && lockAgeSecs(lock) < leaseSecs;
 }
 
-function launchAgent(config, slug) {
+function modelArgs(model) {
+  return model ? `--model ${model}` : '';
+}
+
+function effectiveExtra(extraArgs, model) {
+  const parts = [extraArgs, modelArgs(model)].filter(Boolean);
+  return parts.join(' ');
+}
+
+function launchAgent(config, slug, model = '') {
   const { hub, cli, promptFlag, extraArgs, dryRun } = config;
+  const extra = effectiveExtra(extraArgs, model);
   const lock = lockDir(hub, slug);
   const agentLog = path.join(hub, 'logs', `dispatch-${slug}.log`);
   const promptFile = ensureDispatchPrompt(hub, slug);
@@ -193,7 +203,7 @@ function launchAgent(config, slug) {
     '"$cli" $pflag $extra "$prompt" >> "$agentlog" 2>&1',
   ].join('\n');
 
-  const child = spawn('bash', ['-c', script, '_', hub, slug, cli, promptFlag, extraArgs, promptFile, agentLog], {
+  const child = spawn('bash', ['-c', script, '_', hub, slug, cli, promptFlag, extra, promptFile, agentLog], {
     detached: true,
     stdio: 'ignore',
   });
@@ -202,7 +212,8 @@ function launchAgent(config, slug) {
 }
 
 function launchHub(config) {
-  const { hub, cli, promptFlag, extraArgs, dryRun } = config;
+  const { hub, cli, promptFlag, extraArgs, dryRun, hubModel } = config;
+  const extra = effectiveExtra(extraArgs, hubModel || '');
   const lock = lockDir(hub, 'hub');
   const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
   const promptFile = ensureHubRuntimePrompt(hub);
@@ -226,7 +237,7 @@ function launchHub(config) {
     '"$cli" $pflag $extra "$prompt" >> "$agentlog" 2>&1',
   ].join('\n');
 
-  const child = spawn('bash', ['-c', script, '_', hub, cli, promptFlag, extraArgs, promptFile, agentLog], {
+  const child = spawn('bash', ['-c', script, '_', hub, cli, promptFlag, extra, promptFile, agentLog], {
     detached: true,
     stdio: 'ignore',
   });
@@ -269,7 +280,7 @@ function dispatchPendingAgents(config) {
     }
     if (tryLock(config.hub, agent.slug, config.lockLeaseSecs)) {
       markMailDispatched(config.hub, agent.slug, fresh, retrySecs);
-      launchAgent(config, agent.slug);
+      launchAgent(config, agent.slug, agent.model || config.agentDefaultModel || '');
       launched += 1;
       running += 1;
     } else {
