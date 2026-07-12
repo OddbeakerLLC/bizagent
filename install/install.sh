@@ -72,24 +72,16 @@ fi
 step "Starting"
 bash "$HUB/scripts/control-plane.sh" start "$HUB"
 
-# --- 5. Drop first-run-setup inbox message ---
+# --- 5. Drop first-run inbox seed ---
 mkdir -p "$HUB/inbox"
 TODAY="$(date -u +%Y-%m-%d)"
-MSG_FILE="$HUB/inbox/${TODAY}-installer-first-run-setup.md"
-if [ ! -f "$MSG_FILE" ]; then
-  cat > "$MSG_FILE" <<FRONTMATTER
----
-from: installer
-to: hub
-date: $TODAY
-subject: first-run-setup
----
-
-New installation detected. Please greet the operator and guide them through
-initial setup: company name, repo discovery, and adding their first product
-agent.
-FRONTMATTER
-  ok "first-run-setup message queued"
+SEED_FILE="$HUB/inbox/${TODAY}-install-first-run.md"
+# Glob-guard: skip if any prior-date seed already exists (prevents duplicate on same-day re-run).
+_EXISTING=$(ls "$HUB/inbox/"*"-install-first-run.md" 2>/dev/null | head -1)
+if [ -z "$_EXISTING" ]; then
+  printf '---\nfrom: installer\nto: hub\ndate: %s\nsubject: first-run setup\n---\n\nA new bizagent installation just completed. Welcome the user, interview them about their products and projects, then set up the full system.\n' \
+    "$TODAY" > "$SEED_FILE"
+  ok "first-run message queued"
 fi
 
 # --- 6. Open browser ---
