@@ -5,12 +5,11 @@
 #   curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash
 #
 # Installs git, python3, cron, and Claude Code; clones bizagent;
-# hands you off to Claude Code with the right opening instruction.
+# starts the BizAgent control plane and opens the web UI.
 #
 # Env vars (optional):
 #   BIZAGENT_DIR=/path/to/clone    Override the default install dir (./bizagent)
 #   BIZAGENT_SOURCE=/path/or/url    Override the source repo (local path, file:// URL, or git URL)
-#   BIZAGENT_NO_LAUNCH=1           Skip auto-launching Claude Code at the end
 #   BIZAGENT_REINSTALL=1           Wipe an existing clone and reinstall from scratch
 
 set -euo pipefail
@@ -385,31 +384,46 @@ clone_repo() {
 }
 
 handoff() {
-  cat <<EOF
+  local port
+  port=$(python3 - "$INSTALL_DIR/registry.json" <<'PY' 2>/dev/null || echo "8787"
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get('settings', {}).get('control_plane', {}).get('port', 8787))
+except Exception:
+    print(8787)
+PY
+)
+  port="${port:-8787}"
 
-${BOLD}You're set.${NC}
+  step "Starting BizAgent"
+  bash "$INSTALL_DIR/scripts/control-plane.sh" start "$INSTALL_DIR"
 
-  ${DIM}bizagent lives at:${NC} $INSTALL_DIR
-  ${DIM}AI CLI:${NC}           $SELECTED_CLI
+  note "Waiting for port $port..."
+  local i=0
+  while (( i < 10 )); do
+    if (echo >/dev/tcp/localhost/"$port") 2>/dev/null; then
+      break
+    fi
+    sleep 1
+    i=$(( i + 1 ))
+  done
 
-Once your CLI is running in that directory, tell it:
-
-  ${BOLD}Read AGENT.md and set up my system.${NC}
-
-It will interview you about your products and projects, then build the
-whole thing for you.
-
-EOF
-
-  if [[ -n "${BIZAGENT_NO_LAUNCH:-}" ]]; then
-    note "Auto-launch skipped (BIZAGENT_NO_LAUNCH set). When ready:  cd $INSTALL_DIR && $SELECTED_CLI"
-    exit 0
+  if ! (echo >/dev/tcp/localhost/"$port") 2>/dev/null; then
+    warn "Control plane did not respond on port $port within 10s."
+    note "Check the log: $INSTALL_DIR/logs/control-plane-server.log"
   fi
 
-  note "To reinstall from scratch:  BIZAGENT_REINSTALL=1 before the install command"
-  read -r -p "Press Enter to launch $SELECTED_CLI now (Ctrl-C to launch it yourself later): " _ </dev/tty
-  cd "$INSTALL_DIR"
-  exec "$SELECTED_CLI"
+  printf "\n${BOLD}Open this URL in your browser to set up BizAgent:${NC}\n\n"
+  printf "  ${BOLD}http://localhost:%s${NC}\n\n" "$port"
+
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "http://localhost:$port" 2>/dev/null &
+  elif command -v open >/dev/null 2>&1; then
+    open "http://localhost:$port"
+  fi
+
+  exit 0
 }
 
 # --- main ---
