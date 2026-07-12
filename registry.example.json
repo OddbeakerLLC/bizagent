@@ -23,6 +23,10 @@
       "_comment": "Optional hub PTL agent settings for control-plane launches.",
       "prompt": "You are the hub PTL agent. Read inbox/*.md for incoming messages, process each one, then archive it. After processing all messages, send a single PushNotification with status=proactive summarizing what arrived and what you did.",
       "model": ""
+    },
+    "models": {
+      "_comment": "Default model for product agent launches. Per-product model field overrides this.",
+      "agent_default": ""
     }
   },
   "knowledge_stack": {
@@ -38,6 +42,7 @@
       "slug": "widgets",
       "name": "Widgets",
       "agent_name": "Agent W",
+      "model": "",
       "projects": [
         { "name": "widgets-web", "path": "../widgets-web", "remote": "" },
         { "name": "widgets-api", "path": "../widgets-api", "remote": "" }
@@ -47,6 +52,7 @@
       "slug": "platform",
       "name": "Platform",
       "agent_name": "Agent P",
+      "model": "",
       "projects": [
         { "name": "platform-core", "path": "../platform-core", "remote": "" }
       ]
@@ -55,6 +61,7 @@
       "slug": "tooling",
       "name": "Tooling",
       "agent_name": "Agent T",
+      "model": "",
       "projects": [
         { "name": "cli-tools", "path": "../cli-tools", "remote": "" }
       ]

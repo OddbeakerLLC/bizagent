@@ -8,7 +8,7 @@ WorkingDirectory=__HUB_SETTING__
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=BIZAGENT_HOST=__HOST__
 Environment=BIZAGENT_PORT=__PORT__
-ExecStart=/usr/bin/env node "__HUB_EXEC__/scripts/bizagent-control-plane.js" serve --hub "__HUB_EXEC__"
+ExecStart=__NODE__ "__HUB_EXEC__/scripts/bizagent-control-plane.js" serve --hub "__HUB_EXEC__"
 Restart=on-failure
 RestartSec=3
 

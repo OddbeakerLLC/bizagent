@@ -135,11 +135,14 @@ if ! command -v node >/dev/null 2>&1; then
   echo "ERROR: Node.js is required. Run install.sh or install node with your package manager." >&2
   exit 127
 fi
+NODE_BIN="$(command -v node)"
 
 if [ ! -f "$TEMPLATE" ]; then
   echo "ERROR: missing service template: $TEMPLATE" >&2
   exit 1
 fi
+
+NODE_REPL="$(sed_replacement "$(systemd_escape_exec_arg "$NODE_BIN")")"
 
 mkdir -p "$UNITDIR"
 sed \
@@ -147,6 +150,7 @@ sed \
   -e "s|__HUB_EXEC__|$HUB_EXEC_REPL|g" \
   -e "s|__HOST__|$HOST|g" \
   -e "s|__PORT__|$PORT|g" \
+  -e "s|__NODE__|$NODE_REPL|g" \
   "$TEMPLATE" > "$SERVICE"
 
 echo "Wrote $SERVICE"

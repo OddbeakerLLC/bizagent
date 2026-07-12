@@ -179,7 +179,7 @@ once exposed an operator's private data publicly — don't repeat it.)
       can manually check your inbox by running `ls inbox/`."
 11. **Offer the control-plane service (recommended).** The Node control plane
     is what hosts the local UI, routes outbox mail, and launches agents with
-    pending inbox mail every 2 seconds. Installing it is a **deliberate,
+    pending inbox mail every 6 seconds. Installing it is a **deliberate,
     opt-in** step — never enable it silently. Show the operator the service
     setup and confirm, then install with `scripts/install-control-plane.sh`.
     If multiple BizAgent hubs will run on the same machine, choose a distinct
@@ -268,7 +268,7 @@ back. The operator never waits longer than the work itself takes.
 Agent-to-agent mail does not wait for you to spawn it. The **Node control
 plane** routes outbox mail, launches the hub when `inbox/*.md` has pending mail
 using `.bizagent/prompts/hub.md`, and launches any product agent that has a new
-inbox message every 2 seconds, with a per-agent lock so only one instance of a
+inbox message every 6 seconds, with a per-agent lock so only one instance of a
 given agent is live. So a reply one agent writes to another, or work you queue
 into an agent's inbox, is picked up in near-real-time without a manual spawn. See
 `docs/ARCHITECTURE.md → The control plane` for the locking/at-least-once model.

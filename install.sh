@@ -312,7 +312,7 @@ write_cli_config() {
 # bizagent CLI config — written by installer, read by AGENT.md setup
 CLI_CMD=$SELECTED_CLI
 CLI_PROMPT_FLAG=$SELECTED_PROMPT_FLAG
-CLI_YOLO_FLAG=$SELECTED_YOLO_FLAG
+CLI_EXTRA_ARGS=$SELECTED_YOLO_FLAG
 EOF
   ok "CLI config written (.cli)"
 }
