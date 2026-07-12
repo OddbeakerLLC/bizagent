@@ -151,11 +151,11 @@ once exposed an operator's private data publicly — don't repeat it.)
    `knowledge_stack.enabled`) the weekly line, and add them to the
    operator's crontab:
    ```
-   <min> <hr> * * *      cd <HUB_ABS_PATH> && <CLI_CMD> <CLI_PROMPT_FLAG> "Follow NIGHTLY.md exactly." >> logs/nightly.log 2>&1
-   <wmin> <whr> * * <dow> cd <HUB_ABS_PATH> && <CLI_CMD> <CLI_PROMPT_FLAG> "Follow WEEKLY.md exactly."  >> logs/weekly.log  2>&1
+   <min> <hr> * * *      <HUB_ABS_PATH>/scripts/run-agent.sh "Follow NIGHTLY.md exactly." >> <HUB_ABS_PATH>/logs/nightly.log 2>&1
+   <wmin> <whr> * * <dow> <HUB_ABS_PATH>/scripts/run-agent.sh "Follow WEEKLY.md exactly."  >> <HUB_ABS_PATH>/logs/weekly.log  2>&1
    ```
-   `<CLI_CMD>` and `<CLI_PROMPT_FLAG>` come from `.cli` (or question 10 if
-   installed manually).
+   `scripts/run-agent.sh` reads `.cli` automatically (CLI command, flags, and
+   extra args including `--dangerously-skip-permissions`).
    `<dow>` is the day-of-week from `knowledge_stack.refresh_day` (0–6,
    Sunday = 0). This modifies the user's crontab — a side effect outside
    this directory. Show the operator the exact lines and confirm before
