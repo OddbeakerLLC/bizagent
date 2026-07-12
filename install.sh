@@ -327,6 +327,15 @@ BIZAGENT_SOURCE="${BIZAGENT_SOURCE:-https://github.com/OddbeakerLLC/bizagent.git
 
 choose_dir() {
   INSTALL_DIR="${BIZAGENT_DIR:-$DEFAULT_DIR}"
+  if [[ -d "$INSTALL_DIR" ]] && [[ ! -d "$INSTALL_DIR/.git" ]]; then
+    if pgrep -f "bizagent-control-plane" >/dev/null 2>&1; then
+      note "Stopping running control plane..."
+      pkill -f "bizagent-control-plane" 2>/dev/null || true
+      sleep 1
+    fi
+    note "Clearing $INSTALL_DIR (no .git found)..."
+    rm -rf "$INSTALL_DIR"
+  fi
   if [[ -e "$INSTALL_DIR" ]]; then
     if [[ -d "$INSTALL_DIR/.git" ]] && [[ -f "$INSTALL_DIR/AGENT.md" ]] && grep -qi "bizagent" "$INSTALL_DIR/AGENT.md" 2>/dev/null; then
       if [[ "$BIZAGENT_SOURCE_EXPLICIT" == "1" ]]; then
@@ -336,7 +345,7 @@ choose_dir() {
       ALREADY_CLONED=1
       return
     fi
-    die "$INSTALL_DIR exists but doesn't look like a bizagent clone. Remove it with:  rm -rf '$INSTALL_DIR'  — then re-run."
+    die "$INSTALL_DIR exists and isn't a bizagent clone. If you deleted it while the control plane was running, try: pkill -f bizagent-control-plane && rm -rf '$INSTALL_DIR' — then re-run."
   fi
   # Ensure parent directory is writable before attempting clone.
   local parent_dir

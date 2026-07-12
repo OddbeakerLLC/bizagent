@@ -36,6 +36,12 @@ grep -q 'AGENT\.md' "$ROOT/install.sh" \
   || fail "installer clone detection does not use AGENT.md as stable marker"
 grep -q 'grep -qi "bizagent"' "$ROOT/install.sh" \
   || fail "installer clone detection does not verify AGENT.md is a bizagent clone (not just any AGENT.md)"
+grep -q 'pkill -f "bizagent-control-plane"' "$ROOT/install.sh" \
+  || fail "installer choose_dir does not kill stale control plane before clearing install dir"
+grep -q 'pgrep -f "bizagent-control-plane"' "$ROOT/install.sh" \
+  || fail "installer choose_dir does not check for running control plane"
+grep -q "pkill -f bizagent-control-plane" "$ROOT/install.sh" \
+  || fail "installer fallback die message does not hint at control-plane kill"
 grep -q "rm -rf '\\\$INSTALL_DIR'" "$ROOT/install.sh" \
   || fail "installer die message does not single-quote path in suggested rm command (space-in-path safety)"
 
