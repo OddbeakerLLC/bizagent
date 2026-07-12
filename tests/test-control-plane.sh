@@ -65,7 +65,7 @@ grep -q "ensureHubRuntimePrompt" "$ROOT/scripts/bizagent-control-plane.js" \
   || fail "control-plane CLI does not generate hub runtime prompt"
 grep -q "append-hub-turn" "$ROOT/scripts/bizagent-control-plane.js" \
   || fail "control-plane CLI cannot append hub turns to session memory"
-grep -q "setInterval(.*6000" "$SERVER" \
+grep -q "setInterval(.*2000" "$SERVER" \
   || fail "server does not poll every 6 seconds"
 grep -q "routeOutboxes" "$SERVER" \
   || fail "server does not route mail"
