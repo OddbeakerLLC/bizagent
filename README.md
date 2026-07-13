@@ -40,9 +40,48 @@ You ask the hub for the big picture; it digests every journal and reports back.
 
 ---
 
+## ⚠ Security — read before you install
+
+> [!WARNING]
+> **BizAgent runs your AI agent in "YOLO mode" — no permission prompts.**
+>
+> Agents execute with the CLI's autonomous flag enabled by default:
+> `--dangerously-skip-permissions` for Claude Code and Antigravity,
+> `--full-auto` for Codex. This means the agent can read, write, delete,
+> and execute **anything the OS user account has access to** — including your
+> home directory, SSH keys, `.env` files, and more.
+>
+> **Strongly recommended: create a dedicated OS user for BizAgent**, so the
+> agent's blast radius is limited to what that account owns:
+>
+> ```sh
+> # Pre-install system dependencies (requires sudo/root)
+> sudo apt-get install -y git nodejs cron   # Debian/Ubuntu
+> # sudo dnf install -y git nodejs cron     # Fedora/RHEL
+> # brew install git node                   # macOS
+>
+> # Create the user and run the installer as that user
+> sudo adduser bizagent
+> sudo -u bizagent bash -c 'curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash'
+> ```
+>
+> The installer uses `sudo` to install missing packages, so pre-installing
+> them (or granting `bizagent` passwordless `sudo` for your package manager)
+> is required. Running as a dedicated user is the single most effective way
+> to contain the risk of an agent making an unintended change to your system.
+
+---
+
 ## Quick start
 
 Two steps — the first bootstraps everything, the second starts the web UI.
+
+> **Headless server (VPS, SSH-only)?** The Claude CLI requires interactive
+> auth on first run. Before running the installer, either set
+> `ANTHROPIC_API_KEY` as an environment variable or run
+> `claude login --api-key <key>` — otherwise the installer will hang waiting
+> for a browser. Other CLI engines have equivalent env vars
+> (`OPENAI_API_KEY` for Codex, etc.).
 
 **Step 1.** Run the one-liner (macOS, Linux, or WSL on Windows):
 
