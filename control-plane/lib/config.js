@@ -32,7 +32,7 @@ function readCliFile(hub) {
   if (!fs.existsSync(file)) return result;
   for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
     const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
-    if (match) result[match[1]] = match[2];
+    if (match) result[match[1]] = match[2].replace(/^(["'])(.*)\1$/, "$2");
   }
   return result;
 }
