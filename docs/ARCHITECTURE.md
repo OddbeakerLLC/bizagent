@@ -1,7 +1,7 @@
 # Architecture
 
 This document explains how `bizagent` is built and why. If you only want to
-*use* it, the README and the interview are enough; read this when you want to
+_use_ it, the README and the interview are enough; read this when you want to
 change the design.
 
 ## The shape: hub and spoke
@@ -24,7 +24,7 @@ A deliberate split:
   at the hub root for the hub itself, `user/inbox` for browser-visible replies,
   and `agents/<slug>/inbox` + `outbox` for each product agent. Messages are
   addressed to known recipient slugs, so the mailbox belongs with the recipient.
-  This removes any ambiguity about *where* a message addressed to a multi-repo
+  This removes any ambiguity about _where_ a message addressed to a multi-repo
   product should land.
 - **Journals and sitemaps are per project**, and live in each project repo:
   `.agent/journal/` and a root `sitemap.md`. These describe a specific
@@ -50,7 +50,7 @@ The nightly run remains, but only for housekeeping.
 ## The control plane
 
 `scripts/bizagent-control-plane.js serve` runs a local Node.js server. It hosts
-the web UI, requires login for UI/API access, polls inboxes every 6 seconds,
+the web UI, requires login for UI/API access, polls inboxes every 2 seconds,
 routes queued outbox mail, relays `user/inbox/*.md` replies into web
 conversations, updates agent mail status, launches the hub when `inbox/*.md`
 has pending mail, and launches product agents with pending mail.
@@ -97,14 +97,14 @@ The design is deliberately minimal:
   inbox; a done message is the same file `mv`'d to `inbox/archive/`. The `mv` is
   atomic and crash-safe. There is **no checksum/seen JSON** — inbox filenames
   are write-once and unique, so the file's presence/absence already dedupes.
-- **At-least-once delivery.** An agent archives each message *as it finishes
-  it*. If an agent crashes, its unhandled messages stay in the inbox and the
+- **At-least-once delivery.** An agent archives each message _as it finishes
+  it_. If an agent crashes, its unhandled messages stay in the inbox and the
   next tick retries them. (So agent work should be safe to re-run; archiving
   each message right after acting on it keeps the re-run window small.)
 - **Per-agent lock = mutual exclusion** (the crux). Before launching an agent,
   the control plane acquires `agents/<slug>/.lock` atomically with `mkdir` and
   writes the PID + start-epoch. If the lock already exists, the control plane skips
-  that agent — *unless* the holder PID is dead **or** the lock is older than a
+  that agent — _unless_ the holder PID is dead **or** the lock is older than a
   max lease (default 30 min), in which case the stale lock is reclaimed. This is
   what stops a long run (spanning several ticks) from being launched twice, and
   what recovers from a crash that left a lock behind.
@@ -125,7 +125,7 @@ message carries a small `from / to / date / subject` header and a plain-English
 body kept as terse as the content allows. The control plane reads the `to:` slug
 and moves the file to that recipient's inbox. An actioned message is moved to
 `inbox/archive/` by the agent that handled it; user reply messages are archived
-by the server after relay into the matching conversation. One left *unactioned*
+by the server after relay into the matching conversation. One left _unactioned_
 past the configured threshold is auto-archived by the nightly run as cleanup.
 Replies are new files — there are no threads.
 

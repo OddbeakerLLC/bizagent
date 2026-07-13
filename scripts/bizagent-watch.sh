@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compatibility wrapper. The Node control-plane server now polls inboxes every
-# 6 seconds, routes mail, and dispatches agents; inotify is no longer primary.
+# 2 seconds, routes mail, and dispatches agents; inotify is no longer primary.
 set -u
 HUB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
