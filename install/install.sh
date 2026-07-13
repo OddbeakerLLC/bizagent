@@ -44,9 +44,9 @@ ok "CLI: $CLI_CMD"
 
 # Write CLI choice to .cli so the control-plane picks it up at runtime.
 cat > "$HUB/.cli" <<EOF
-CLI_CMD=$CLI_CMD
-CLI_PROMPT_FLAG=-p
-CLI_EXTRA_ARGS=--dangerously-skip-permissions
+CLI_CMD="$CLI_CMD"
+CLI_PROMPT_FLAG="-p"
+CLI_EXTRA_ARGS="--dangerously-skip-permissions"
 EOF
 ok ".cli written"
 

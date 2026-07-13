@@ -310,9 +310,9 @@ detect_and_select_cli() {
 write_cli_config() {
   cat > "$INSTALL_DIR/.cli" <<EOF
 # bizagent CLI config — written by installer, read by AGENT.md setup
-CLI_CMD=$SELECTED_CLI
-CLI_PROMPT_FLAG=$SELECTED_PROMPT_FLAG
-CLI_EXTRA_ARGS=$SELECTED_YOLO_FLAG
+CLI_CMD="$SELECTED_CLI"
+CLI_PROMPT_FLAG="$SELECTED_PROMPT_FLAG"
+CLI_EXTRA_ARGS="$SELECTED_YOLO_FLAG"
 EOF
   ok "CLI config written (.cli)"
   if [[ -z "$SELECTED_YOLO_FLAG" ]]; then
