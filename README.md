@@ -51,62 +51,52 @@ You ask the hub for the big picture; it digests every journal and reports back.
 > and execute **anything the OS user account has access to** — including your
 > home directory, SSH keys, `.env` files, and more.
 >
-> **Strongly recommended: create a dedicated OS user for BizAgent**, so the
-> agent's blast radius is limited to what that account owns:
->
-> ```sh
-> # Pre-install system dependencies (requires sudo/root)
-> sudo apt-get install -y git nodejs cron   # Debian/Ubuntu
-> # sudo dnf install -y git nodejs cron     # Fedora/RHEL
-> # brew install git node                   # macOS
->
-> # Create the user and run the installer as that user
-> sudo adduser bizagent
-> sudo -u bizagent bash -c 'curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash'
-> ```
->
-> The installer uses `sudo` to install missing packages, so pre-installing
-> them (or granting `bizagent` passwordless `sudo` for your package manager)
-> is required. Running as a dedicated user is the single most effective way
-> to contain the risk of an agent making an unintended change to your system.
+> **Strongly recommended: create a dedicated OS user for BizAgent** — see
+> **Step 1 (optional)** in the Quick Start below. Running as a dedicated user
+> is the single most effective way to contain the risk of an agent making an
+> unintended change to your system.
 
 ---
 
 ## Quick start
 
-Two steps — the first bootstraps everything, the second starts the web UI.
+Three steps — one command does the work.
 
-> **Headless server (VPS, SSH-only)?** The Claude CLI requires interactive
-> auth on first run. Before running the installer, either set
-> `ANTHROPIC_API_KEY` as an environment variable or run
-> `claude login --api-key <key>` — otherwise the installer will hang waiting
-> for a browser. Other CLI engines have equivalent env vars
-> (`OPENAI_API_KEY` for Codex, etc.).
+**Step 1 (optional).** Create a dedicated OS user (strongly recommended):
 
-**Step 1.** Run the one-liner (macOS, Linux, or WSL on Windows):
+```sh
+# Pre-install system dependencies (requires sudo/root)
+sudo apt-get install -y git nodejs cron   # Debian/Ubuntu
+# sudo dnf install -y git nodejs cron     # Fedora/RHEL
+# brew install git node                   # macOS
+
+# Create the user and run the installer as that user
+sudo adduser bizagent
+sudo -u bizagent bash -c 'curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash'
+```
+
+The installer uses `sudo` to install missing packages, so pre-installing
+them (or granting `bizagent` passwordless `sudo` for your package manager)
+is required.
+
+> **Headless server (VPS, SSH-only)?** Set `ANTHROPIC_API_KEY` as an env var
+> or run `claude login --api-key <key>` before the installer — otherwise
+> it will hang waiting for a browser. Other CLI engines have equivalent env
+> vars (`OPENAI_API_KEY` for Codex, etc.).
+
+**Step 2.** Run the installer (macOS, Linux, or WSL on Windows):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash
 ```
 
-This installs `git`, `python3`, Node.js, and `cron` if missing, asks which CLI coding agent
-to use (Claude Code, Antigravity, Codex, or Grok), clones bizagent, and hands
-you off to your CLI. When it opens, tell it:
+This installs `git`, `python3`, Node.js, and `cron` if missing; asks which CLI
+coding agent to use; clones bizagent; starts the control plane; and prints
+your URL. The whole process takes about two minutes.
 
-> Read AGENT.md and set up my system.
-
-The PTL agent will interview you about your products and repos, scaffold the
-agents directory, generate `registry.json`, and install the nightly schedule.
-
-**Step 2.** Once PTL setup is complete, start the control plane:
-
-```sh
-bash install/install.sh
-```
-
-This installs Node dependencies, wires up the control plane as a systemd
-service or cron entry, starts it, and opens the browser. The web UI is your
-primary interface from here on.
+**Step 3.** Open the URL shown in your terminal (or `http://localhost:8787`
+if it doesn't appear). PTL has already read AGENT.md and begun the setup
+process — respond to it in the chat.
 
 ### Install from a staging source
 
@@ -138,14 +128,13 @@ git clone https://github.com/OddbeakerLLC/bizagent
 cd bizagent
 ```
 
-Launch your CLI agent in that directory and tell it "Read AGENT.md and set up
-my system." Then run `bash install/install.sh` to start the control plane.
+Then run `bash install.sh` to complete setup — equivalent to the one-liner above.
 
 ---
 
 ## The web UI
 
-After `install/install.sh` runs, open `http://localhost:8787` (or the port in
+After installation, open `http://localhost:8787` (or the port in
 your `registry.json`).
 
 - **Login-protected** — on first visit the browser shows a setup form to create credentials; afterwards, standard login
@@ -197,7 +186,7 @@ Mailboxes at `inbox/`, `outbox/`, `agents/<slug>/...`; the hub runtime prompt at
 `.bizagent/prompts/hub.md`; hub session memory at `.bizagent/hub-session.md`;
 login config at `.bizagent/auth.json`.
 
-`install/install.sh` handles initial setup. To control it manually:
+The installer (`install.sh`) handles initial setup. To control it manually:
 
 ```sh
 scripts/control-plane.sh start
@@ -213,8 +202,8 @@ Multiple BizAgent hubs can run on one machine. Set
 
 ## What PTL asks during setup
 
-After the control plane starts and the browser opens, the PTL agent walks
-through setup in the web UI. It only asks for the things that are genuinely yours:
+Once the control plane starts, PTL automatically detects the new-install signal
+and begins setup in the web UI. It only asks for the things that are genuinely yours:
 
 - your organization name
 - where your project repositories live (a folder to scan, or a list)
@@ -238,6 +227,7 @@ bizagent/
 ├── AGENT.md                 the agent's instructions: interview -> build -> operate
 ├── README.md                this file
 ├── registry.example.json    the shape of the generated registry.json
+├── install.sh               one-liner installer: deps, clone, .cli config, control-plane start
 ├── install/
 │   ├── install.sh             control-plane installer (npm, service, start, browser open)
 │   └── bizagent-control-plane.service  systemd unit template
