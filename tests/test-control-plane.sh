@@ -338,6 +338,9 @@ const root = process.argv[2];
 // Inline buildArgs from dispatcher to test in isolation
 function buildArgs(extraArgs, modelOverride) {
   if (!modelOverride) return extraArgs;
+  if (!/^[A-Za-z0-9._:-]+$/.test(modelOverride)) {
+    throw new Error(`Invalid model name: ${modelOverride}`);
+  }
   const stripped = extraArgs
     .replace(/--model[= ]\S+/g, '')
     .replace(/\s{2,}/g, ' ')
@@ -356,6 +359,10 @@ if (r3 !== '--dangerously-skip-permissions --model claude-sonnet-4-6') { console
 // no existing model → just append
 const r4 = buildArgs('--dangerously-skip-permissions', 'claude-opus-4-8');
 if (r4 !== '--dangerously-skip-permissions --model claude-opus-4-8') { console.error('r4 wrong:', r4); process.exit(4); }
+// injection attempt → throw
+let threw = false;
+try { buildArgs('--dangerously-skip-permissions', 'bad; rm -rf /'); } catch (_) { threw = true; }
+if (!threw) { console.error('injection not rejected'); process.exit(5); }
 NODE
   then
     fail "buildArgs model-stripping logic failed"
