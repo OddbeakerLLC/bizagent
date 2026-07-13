@@ -169,18 +169,18 @@ function isAgentActive(hub, slug, leaseSecs) {
   return pidAlive(pid) && lockAgeSecs(lock) < leaseSecs;
 }
 
-function modelArgs(model) {
-  return model ? `--model ${model}` : '';
-}
-
-function effectiveExtra(extraArgs, model) {
-  const parts = [extraArgs, modelArgs(model)].filter(Boolean);
-  return parts.join(' ');
+function buildArgs(extraArgs, modelOverride) {
+  if (!modelOverride) return extraArgs;
+  const stripped = extraArgs
+    .replace(/--model[= ]\S+/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return stripped ? `${stripped} --model ${modelOverride}` : `--model ${modelOverride}`;
 }
 
 function launchAgent(config, slug, model = '') {
   const { hub, cli, promptFlag, extraArgs, dryRun } = config;
-  const extra = effectiveExtra(extraArgs, model);
+  const extra = buildArgs(extraArgs, model);
   const lock = lockDir(hub, slug);
   const agentLog = path.join(hub, 'logs', `dispatch-${slug}.log`);
   const promptFile = ensureDispatchPrompt(hub, slug);
@@ -213,7 +213,7 @@ function launchAgent(config, slug, model = '') {
 
 function launchHub(config) {
   const { hub, cli, promptFlag, extraArgs, dryRun, hubModel } = config;
-  const extra = effectiveExtra(extraArgs, hubModel || '');
+  const extra = buildArgs(extraArgs, hubModel || '');
   const lock = lockDir(hub, 'hub');
   const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
   const promptFile = ensureHubRuntimePrompt(hub);
