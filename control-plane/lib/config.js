@@ -84,7 +84,11 @@ function loadRuntimeConfig(hubInput) {
       process.env.BIZAGENT_LOCK_LEASE_SECS || dispatch.lock_lease_secs || 1800,
     ),
     dryRun: process.env.BIZAGENT_DRY_RUN === "1",
-    hubModel: process.env.BIZAGENT_HUB_MODEL || hubAgent.model || "",
+    hubModel:
+      process.env.BIZAGENT_HUB_MODEL ||
+      hubAgent.model ||
+      models.orchestrator ||
+      "",
     agentDefaultModel:
       process.env.BIZAGENT_AGENT_DEFAULT_MODEL || models.agent_default || "",
   };

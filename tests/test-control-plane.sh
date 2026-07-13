@@ -66,7 +66,7 @@ grep -q "ensureHubRuntimePrompt" "$ROOT/scripts/bizagent-control-plane.js" \
 grep -q "append-hub-turn" "$ROOT/scripts/bizagent-control-plane.js" \
   || fail "control-plane CLI cannot append hub turns to session memory"
 grep -q "setInterval(.*2000" "$SERVER" \
-  || fail "server does not poll every 6 seconds"
+  || fail "server does not poll every 2 seconds"
 grep -q "routeOutboxes" "$SERVER" \
   || fail "server does not route mail"
 ! grep -q "route result delivered=" "$SERVER" \
@@ -115,6 +115,14 @@ grep -q "needsSetup" "$ROOT/control-plane/public/app.js" \
   || fail "UI does not track setup-required state separately from login"
 grep -q "lastMessageCount" "$ROOT/control-plane/public/app.js" \
   || fail "poll does not track last message count to skip unchanged renders"
+grep -q "buildArgs" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing buildArgs (strip-then-append model override)"
+grep -q "hubModel" "$ROOT/control-plane/lib/config.js" \
+  || fail "config does not expose hubModel for Opus tier"
+grep -q "agentDefaultModel" "$ROOT/control-plane/lib/config.js" \
+  || fail "config does not expose agentDefaultModel for product-agent tier"
+grep -q "models\.orchestrator" "$ROOT/control-plane/lib/config.js" \
+  || fail "config does not fall back to models.orchestrator for hub model"
 grep -q "dispatchFingerprint" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not fingerprint pending mail"
 grep -q "dispatchedAt" "$ROOT/control-plane/lib/dispatcher.js" \
@@ -324,6 +332,35 @@ NODE
   then
     fail "conversation API path safety or user inbox relay failed"
   fi
+  # buildArgs: strips existing --model before appending override
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+// Inline buildArgs from dispatcher to test in isolation
+function buildArgs(extraArgs, modelOverride) {
+  if (!modelOverride) return extraArgs;
+  const stripped = extraArgs
+    .replace(/--model[= ]\S+/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return stripped ? `${stripped} --model ${modelOverride}` : `--model ${modelOverride}`;
+}
+// strip space-sep form
+const r1 = buildArgs('--dangerously-skip-permissions --model claude-sonnet-4-6', 'claude-opus-4-8');
+if (r1 !== '--dangerously-skip-permissions --model claude-opus-4-8') { console.error('r1 wrong:', r1); process.exit(1); }
+// strip equals form
+const r2 = buildArgs('--model=claude-sonnet-4-6', 'claude-opus-4-8');
+if (r2 !== '--model claude-opus-4-8') { console.error('r2 wrong:', r2); process.exit(2); }
+// no override → unchanged
+const r3 = buildArgs('--dangerously-skip-permissions --model claude-sonnet-4-6', '');
+if (r3 !== '--dangerously-skip-permissions --model claude-sonnet-4-6') { console.error('r3 wrong:', r3); process.exit(3); }
+// no existing model → just append
+const r4 = buildArgs('--dangerously-skip-permissions', 'claude-opus-4-8');
+if (r4 !== '--dangerously-skip-permissions --model claude-opus-4-8') { console.error('r4 wrong:', r4); process.exit(4); }
+NODE
+  then
+    fail "buildArgs model-stripping logic failed"
+  fi
+
   # agent-detail: inbox count, lastDispatched, journal snippet
   if ! node - "$ROOT" "$TMP" <<'NODE'
 const root = process.argv[2];
