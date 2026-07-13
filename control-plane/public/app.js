@@ -167,7 +167,7 @@ function renderInline(text) {
   const codeSpans = [];
   let s = text.replace(/`([^`]+)`/g, (_, code) => {
     codeSpans.push(escapeHtml(code));
-    return ` ${codeSpans.length - 1} `;
+    return `\x00CODESPAN:${codeSpans.length - 1}\x00`;
   });
   s = escapeHtml(s);
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
@@ -177,7 +177,7 @@ function renderInline(text) {
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, url) => (
     /^(https?:|mailto:|\/|#)/i.test(url) ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>` : match
   ));
-  s = s.replace(/ (\d+) /g, (_, i) => `<code>${codeSpans[Number(i)]}</code>`);
+  s = s.replace(/\x00CODESPAN:(\d+)\x00/g, (_, i) => `<code>${codeSpans[Number(i)]}</code>`);
   return s;
 }
 
