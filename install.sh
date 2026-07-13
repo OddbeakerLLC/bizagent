@@ -315,6 +315,13 @@ CLI_PROMPT_FLAG=$SELECTED_PROMPT_FLAG
 CLI_EXTRA_ARGS=$SELECTED_YOLO_FLAG
 EOF
   ok "CLI config written (.cli)"
+  if [[ -z "$SELECTED_YOLO_FLAG" ]]; then
+    warn "No unattended-mode flag is known for $SELECTED_CLI."
+    warn "BizAgent runs agents without human supervision. Without this flag,"
+    warn "every invocation will block waiting for permission prompts."
+    warn "Set CLI_EXTRA_ARGS in $INSTALL_DIR/.cli to the correct flag before"
+    warn "running any agent unattended."
+  fi
 }
 
 # --- clone + handoff ---
@@ -457,7 +464,7 @@ main() {
   step "Setting up bizagent"
   choose_dir
   clone_repo
-  write_cli_config
+  [[ "$ALREADY_CLONED" != "1" ]] && write_cli_config
 
   handoff
 }
