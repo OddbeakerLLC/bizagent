@@ -19,11 +19,23 @@ function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
+function registryFile(hub) {
+  return path.join(hub, "registry.json");
+}
+
 function loadRegistry(hub) {
-  return readJson(path.join(hub, "registry.json"), {
+  return readJson(registryFile(hub), {
     settings: {},
     products: [],
   });
+}
+
+function registryMtimeMs(hub) {
+  try {
+    return fs.statSync(registryFile(hub)).mtimeMs;
+  } catch (_err) {
+    return 0;
+  }
 }
 
 function readCliFile(hub) {
@@ -37,10 +49,37 @@ function readCliFile(hub) {
   return result;
 }
 
+// Fields derived from registry.json that should stay in sync with the file
+// on disk for the lifetime of a long-running process (e.g. the control-plane
+// server), without requiring a process restart. See refreshRegistry().
+function deriveRegistrySettings(registry) {
+  const dispatch = (registry.settings && registry.settings.dispatch) || {};
+  const hubAgent = (registry.settings && registry.settings.hub_agent) || {};
+  const models = (registry.settings && registry.settings.models) || {};
+
+  return {
+    maxConcurrency: Number(
+      process.env.BIZAGENT_MAX_CONCURRENCY || dispatch.max_concurrency || 4,
+    ),
+    lockLeaseSecs: Number(
+      process.env.BIZAGENT_LOCK_LEASE_SECS || dispatch.lock_lease_secs || 1800,
+    ),
+    hubModel:
+      process.env.BIZAGENT_HUB_MODEL ||
+      hubAgent.model ||
+      models.orchestrator ||
+      "",
+    agentDefaultModel:
+      process.env.BIZAGENT_AGENT_DEFAULT_MODEL || models.agent_default || "",
+  };
+}
+
 function loadRuntimeConfig(hubInput) {
   const hub = hubPath(hubInput);
+  // Read the mtime before the content so a concurrent edit can only make us
+  // reload again on the next refresh, never miss a change (see refreshRegistry).
+  const registryMtime = registryMtimeMs(hub);
   const registry = loadRegistry(hub);
-  const dispatch = (registry.settings && registry.settings.dispatch) || {};
   const cliFile = readCliFile(hub);
   const cli =
     process.env.BIZAGENT_CLI || cliFile.CLI || cliFile.CLI_CMD || "claude";
@@ -66,9 +105,6 @@ function loadRuntimeConfig(hubInput) {
       registry.settings.control_plane.host) ||
     "0.0.0.0";
 
-  const hubAgent = (registry.settings && registry.settings.hub_agent) || {};
-  const models = (registry.settings && registry.settings.models) || {};
-
   return {
     hub,
     registry,
@@ -77,21 +113,24 @@ function loadRuntimeConfig(hubInput) {
     extraArgs,
     port,
     host,
-    maxConcurrency: Number(
-      process.env.BIZAGENT_MAX_CONCURRENCY || dispatch.max_concurrency || 4,
-    ),
-    lockLeaseSecs: Number(
-      process.env.BIZAGENT_LOCK_LEASE_SECS || dispatch.lock_lease_secs || 1800,
-    ),
     dryRun: process.env.BIZAGENT_DRY_RUN === "1",
-    hubModel:
-      process.env.BIZAGENT_HUB_MODEL ||
-      hubAgent.model ||
-      models.orchestrator ||
-      "",
-    agentDefaultModel:
-      process.env.BIZAGENT_AGENT_DEFAULT_MODEL || models.agent_default || "",
+    ...deriveRegistrySettings(registry),
+    _registryMtimeMs: registryMtime,
   };
+}
+
+// Re-reads registry.json when it has changed on disk and refreshes the
+// registry-derived fields on `config` in place. Cheap to call on every API
+// request or dispatch tick (a single stat call) so long-running processes
+// (the control-plane server) pick up newly added agents, dispatch settings,
+// and model overrides without a restart.
+function refreshRegistry(config) {
+  const mtimeMs = registryMtimeMs(config.hub);
+  if (mtimeMs === config._registryMtimeMs) return config;
+  config._registryMtimeMs = mtimeMs;
+  config.registry = loadRegistry(config.hub);
+  Object.assign(config, deriveRegistrySettings(config.registry));
+  return config;
 }
 
 function agentsFromRegistry(registry) {
@@ -117,4 +156,6 @@ module.exports = {
   loadRegistry,
   loadRuntimeConfig,
   readJson,
+  refreshRegistry,
+  registryMtimeMs,
 };
