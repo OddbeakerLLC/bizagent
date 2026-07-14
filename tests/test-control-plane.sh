@@ -175,6 +175,12 @@ grep -q "org.*config.registry" "$SERVER" \
   || fail "server does not include org in state response"
 grep -q "getAgentDetail" "$SERVER" \
   || fail "server missing getAgentDetail function"
+grep -q "refreshRegistry" "$SERVER" \
+  || fail "server does not refresh registry.json without a restart"
+grep -q "refreshRegistry" "$ROOT/control-plane/lib/config.js" \
+  || fail "config does not expose a registry refresh mechanism"
+grep -q "CODESPAN" "$ROOT/control-plane/public/app.js" \
+  || fail "UI codespan placeholder does not use a collision-safe marker"
 grep -q "agent-detail" "$SERVER" \
   || fail "server missing /api/agent-detail endpoint"
 grep -q "titleSet" "$ROOT/control-plane/public/app.js" \
@@ -426,6 +432,67 @@ if (detail.journal !== '- First journal entry') { console.error('journal wrong:'
 NODE
   then
     fail "agent-detail (inbox/lastDispatched/journal) logic failed"
+  fi
+
+  # Regression: bare numbers in chat messages must not render as "undefined".
+  # (app.js used a ` N ` codespan placeholder that collided with any standalone
+  # number in message text; fixed with a \x00CODESPAN:N\x00 placeholder.)
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(`${root}/control-plane/public/app.js`, 'utf8');
+const sandbox = {
+  document: { getElementById: () => ({ addEventListener: () => {}, textContent: '', dataset: {}, value: '' }) },
+  setInterval: () => 0,
+  fetch: () => Promise.reject(new Error('no network in test')),
+  console,
+};
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox);
+const bare = sandbox.renderMarkdown('8 of 12 agents responded.');
+if (bare.includes('undefined')) { console.error('bare number rendered as undefined:', bare); process.exit(1); }
+const mixed = sandbox.renderMarkdown('Use `code 5` here, and 9 more.');
+if (mixed.includes('undefined')) { console.error('number near a code span rendered as undefined:', mixed); process.exit(2); }
+if (!mixed.includes('<code>code 5</code>')) { console.error('code span not preserved:', mixed); process.exit(3); }
+NODE
+  then
+    fail "renderMarkdown regression: numbers in chat messages render as literal 'undefined'"
+  fi
+
+  # Regression: registry.json changes (new agents, dispatch settings) must be
+  # picked up by a long-running control-plane process without a restart.
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { loadRuntimeConfig, refreshRegistry, agentsFromRegistry } = require(`${root}/control-plane/lib/config`);
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'biz-registry-hotreload-'));
+fs.writeFileSync(path.join(tmp, 'registry.json'), JSON.stringify({ settings: {}, products: [{ slug: 'alpha', name: 'Alpha' }] }));
+
+const config = loadRuntimeConfig(tmp);
+if (agentsFromRegistry(config.registry).map((a) => a.slug).join(',') !== 'alpha') {
+  console.error('initial load did not include alpha');
+  process.exit(1);
+}
+
+const later = new Date(Date.now() + 2000);
+fs.writeFileSync(path.join(tmp, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 9 } },
+  products: [{ slug: 'alpha', name: 'Alpha' }, { slug: 'beta', name: 'Beta' }],
+}));
+fs.utimesSync(path.join(tmp, 'registry.json'), later, later);
+
+refreshRegistry(config);
+const slugs = agentsFromRegistry(config.registry).map((a) => a.slug).join(',');
+if (slugs !== 'alpha,beta') { console.error('new agent not picked up without restart:', slugs); process.exit(2); }
+if (config.maxConcurrency !== 9) { console.error('dispatch settings not refreshed:', config.maxConcurrency); process.exit(3); }
+fs.rmSync(tmp, { recursive: true, force: true });
+NODE
+  then
+    fail "config.refreshRegistry: new agents/settings in registry.json are not picked up without a restart"
   fi
 
   # First-run state: no auth.json → hasAuth false; after initAuth → hasAuth true, verifyLogin works
