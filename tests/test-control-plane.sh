@@ -455,6 +455,18 @@ if (bare.includes('undefined')) { console.error('bare number rendered as undefin
 const mixed = sandbox.renderMarkdown('Use `code 5` here, and 9 more.');
 if (mixed.includes('undefined')) { console.error('number near a code span rendered as undefined:', mixed); process.exit(2); }
 if (!mixed.includes('<code>code 5</code>')) { console.error('code span not preserved:', mixed); process.exit(3); }
+// Regression: operator-reported shape (2026-07-15) — numbers embedded in a
+// longer report sentence, including em-dash/arrow punctuation, must survive.
+const report = sandbox.renderMarkdown(
+  "Agent T's scaled-up run (10 layers full-depth, 4000 steps, 8x the smoke test) " +
+  "confirms the null result: loss dropped much further (3.22→1.89) but " +
+  "generations are still byte-identical to baseline on all 40 probes " +
+  "— activation steering just isn't flipping decoding, at any scale tried."
+);
+if (report.includes('undefined')) { console.error('report numbers rendered as undefined:', report); process.exit(4); }
+if (!report.includes('4000 steps') || !report.includes('all 40 probes')) {
+  console.error('report numbers/spacing not preserved:', report); process.exit(5);
+}
 NODE
   then
     fail "renderMarkdown regression: numbers in chat messages render as literal 'undefined'"
