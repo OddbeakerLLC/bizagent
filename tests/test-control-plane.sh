@@ -175,8 +175,8 @@ grep -q "org.*config.registry" "$SERVER" \
   || fail "server does not include org in state response"
 grep -q "getAgentDetail" "$SERVER" \
   || fail "server missing getAgentDetail function"
-grep -q "refreshRegistry" "$SERVER" \
-  || fail "server does not refresh registry.json without a restart"
+grep -q "refreshRuntimeConfig\|refreshRegistry" "$SERVER" \
+  || fail "server does not refresh config without a restart"
 grep -q "refreshRegistry" "$ROOT/control-plane/lib/config.js" \
   || fail "config does not expose a registry refresh mechanism"
 grep -q "CODESPAN" "$ROOT/control-plane/public/app.js" \

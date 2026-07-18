@@ -4,7 +4,7 @@ const path = require("path");
 const {
   agentsFromRegistry,
   loadRuntimeConfig,
-  refreshRegistry,
+  refreshRuntimeConfig,
 } = require("./lib/config");
 const {
   createSession,
@@ -171,9 +171,9 @@ function syncUserInbox(config) {
 }
 
 async function handleApi(config, req, res) {
-  // Pick up registry.json edits (new/removed agents, dispatch/model settings)
-  // without requiring a control-plane restart.
-  refreshRegistry(config);
+  // Pick up registry.json and .cli edits (new/removed agents, dispatch/model
+  // settings, CLI command/flags) without requiring a control-plane restart.
+  refreshRuntimeConfig(config);
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (url.pathname === "/api/setup" && req.method === "POST") {
@@ -271,7 +271,7 @@ async function handleApi(config, req, res) {
 }
 
 function runTick(config) {
-  refreshRegistry(config);
+  refreshRuntimeConfig(config);
   routeOutboxes(config.hub);
   syncUserInbox(config);
   dispatchPendingAgents(config);

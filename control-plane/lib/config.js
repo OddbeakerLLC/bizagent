@@ -38,8 +38,12 @@ function registryMtimeMs(hub) {
   }
 }
 
+function cliFile(hub) {
+  return path.join(hub, ".cli");
+}
+
 function readCliFile(hub) {
-  const file = path.join(hub, ".cli");
+  const file = cliFile(hub);
   const result = {};
   if (!fs.existsSync(file)) return result;
   for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
@@ -47,6 +51,31 @@ function readCliFile(hub) {
     if (match) result[match[1]] = match[2].replace(/^(["'])(.*)\1$/, "$2");
   }
   return result;
+}
+
+function cliMtimeMs(hub) {
+  try {
+    return fs.statSync(cliFile(hub)).mtimeMs;
+  } catch (_err) {
+    return 0;
+  }
+}
+
+// CLI-launch fields derived from the .cli file (with env-var overrides). Kept
+// in a function so a long-running process can re-derive them when .cli changes
+// on disk, without a restart. See refreshCliConfig().
+function deriveCliSettings(cli) {
+  return {
+    cli: process.env.BIZAGENT_CLI || cli.CLI || cli.CLI_CMD || "claude",
+    promptFlag:
+      process.env.BIZAGENT_CLI_PROMPT_FLAG || cli.CLI_PROMPT_FLAG || "-p",
+    extraArgs:
+      process.env.BIZAGENT_CLI_EXTRA_ARGS ||
+      (cli.CLI_EXTRA_ARGS !== undefined
+        ? cli.CLI_EXTRA_ARGS
+        : cli.CLI_YOLO_FLAG) ||
+      "",
+  };
 }
 
 // Fields derived from registry.json that should stay in sync with the file
@@ -80,17 +109,8 @@ function loadRuntimeConfig(hubInput) {
   // reload again on the next refresh, never miss a change (see refreshRegistry).
   const registryMtime = registryMtimeMs(hub);
   const registry = loadRegistry(hub);
-  const cliFile = readCliFile(hub);
-  const cli =
-    process.env.BIZAGENT_CLI || cliFile.CLI || cliFile.CLI_CMD || "claude";
-  const promptFlag =
-    process.env.BIZAGENT_CLI_PROMPT_FLAG || cliFile.CLI_PROMPT_FLAG || "-p";
-  const extraArgs =
-    process.env.BIZAGENT_CLI_EXTRA_ARGS ||
-    (cliFile.CLI_EXTRA_ARGS !== undefined
-      ? cliFile.CLI_EXTRA_ARGS
-      : cliFile.CLI_YOLO_FLAG) ||
-    "";
+  const cliMtime = cliMtimeMs(hub);
+  const cliSettings = deriveCliSettings(readCliFile(hub));
   const port = Number(
     process.env.BIZAGENT_PORT ||
       (registry.settings &&
@@ -108,14 +128,13 @@ function loadRuntimeConfig(hubInput) {
   return {
     hub,
     registry,
-    cli,
-    promptFlag,
-    extraArgs,
+    ...cliSettings,
     port,
     host,
     dryRun: process.env.BIZAGENT_DRY_RUN === "1",
     ...deriveRegistrySettings(registry),
     _registryMtimeMs: registryMtime,
+    _cliMtimeMs: cliMtime,
   };
 }
 
@@ -130,6 +149,25 @@ function refreshRegistry(config) {
   config._registryMtimeMs = mtimeMs;
   config.registry = loadRegistry(config.hub);
   Object.assign(config, deriveRegistrySettings(config.registry));
+  return config;
+}
+
+// Re-reads .cli when it has changed on disk and refreshes the CLI-launch
+// fields (cli, promptFlag, extraArgs) on `config` in place. Cheap to call on
+// every tick (a single stat call) so the control-plane server picks up CLI
+// command/flag/permission changes without a restart.
+function refreshCliConfig(config) {
+  const mtimeMs = cliMtimeMs(config.hub);
+  if (mtimeMs === config._cliMtimeMs) return config;
+  config._cliMtimeMs = mtimeMs;
+  Object.assign(config, deriveCliSettings(readCliFile(config.hub)));
+  return config;
+}
+
+// Picks up both registry.json and .cli edits without a process restart.
+function refreshRuntimeConfig(config) {
+  refreshRegistry(config);
+  refreshCliConfig(config);
   return config;
 }
 
@@ -156,6 +194,8 @@ module.exports = {
   loadRegistry,
   loadRuntimeConfig,
   readJson,
+  refreshCliConfig,
   refreshRegistry,
+  refreshRuntimeConfig,
   registryMtimeMs,
 };
