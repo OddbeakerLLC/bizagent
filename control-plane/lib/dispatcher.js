@@ -5,6 +5,70 @@ const { agentsFromRegistry, appDir } = require('./config');
 const { ensureHubRuntimePrompt } = require('./hub-memory');
 const { pendingMail } = require('./mail');
 const { appendLog } = require('./log');
+const { writeFileUnique } = require('./conversations');
+
+function getRecentHubInboxMessage(hub) {
+  const inboxDir = path.join(hub, 'inbox');
+  try {
+    const files = fs.readdirSync(inboxDir)
+      .filter(f => f.endsWith('.md') && !f.startsWith('.'))
+      .sort()
+      .reverse();
+    if (files.length === 0) return null;
+    const file = path.join(inboxDir, files[0]);
+    const content = fs.readFileSync(file, 'utf8');
+    const match = content.match(/^conversation_id:\s*(.+?)$/m);
+    return match ? match[1].trim() : null;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
+  const errorMsg = `Agent \`${slug}\` failed with exit code ${exitCode}.\n\nStderr:\n\`\`\`\n${stderrTail}\n\`\`\``;
+
+  if (conversationId) {
+    const inboxDir = path.join(hub, 'user', 'inbox');
+    writeFileUnique(inboxDir, `${new Date().toISOString().slice(0, 10)}-cp-agent-error`, [
+      '---',
+      'from: hub',
+      'to: user',
+      `date: ${new Date().toISOString().slice(0, 10)}`,
+      'subject: agent error',
+      `conversation_id: ${conversationId}`,
+      '---',
+      '',
+      errorMsg,
+    ].join('\n'));
+  } else {
+    const journalDir = path.join(appDir(hub), 'incidents');
+    fs.mkdirSync(journalDir, { recursive: true });
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const journalFile = path.join(journalDir, `${dateStr}.md`);
+    const incident = `\n## [Incident] ${slug} exit code ${exitCode}\n${stderrTail.slice(0, 200)}\n`;
+    try {
+      fs.appendFileSync(journalFile, incident);
+    } catch (_err) {
+      fs.writeFileSync(journalFile, `# Incidents\n${incident}`);
+    }
+  }
+}
+
+function readStderrTail(stderrFile, maxBytes = 500) {
+  try {
+    if (!fs.existsSync(stderrFile)) return '';
+    const stat = fs.statSync(stderrFile);
+    const size = stat.size;
+    if (size === 0) return '';
+    const buffer = Buffer.alloc(Math.min(maxBytes, size));
+    const fd = fs.openSync(stderrFile, 'r');
+    fs.readSync(fd, buffer, 0, buffer.length, Math.max(0, size - maxBytes));
+    fs.closeSync(fd);
+    return buffer.toString('utf8').trim();
+  } catch (_err) {
+    return '';
+  }
+}
 
 function promptFileFor(hub, slug) {
   return path.join(hub, 'agents', slug, '.dispatch.md');
@@ -186,6 +250,7 @@ function launchAgent(config, slug, model = '') {
   const extra = buildArgs(extraArgs, model);
   const lock = lockDir(hub, slug);
   const agentLog = path.join(hub, 'logs', `dispatch-${slug}.log`);
+  const agentStderr = path.join(hub, 'logs', `dispatch-${slug}.stderr`);
   const promptFile = ensureDispatchPrompt(hub, slug);
 
   if (dryRun) {
@@ -196,20 +261,28 @@ function launchAgent(config, slug, model = '') {
 
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
   const script = [
-    'HUB="$1"; slug="$2"; cli="$3"; pflag="$4"; extra="$5"; pfile="$6"; agentlog="$7"',
+    'HUB="$1"; slug="$2"; cli="$3"; pflag="$4"; extra="$5"; pfile="$6"; agentlog="$7"; stderrlog="$8"',
     'lockdir="$HUB/agents/$slug/.lock"',
     'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
     'date +%s > "$lockdir/start" 2>/dev/null',
     'trap "rm -rf \\"$lockdir\\"" EXIT',
     'cd "$HUB" || exit 1',
     'prompt="$(cat "$pfile")"',
-    '"$cli" $pflag $extra "$prompt" >> "$agentlog" 2>&1',
+    '"$cli" $pflag $extra "$prompt" >> "$agentlog" 2>> "$stderrlog"',
   ].join('\n');
 
-  const child = spawn('bash', ['-c', script, '_', hub, slug, cli, promptFlag, extra, promptFile, agentLog], {
+  const child = spawn('bash', ['-c', script, '_', hub, slug, cli, promptFlag, extra, promptFile, agentLog, agentStderr], {
     detached: true,
     stdio: 'ignore',
   });
+
+  child.on('exit', (code) => {
+    if (code !== 0 && code !== null) {
+      const stderrTail = readStderrTail(agentStderr);
+      recordAgentError(hub, slug, code, stderrTail, null);
+    }
+  });
+
   child.unref();
   appendLog(hub, `launched ${slug} using agents/${slug}/.dispatch.md`);
 }
@@ -219,6 +292,7 @@ function launchHub(config) {
   const extra = buildArgs(extraArgs, hubModel || '');
   const lock = lockDir(hub, 'hub');
   const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
+  const agentStderr = path.join(hub, 'logs', 'dispatch-hub.stderr');
   const promptFile = ensureHubRuntimePrompt(hub);
 
   if (dryRun) {
@@ -229,7 +303,7 @@ function launchHub(config) {
 
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
   const script = [
-    'HUB="$1"; cli="$2"; pflag="$3"; extra="$4"; pfile="$5"; agentlog="$6"',
+    'HUB="$1"; cli="$2"; pflag="$3"; extra="$4"; pfile="$5"; agentlog="$6"; stderrlog="$7"',
     'lockdir="$HUB/.bizagent/hub.lock"',
     'mkdir -p "$HUB/.bizagent"',
     'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
@@ -237,13 +311,22 @@ function launchHub(config) {
     'trap "rm -rf \\"$lockdir\\"" EXIT',
     'cd "$HUB" || exit 1',
     'prompt="$(cat "$pfile")"',
-    '"$cli" $pflag $extra "$prompt" >> "$agentlog" 2>&1',
+    '"$cli" $pflag $extra "$prompt" >> "$agentlog" 2>> "$stderrlog"',
   ].join('\n');
 
-  const child = spawn('bash', ['-c', script, '_', hub, cli, promptFlag, extra, promptFile, agentLog], {
+  const conversationId = getRecentHubInboxMessage(hub);
+  const child = spawn('bash', ['-c', script, '_', hub, cli, promptFlag, extra, promptFile, agentLog, agentStderr], {
     detached: true,
     stdio: 'ignore',
   });
+
+  child.on('exit', (code) => {
+    if (code !== 0 && code !== null) {
+      const stderrTail = readStderrTail(agentStderr);
+      recordAgentError(hub, 'hub', code, stderrTail, conversationId);
+    }
+  });
+
   child.unref();
   appendLog(hub, 'launched hub using .bizagent/prompts/hub.md');
 }
@@ -299,11 +382,14 @@ module.exports = {
   dispatchFingerprint,
   dispatchRetrySecs,
   ensureDispatchPrompt,
+  getRecentHubInboxMessage,
   isAgentActive,
   launchHub,
   liveRunCount,
   markMailDispatched,
   pendingUndispatchedMail,
   promptFileFor,
+  readStderrTail,
+  recordAgentError,
   tryLock,
 };
