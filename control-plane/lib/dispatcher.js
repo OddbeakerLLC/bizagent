@@ -246,7 +246,7 @@ function buildArgs(extraArgs, modelOverride) {
   return stripped ? `${stripped} --model ${modelOverride}` : `--model ${modelOverride}`;
 }
 
-function launchAgent(config, slug, model = '', agentCli = {}) {
+function launchAgent(config, slug, model = '', cliName = '') {
   const { hub, dryRun, _cliJson } = config;
   const cliJson = _cliJson || {};
   const lock = lockDir(hub, slug);
@@ -261,8 +261,7 @@ function launchAgent(config, slug, model = '', agentCli = {}) {
   }
 
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
-  const cliSettings = getCliSettings(hub, cliJson, config, slug, agentCli);
-  const extra = buildArgs(cliSettings.extraArgs, model);
+  const cliSettings = getCliSettings(hub, cliJson, config, cliName, model);
   const script = [
     'HUB="$1"; slug="$2"; cli="$3"; pflag="$4"; extra="$5"; pfile="$6"; agentlog="$7"; stderrlog="$8"',
     'lockdir="$HUB/agents/$slug/.lock"',
@@ -273,7 +272,7 @@ function launchAgent(config, slug, model = '', agentCli = {}) {
     '"$cli" $pflag "$pfile" $extra >> "$agentlog" 2>> "$stderrlog"',
   ].join('\n');
 
-  const child = spawn('bash', ['-c', script, '_', hub, slug, cliSettings.cli, cliSettings.promptFlag, extra, promptFile, agentLog, agentStderr], {
+  const child = spawn('bash', ['-c', script, '_', hub, slug, cliSettings.cli, cliSettings.promptFlag, cliSettings.extraArgs, promptFile, agentLog, agentStderr], {
     detached: true,
     stdio: 'ignore',
   });
@@ -304,8 +303,7 @@ function launchHub(config) {
   }
 
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
-  const cliSettings = getCliSettings(hub, cliJson, config, 'hub');
-  const extra = buildArgs(cliSettings.extraArgs, hubModel || '');
+  const cliSettings = getCliSettings(hub, cliJson, config, '', hubModel || '');
   const script = [
     'HUB="$1"; cli="$2"; pflag="$3"; extra="$4"; pfile="$5"; agentlog="$6"; stderrlog="$7"',
     'lockdir="$HUB/.bizagent/hub.lock"',
@@ -318,7 +316,7 @@ function launchHub(config) {
   ].join('\n');
 
   const conversationId = getRecentHubInboxMessage(hub);
-  const child = spawn('bash', ['-c', script, '_', hub, cliSettings.cli, cliSettings.promptFlag, extra, promptFile, agentLog, agentStderr], {
+  const child = spawn('bash', ['-c', script, '_', hub, cliSettings.cli, cliSettings.promptFlag, cliSettings.extraArgs, promptFile, agentLog, agentStderr], {
     detached: true,
     stdio: 'ignore',
   });
@@ -369,7 +367,7 @@ function dispatchPendingAgents(config) {
     }
     if (tryLock(config.hub, agent.slug, config.lockLeaseSecs)) {
       markMailDispatched(config.hub, agent.slug, fresh, retrySecs);
-      launchAgent(config, agent.slug, agent.model || config.agentDefaultModel || '', agent.cli);
+      launchAgent(config, agent.slug, agent.model || config.agentDefaultModel || '', agent.cliName || '');
       launched += 1;
       running += 1;
     } else {

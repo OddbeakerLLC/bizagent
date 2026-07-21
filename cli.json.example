@@ -1,27 +1,30 @@
 {
-  "_comment": "Optional CLI configuration. Paths are relative to this hub directory. Per-agent overrides are nested by slug.",
-  "cli": "claude",
-  "promptFlag": "-p",
-  "flags": {
-    "extra": "--model claude-opus-4-8"
-  },
-  "widgets": {
-    "cli": "claude",
-    "promptFlag": "-p",
+  "_comment": "CLI configuration keyed by CLI name (e.g., claude, codex, agy). Each entry defines how to invoke that CLI.",
+  "claude": {
+    "executable": "claude",
     "flags": {
-      "extra": "--model claude-opus-4-8"
-    }
+      "model": "--model claude-opus-4-8"
+    },
+    "yolo": "--dangerously-skip-permissions",
+    "path": ".",
+    "prompt": "-p"
   },
-  "platform": {
-    "promptFlag": "-p",
+  "codex": {
+    "executable": "codex",
     "flags": {
-      "extra": "--model claude-sonnet-5"
-    }
+      "model": "--model codex-pro"
+    },
+    "yolo": "--skip-auth",
+    "path": ".",
+    "prompt": "--prompt"
   },
-  "tooling": {
-    "promptFlag": "-p",
+  "agy": {
+    "executable": "agy",
     "flags": {
-      "extra": "--model claude-haiku-4-5-20251001"
-    }
+      "model": "--model claude-opus-4-8"
+    },
+    "yolo": "--dangerously-skip-permissions",
+    "path": ".",
+    "prompt": "-p"
   }
 }
