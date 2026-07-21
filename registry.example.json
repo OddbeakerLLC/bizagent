@@ -41,6 +41,10 @@
       "name": "Widgets",
       "agent_name": "Agent W",
       "model": "",
+      "cli": {
+        "promptFlag": "-p",
+        "flags": { "extra": "--model claude-opus-4-8" }
+      },
       "projects": [
         { "name": "widgets-web", "path": "../widgets-web", "remote": "" },
         { "name": "widgets-api", "path": "../widgets-api", "remote": "" }
@@ -51,6 +55,10 @@
       "name": "Platform",
       "agent_name": "Agent P",
       "model": "",
+      "cli": {
+        "promptFlag": "-p",
+        "flags": { "extra": "--model claude-sonnet-5" }
+      },
       "projects": [
         { "name": "platform-core", "path": "../platform-core", "remote": "" }
       ]
@@ -60,6 +68,10 @@
       "name": "Tooling",
       "agent_name": "Agent T",
       "model": "",
+      "cli": {
+        "promptFlag": "-p",
+        "flags": { "extra": "--model claude-haiku-4-5-20251001" }
+      },
       "projects": [
         { "name": "cli-tools", "path": "../cli-tools", "remote": "" }
       ]

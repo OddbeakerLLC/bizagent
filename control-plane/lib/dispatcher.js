@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { agentsFromRegistry, appDir } = require('./config');
+const { compileAgentCommand, getCliSettings } = require('./cli-config');
 const { ensureHubRuntimePrompt } = require('./hub-memory');
 const { pendingMail } = require('./mail');
 const { appendLog } = require('./log');
@@ -246,8 +247,8 @@ function buildArgs(extraArgs, modelOverride) {
 }
 
 function launchAgent(config, slug, model = '') {
-  const { hub, cli, promptFlag, extraArgs, dryRun } = config;
-  const extra = buildArgs(extraArgs, model);
+  const { hub, dryRun, _cliJson } = config;
+  const cliJson = _cliJson || {};
   const lock = lockDir(hub, slug);
   const agentLog = path.join(hub, 'logs', `dispatch-${slug}.log`);
   const agentStderr = path.join(hub, 'logs', `dispatch-${slug}.stderr`);
@@ -260,6 +261,8 @@ function launchAgent(config, slug, model = '') {
   }
 
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+  const cliSettings = getCliSettings(hub, cliJson, config, slug);
+  const extra = buildArgs(cliSettings.extraArgs, model);
   const script = [
     'HUB="$1"; slug="$2"; cli="$3"; pflag="$4"; extra="$5"; pfile="$6"; agentlog="$7"; stderrlog="$8"',
     'lockdir="$HUB/agents/$slug/.lock"',
@@ -267,11 +270,10 @@ function launchAgent(config, slug, model = '') {
     'date +%s > "$lockdir/start" 2>/dev/null',
     'trap "rm -rf \\"$lockdir\\"" EXIT',
     'cd "$HUB" || exit 1',
-    'prompt="$(cat "$pfile")"',
-    '"$cli" $pflag $extra "$prompt" >> "$agentlog" 2>> "$stderrlog"',
+    '"$cli" $pflag "$pfile" $extra >> "$agentlog" 2>> "$stderrlog"',
   ].join('\n');
 
-  const child = spawn('bash', ['-c', script, '_', hub, slug, cli, promptFlag, extra, promptFile, agentLog, agentStderr], {
+  const child = spawn('bash', ['-c', script, '_', hub, slug, cliSettings.cli, cliSettings.promptFlag, extra, promptFile, agentLog, agentStderr], {
     detached: true,
     stdio: 'ignore',
   });
@@ -288,8 +290,8 @@ function launchAgent(config, slug, model = '') {
 }
 
 function launchHub(config) {
-  const { hub, cli, promptFlag, extraArgs, dryRun, hubModel } = config;
-  const extra = buildArgs(extraArgs, hubModel || '');
+  const { hub, dryRun, hubModel, _cliJson } = config;
+  const cliJson = _cliJson || {};
   const lock = lockDir(hub, 'hub');
   const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
   const agentStderr = path.join(hub, 'logs', 'dispatch-hub.stderr');
@@ -302,6 +304,8 @@ function launchHub(config) {
   }
 
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+  const cliSettings = getCliSettings(hub, cliJson, config, 'hub');
+  const extra = buildArgs(cliSettings.extraArgs, hubModel || '');
   const script = [
     'HUB="$1"; cli="$2"; pflag="$3"; extra="$4"; pfile="$5"; agentlog="$6"; stderrlog="$7"',
     'lockdir="$HUB/.bizagent/hub.lock"',
@@ -310,12 +314,11 @@ function launchHub(config) {
     'date +%s > "$lockdir/start" 2>/dev/null',
     'trap "rm -rf \\"$lockdir\\"" EXIT',
     'cd "$HUB" || exit 1',
-    'prompt="$(cat "$pfile")"',
-    '"$cli" $pflag $extra "$prompt" >> "$agentlog" 2>> "$stderrlog"',
+    '"$cli" $pflag "$pfile" $extra >> "$agentlog" 2>> "$stderrlog"',
   ].join('\n');
 
   const conversationId = getRecentHubInboxMessage(hub);
-  const child = spawn('bash', ['-c', script, '_', hub, cli, promptFlag, extra, promptFile, agentLog, agentStderr], {
+  const child = spawn('bash', ['-c', script, '_', hub, cliSettings.cli, cliSettings.promptFlag, extra, promptFile, agentLog, agentStderr], {
     detached: true,
     stdio: 'ignore',
   });
