@@ -562,6 +562,58 @@ NODE
   then
     fail "compileAgentCommand argument ordering (-p as last pair) failed"
   fi
+
+  # cli.json must be keyed by CLI name only (claude/codex/agy), not agent slugs.
+  # registry.json must reference CLI by cliName, not embed cli object.
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const fs = require('fs');
+const path = require('path');
+const cliExamplePath = path.join(root, 'cli.json.example');
+const registryExamplePath = path.join(root, 'registry.example.json');
+
+// Load examples
+const cliExample = JSON.parse(fs.readFileSync(cliExamplePath, 'utf8'));
+const registryExample = JSON.parse(fs.readFileSync(registryExamplePath, 'utf8'));
+
+// cli.json keys must be CLI names, not slugs. Known slugs from registry: widgets, platform, tooling.
+const knownSlugs = (registryExample.products || []).map(p => p.slug);
+const cliKeys = Object.keys(cliExample).filter(k => !k.startsWith('_'));
+for (const slug of knownSlugs) {
+  if (cliKeys.includes(slug)) {
+    console.error('cli.json has agent slug key (should only be CLI names):', slug);
+    process.exit(1);
+  }
+}
+
+// cli.json keys should be valid CLI names
+const validCliNames = ['claude', 'codex', 'agy'];
+for (const key of cliKeys) {
+  if (!validCliNames.includes(key)) {
+    console.error('cli.json has unexpected CLI name:', key);
+    process.exit(2);
+  }
+}
+
+// Each product must have cliName field (string), not inline cli object
+for (const product of registryExample.products || []) {
+  if (typeof product.cliName !== 'string') {
+    console.error('product missing cliName field:', product.slug);
+    process.exit(3);
+  }
+  if (product.cli !== undefined) {
+    console.error('product has inline cli object (should use cliName):', product.slug);
+    process.exit(4);
+  }
+  if (!validCliNames.includes(product.cliName)) {
+    console.error('product cliName is not a valid CLI name:', product.cliName);
+    process.exit(5);
+  }
+}
+NODE
+  then
+    fail "cli.json/registry.json schema validation (cliName references only, no slugs in cli.json) failed"
+  fi
 fi
 
 echo "  ok: control-plane"

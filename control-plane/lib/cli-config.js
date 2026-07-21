@@ -21,25 +21,28 @@ function cliJsonMtimeMs(hub) {
   }
 }
 
-function getCliSettings(hub, cliJson, cliFileSettings, slug, agentCliSettings = {}) {
-  const bySlug = cliJson[slug] || {};
-  const cli = process.env.BIZAGENT_CLI || agentCliSettings.cli || bySlug.cli || cliFileSettings.cli || "claude";
-  const promptFlag =
-    process.env.BIZAGENT_CLI_PROMPT_FLAG ||
-    agentCliSettings.promptFlag ||
-    bySlug.promptFlag ||
-    cliFileSettings.promptFlag ||
-    "-p";
-  const extraArgs =
-    process.env.BIZAGENT_CLI_EXTRA_ARGS ||
-    agentCliSettings.flags?.extra ||
-    bySlug.flags?.extra ||
-    bySlug.extraArgs ||
-    agentCliSettings.extraArgs ||
-    cliFileSettings.extraArgs ||
-    "";
+function getCliSettings(hub, cliJson, cliFileSettings, cliName = "", modelOverride = "") {
+  const cliName_ = cliName || cliFileSettings.cli || "claude";
+  const cliDef = cliJson[cliName_] || {};
 
-  return { cli, promptFlag, extraArgs };
+  const executable = process.env.BIZAGENT_CLI || cliDef.executable || cliFileSettings.cli || cliName_;
+  const promptFlag = process.env.BIZAGENT_CLI_PROMPT_FLAG || cliDef.prompt || cliFileSettings.promptFlag || "-p";
+
+  // Build extraArgs from cliDef.flags, .cli file, and env vars; apply model override
+  let baseArgs = process.env.BIZAGENT_CLI_EXTRA_ARGS || cliDef.flags?.extra || cliFileSettings.extraArgs || "";
+  let extraArgs = baseArgs;
+  if (modelOverride) {
+    if (!/^[A-Za-z0-9._:-]+$/.test(modelOverride)) {
+      throw new Error(`Invalid model name: ${modelOverride}`);
+    }
+    const stripped = baseArgs
+      .replace(/--model[= ]\S+/g, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+    extraArgs = stripped ? `${stripped} --model ${modelOverride}` : `--model ${modelOverride}`;
+  }
+
+  return { cli: executable, promptFlag, extraArgs };
 }
 
 function compileAgentCommand(cliSettings, promptFilePath) {
