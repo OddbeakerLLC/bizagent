@@ -49,10 +49,11 @@ function compileAgentCommand(cliSettings, promptFilePath) {
     throw new Error("Missing prompt file path");
   }
 
-  const parts = [cli, promptFlag, promptFilePath];
+  const parts = [cli];
   if (extraArgs) {
     parts.push(extraArgs);
   }
+  parts.push(promptFlag, promptFilePath);
   return parts.join(" ");
 }
 

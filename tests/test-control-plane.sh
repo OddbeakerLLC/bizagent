@@ -521,6 +521,47 @@ NODE
   then
     fail "first-run auth flow (hasAuth/initAuth/verifyLogin) failed"
   fi
+
+  # compileAgentCommand: -p promptPath must be LAST arguments, with extraArgs before it
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const { compileAgentCommand } = require(`${root}/control-plane/lib/cli-config`);
+
+// Test 1: agy with extra flags; -p must be last
+const cmd1 = compileAgentCommand({ cli: 'agy', promptFlag: '-p', extraArgs: '--dangerously-skip-permissions' }, '/path/to/prompt.md');
+const argv1 = cmd1.split(' ');
+if (argv1[argv1.length - 2] !== '-p' || argv1[argv1.length - 1] !== '/path/to/prompt.md') {
+  console.error('Test 1 failed: -p not last:', argv1);
+  process.exit(1);
+}
+
+// Test 2: agy with no extra flags; -p still last
+const cmd2 = compileAgentCommand({ cli: 'agy', promptFlag: '-p', extraArgs: '' }, '/path/to/prompt.md');
+const argv2 = cmd2.split(' ');
+if (argv2[argv2.length - 2] !== '-p' || argv2[argv2.length - 1] !== '/path/to/prompt.md') {
+  console.error('Test 2 failed: -p not last:', argv2);
+  process.exit(2);
+}
+
+// Test 3: claude with extra flags
+const cmd3 = compileAgentCommand({ cli: 'claude', promptFlag: '-p', extraArgs: '--model claude-opus-4-8' }, '/path/to/prompt.md');
+const argv3 = cmd3.split(' ');
+if (argv3[argv3.length - 2] !== '-p' || argv3[argv3.length - 1] !== '/path/to/prompt.md') {
+  console.error('Test 3 failed: -p not last:', argv3);
+  process.exit(3);
+}
+
+// Test 4: Verify argument order for agy with extra flags
+const cmd4 = compileAgentCommand({ cli: 'agy', promptFlag: '-p', extraArgs: '--dangerously-skip-permissions' }, '/path/to/prompt.md');
+const expected4 = 'agy --dangerously-skip-permissions -p /path/to/prompt.md';
+if (cmd4 !== expected4) {
+  console.error('Test 4 failed: wrong order. Got:', cmd4, 'Expected:', expected4);
+  process.exit(4);
+}
+NODE
+  then
+    fail "compileAgentCommand argument ordering (-p as last pair) failed"
+  fi
 fi
 
 echo "  ok: control-plane"
