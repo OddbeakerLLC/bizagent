@@ -246,7 +246,7 @@ function buildArgs(extraArgs, modelOverride) {
   return stripped ? `${stripped} --model ${modelOverride}` : `--model ${modelOverride}`;
 }
 
-function launchAgent(config, slug, model = '') {
+function launchAgent(config, slug, model = '', agentCli = {}) {
   const { hub, dryRun, _cliJson } = config;
   const cliJson = _cliJson || {};
   const lock = lockDir(hub, slug);
@@ -261,7 +261,7 @@ function launchAgent(config, slug, model = '') {
   }
 
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
-  const cliSettings = getCliSettings(hub, cliJson, config, slug);
+  const cliSettings = getCliSettings(hub, cliJson, config, slug, agentCli);
   const extra = buildArgs(cliSettings.extraArgs, model);
   const script = [
     'HUB="$1"; slug="$2"; cli="$3"; pflag="$4"; extra="$5"; pfile="$6"; agentlog="$7"; stderrlog="$8"',
@@ -369,7 +369,7 @@ function dispatchPendingAgents(config) {
     }
     if (tryLock(config.hub, agent.slug, config.lockLeaseSecs)) {
       markMailDispatched(config.hub, agent.slug, fresh, retrySecs);
-      launchAgent(config, agent.slug, agent.model || config.agentDefaultModel || '');
+      launchAgent(config, agent.slug, agent.model || config.agentDefaultModel || '', agent.cli);
       launched += 1;
       running += 1;
     } else {

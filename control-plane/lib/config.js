@@ -205,6 +205,7 @@ function agentsFromRegistry(registry) {
       name: product.name || product.slug,
       agentName: product.agent_name || product.name || product.slug,
       model: product.model || "",
+      cli: product.cli || {},
     }))
     .filter((agent) => agent.slug);
 }

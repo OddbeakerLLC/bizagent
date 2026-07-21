@@ -21,15 +21,21 @@ function cliJsonMtimeMs(hub) {
   }
 }
 
-function getCliSettings(hub, cliJson, cliFileSettings, slug) {
+function getCliSettings(hub, cliJson, cliFileSettings, slug, agentCliSettings = {}) {
   const bySlug = cliJson[slug] || {};
-  const cli = process.env.BIZAGENT_CLI || bySlug.cli || cliFileSettings.cli || "claude";
+  const cli = process.env.BIZAGENT_CLI || agentCliSettings.cli || bySlug.cli || cliFileSettings.cli || "claude";
   const promptFlag =
-    process.env.BIZAGENT_CLI_PROMPT_FLAG || bySlug.promptFlag || cliFileSettings.promptFlag || "-p";
+    process.env.BIZAGENT_CLI_PROMPT_FLAG ||
+    agentCliSettings.promptFlag ||
+    bySlug.promptFlag ||
+    cliFileSettings.promptFlag ||
+    "-p";
   const extraArgs =
     process.env.BIZAGENT_CLI_EXTRA_ARGS ||
+    agentCliSettings.flags?.extra ||
     bySlug.flags?.extra ||
     bySlug.extraArgs ||
+    agentCliSettings.extraArgs ||
     cliFileSettings.extraArgs ||
     "";
 
