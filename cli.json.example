@@ -1,0 +1,27 @@
+{
+  "_comment": "Optional CLI configuration. Paths are relative to this hub directory. Per-agent overrides are nested by slug.",
+  "cli": "claude",
+  "promptFlag": "-p",
+  "flags": {
+    "extra": "--model claude-opus-4-8"
+  },
+  "widgets": {
+    "cli": "claude",
+    "promptFlag": "-p",
+    "flags": {
+      "extra": "--model claude-opus-4-8"
+    }
+  },
+  "platform": {
+    "promptFlag": "-p",
+    "flags": {
+      "extra": "--model claude-sonnet-5"
+    }
+  },
+  "tooling": {
+    "promptFlag": "-p",
+    "flags": {
+      "extra": "--model claude-haiku-4-5-20251001"
+    }
+  }
+}

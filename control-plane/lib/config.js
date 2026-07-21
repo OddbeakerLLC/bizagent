@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { cliJsonMtimeMs, loadCliJson } = require("./cli-config");
 
 function hubPath(input) {
   return path.resolve(
@@ -61,16 +62,27 @@ function cliMtimeMs(hub) {
   }
 }
 
-// CLI-launch fields derived from the .cli file (with env-var overrides). Kept
-// in a function so a long-running process can re-derive them when .cli changes
-// on disk, without a restart. See refreshCliConfig().
-function deriveCliSettings(cli) {
+// CLI-launch fields derived from cli.json and .cli file (with env-var overrides).
+// Kept in a function so a long-running process can re-derive them when either
+// file changes on disk, without a restart. See refreshCliConfig().
+function deriveCliSettings(cli, cliJson) {
+  const globalCliJson = cliJson || {};
   return {
-    cli: process.env.BIZAGENT_CLI || cli.CLI || cli.CLI_CMD || "claude",
+    cli:
+      process.env.BIZAGENT_CLI ||
+      globalCliJson.cli ||
+      cli.CLI ||
+      cli.CLI_CMD ||
+      "claude",
     promptFlag:
-      process.env.BIZAGENT_CLI_PROMPT_FLAG || cli.CLI_PROMPT_FLAG || "-p",
+      process.env.BIZAGENT_CLI_PROMPT_FLAG ||
+      globalCliJson.promptFlag ||
+      cli.CLI_PROMPT_FLAG ||
+      "-p",
     extraArgs:
       process.env.BIZAGENT_CLI_EXTRA_ARGS ||
+      globalCliJson.flags?.extra ||
+      globalCliJson.extraArgs ||
       (cli.CLI_EXTRA_ARGS !== undefined
         ? cli.CLI_EXTRA_ARGS
         : cli.CLI_YOLO_FLAG) ||
@@ -110,7 +122,9 @@ function loadRuntimeConfig(hubInput) {
   const registryMtime = registryMtimeMs(hub);
   const registry = loadRegistry(hub);
   const cliMtime = cliMtimeMs(hub);
-  const cliSettings = deriveCliSettings(readCliFile(hub));
+  const cliJsonMtime = cliJsonMtimeMs(hub);
+  const cliJson = loadCliJson(hub);
+  const cliSettings = deriveCliSettings(readCliFile(hub), cliJson);
   const port = Number(
     process.env.BIZAGENT_PORT ||
       (registry.settings &&
@@ -135,6 +149,8 @@ function loadRuntimeConfig(hubInput) {
     ...deriveRegistrySettings(registry),
     _registryMtimeMs: registryMtime,
     _cliMtimeMs: cliMtime,
+    _cliJsonMtimeMs: cliJsonMtime,
+    _cliJson: cliJson,
   };
 }
 
@@ -152,15 +168,26 @@ function refreshRegistry(config) {
   return config;
 }
 
-// Re-reads .cli when it has changed on disk and refreshes the CLI-launch
-// fields (cli, promptFlag, extraArgs) on `config` in place. Cheap to call on
-// every tick (a single stat call) so the control-plane server picks up CLI
-// command/flag/permission changes without a restart.
+// Re-reads .cli and cli.json when either has changed on disk and refreshes
+// the CLI-launch fields (cli, promptFlag, extraArgs) on `config` in place.
+// Cheap to call on every tick (a single stat call) so the control-plane server
+// picks up CLI command/flag/permission changes without a restart.
 function refreshCliConfig(config) {
-  const mtimeMs = cliMtimeMs(config.hub);
-  if (mtimeMs === config._cliMtimeMs) return config;
-  config._cliMtimeMs = mtimeMs;
-  Object.assign(config, deriveCliSettings(readCliFile(config.hub)));
+  const cliMtime = cliMtimeMs(config.hub);
+  const cliJsonMtime = cliJsonMtimeMs(config.hub);
+  if (
+    cliMtime === config._cliMtimeMs &&
+    cliJsonMtime === config._cliJsonMtimeMs
+  ) {
+    return config;
+  }
+  config._cliMtimeMs = cliMtime;
+  config._cliJsonMtimeMs = cliJsonMtime;
+  config._cliJson = loadCliJson(config.hub);
+  Object.assign(
+    config,
+    deriveCliSettings(readCliFile(config.hub), config._cliJson),
+  );
   return config;
 }
 
@@ -191,6 +218,7 @@ module.exports = {
   agentsFromRegistry,
   ensureDir,
   hubPath,
+  loadCliJson,
   loadRegistry,
   loadRuntimeConfig,
   readJson,
