@@ -289,7 +289,7 @@ function launchAgent(config, slug, model = '', cliName = '') {
 }
 
 function launchHub(config) {
-  const { hub, dryRun, hubModel, _cliJson } = config;
+  const { hub, dryRun, hubModel, hubCliName, _cliJson } = config;
   const cliJson = _cliJson || {};
   const lock = lockDir(hub, 'hub');
   const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
@@ -303,7 +303,8 @@ function launchHub(config) {
   }
 
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
-  const cliSettings = getCliSettings(hub, cliJson, config, '', hubModel || '');
+  // Prefer settings.hub_agent.cliName (via config.hubCliName); empty falls back to .cli / default.
+  const cliSettings = getCliSettings(hub, cliJson, config, hubCliName || '', hubModel || '');
   const script = [
     'HUB="$1"; cli="$2"; pflag="$3"; extra="$4"; pfile="$5"; agentlog="$6"; stderrlog="$7"',
     'lockdir="$HUB/.bizagent/hub.lock"',

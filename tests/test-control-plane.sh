@@ -25,6 +25,10 @@ grep -q "agents/.*/.dispatch.md" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not launch from agents/<slug>/.dispatch.md"
 grep -q "launchHub" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not launch the hub runtime prompt"
+grep -q "hubCliName" "$ROOT/control-plane/lib/config.js" \
+  || fail "config does not derive hub CLI from settings.hub_agent.cliName"
+grep -q "hubCliName" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "launchHub does not pass hubCliName to getCliSettings"
 grep -q "pendingUndispatchedMail(config.hub, 'hub'" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not watch the hub inbox"
 grep -q "deriveHubRuntimePrompt" "$ROOT/control-plane/lib/hub-memory.js" \
@@ -613,6 +617,81 @@ for (const product of registryExample.products || []) {
 NODE
   then
     fail "cli.json/registry.json schema validation (cliName references only, no slugs in cli.json) failed"
+  fi
+
+  # hub_agent.cliName must drive hub launches (not the global .cli default alone)
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { loadRuntimeConfig } = require(`${root}/control-plane/lib/config`);
+const { getCliSettings } = require(`${root}/control-plane/lib/cli-config`);
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-hub-cli-'));
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: {
+    hub_agent: { cliName: 'grok', model: 'grok-4.5' },
+    models: { agent_default: 'grok-4.5' },
+  },
+  products: [],
+}));
+fs.writeFileSync(path.join(hub, '.cli'), [
+  'CLI_CMD=claude',
+  'CLI_PROMPT_FLAG=-p',
+  'CLI_EXTRA_ARGS=--dangerously-skip-permissions',
+  '',
+].join('\n'));
+fs.writeFileSync(path.join(hub, 'cli.json'), JSON.stringify({
+  claude: { executable: 'claude', promptFlag: '-p', flags: { extra: '' } },
+  grok: { executable: 'grok', promptFlag: '-p', flags: { extra: '--always-approve' } },
+}));
+
+const config = loadRuntimeConfig(hub);
+if (config.hubCliName !== 'grok') {
+  console.error('hubCliName wrong:', config.hubCliName);
+  process.exit(1);
+}
+if (config.hubModel !== 'grok-4.5') {
+  console.error('hubModel wrong:', config.hubModel);
+  process.exit(2);
+}
+const settings = getCliSettings(hub, config._cliJson, config, config.hubCliName || '', config.hubModel || '');
+if (settings.cli !== 'grok') {
+  console.error('hub executable wrong:', settings.cli);
+  process.exit(3);
+}
+if (!settings.extraArgs.includes('--model grok-4.5')) {
+  console.error('hub model not applied:', settings.extraArgs);
+  process.exit(4);
+}
+if (!settings.extraArgs.includes('--always-approve')) {
+  console.error('hub grok extra flags missing:', settings.extraArgs);
+  process.exit(5);
+}
+
+// Empty hub_agent.cliName falls back to global default (still claude from .cli/cli.json)
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { hub_agent: { model: '' }, models: {} },
+  products: [],
+}));
+const fallback = loadRuntimeConfig(hub);
+if (fallback.hubCliName !== '') {
+  console.error('empty hubCliName expected, got:', fallback.hubCliName);
+  process.exit(6);
+}
+const fallbackSettings = getCliSettings(
+  hub, fallback._cliJson, fallback, fallback.hubCliName || '', fallback.hubModel || '',
+);
+if (fallbackSettings.cli !== 'claude') {
+  console.error('fallback executable wrong:', fallbackSettings.cli);
+  process.exit(7);
+}
+
+fs.rmSync(hub, { recursive: true, force: true });
+NODE
+  then
+    fail "hub_agent.cliName does not control hub CLI selection"
   fi
 fi
 

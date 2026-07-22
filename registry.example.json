@@ -20,8 +20,9 @@
       "port": 8787
     },
     "hub_agent": {
-      "_comment": "Optional hub PTL agent settings for control-plane launches.",
+      "_comment": "Optional hub PTL agent settings for control-plane launches. cliName references an entry in cli.json (e.g. claude, grok); empty falls back to .cli / default.",
       "prompt": "You are the hub PTL agent. Read inbox/*.md for incoming messages, process each one, then archive it. After processing all messages, send a single PushNotification with status=proactive summarizing what arrived and what you did.",
+      "cliName": "",
       "model": ""
     },
     "models": {
