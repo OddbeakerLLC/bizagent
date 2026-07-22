@@ -409,7 +409,7 @@ PY
   mkdir -p "$INSTALL_DIR/inbox"
   local seed_file="$INSTALL_DIR/inbox/${today}-install-first-run.md"
   if [[ ! -f "$seed_file" ]]; then
-    printf "---\nfrom: installer\nto: hub\ndate: %s\nsubject: first-run setup\n---\n\nA new bizagent installation just completed. Read AGENT.md and follow its first-run setup instructions.\n" "$today" > "$seed_file"
+    printf "\---\nfrom: installer\nto: hub\ndate: %s\nsubject: first-run setup\n---\n\nA new bizagent installation just completed. Read AGENT.md and follow its first-run setup instructions.\n" "$today" > "$seed_file"
     ok "first-run message queued"
   fi
 
