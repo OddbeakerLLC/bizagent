@@ -110,6 +110,12 @@ function deriveRegistrySettings(registry) {
       hubAgent.model ||
       models.orchestrator ||
       "",
+    // Same resolution as product agents: cliName preferred, legacy `cli` string accepted.
+    hubCliName:
+      process.env.BIZAGENT_HUB_CLI ||
+      hubAgent.cliName ||
+      (typeof hubAgent.cli === "string" ? hubAgent.cli : "") ||
+      "",
     agentDefaultModel:
       process.env.BIZAGENT_AGENT_DEFAULT_MODEL || models.agent_default || "",
   };
