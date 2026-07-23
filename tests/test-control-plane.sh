@@ -471,6 +471,43 @@ if (report.includes('undefined')) { console.error('report numbers rendered as un
 if (!report.includes('4000 steps') || !report.includes('all 40 probes')) {
   console.error('report numbers/spacing not preserved:', report); process.exit(5);
 }
+
+// GFM tables, safe links, and images.
+const table = sandbox.renderMarkdown(
+  '| Feature | Status |\n' +
+  '| --- | --- |\n' +
+  '| tables | **ok** |\n' +
+  '| links | [docs](https://example.com/docs) |\n'
+);
+if (!table.includes('<table>') || !table.includes('<th>') || !table.includes('<td>')) {
+  console.error('table not rendered as HTML table:', table); process.exit(6);
+}
+if (!table.includes('<strong>ok</strong>')) {
+  console.error('inline markdown inside table cell broken:', table); process.exit(7);
+}
+const link = sandbox.renderMarkdown('See [Example](https://example.com/path) please.');
+if (!link.includes('<a href="https://example.com/path" target="_blank" rel="noopener noreferrer">Example</a>')) {
+  console.error('link not rendered safely:', link); process.exit(8);
+}
+const badLink = sandbox.renderMarkdown('Nope [x](javascript:alert(1)).');
+if (badLink.includes('<a ')) {
+  console.error('unsafe link scheme should not render as anchor:', badLink); process.exit(9);
+}
+const img = sandbox.renderMarkdown(
+  '![test: Image of stir-fry](https://lusciousrecipes.com/wp-content/uploads/2025/12/beef-stir-fry-2025-12-19-145624.webp)'
+);
+if (!img.includes('<img src="https://lusciousrecipes.com/wp-content/uploads/2025/12/beef-stir-fry-2025-12-19-145624.webp"')
+    || !img.includes('alt="test: Image of stir-fry"')
+    || !img.includes('loading="lazy"')) {
+  console.error('image not rendered:', img); process.exit(10);
+}
+const stillCode = sandbox.renderMarkdown('```\n| not | a | table |\n```\nand `![x](https://example.com/a.png)` stays code.');
+if (stillCode.includes('<table>') || stillCode.includes('<img ')) {
+  console.error('fenced/code content should not become table/img:', stillCode); process.exit(11);
+}
+if (!stillCode.includes('<code>![x](https://example.com/a.png)</code>')) {
+  console.error('inline image syntax inside code span broken:', stillCode); process.exit(12);
+}
 NODE
   then
     fail "renderMarkdown regression: numbers in chat messages render as literal 'undefined'"
