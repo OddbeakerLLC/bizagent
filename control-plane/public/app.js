@@ -163,6 +163,31 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+function isSafeHref(url) {
+  return /^(https?:|mailto:|\/|#)/i.test(url);
+}
+
+function isSafeImageSrc(url) {
+  return /^(https?:|\/)/i.test(url);
+}
+
+function parseTableCells(line) {
+  let t = line.trim();
+  if (t.startsWith('|')) t = t.slice(1);
+  if (t.endsWith('|')) t = t.slice(0, -1);
+  return t.split('|').map((cell) => cell.trim());
+}
+
+function isTableSeparator(line) {
+  const cells = parseTableCells(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isTableRow(line) {
+  const t = line.trim();
+  return t.includes('|') && !/^```/.test(t);
+}
+
 function renderInline(text) {
   const codeSpans = [];
   let s = text.replace(/`([^`]+)`/g, (_, code) => {
@@ -174,8 +199,16 @@ function renderInline(text) {
   s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
   s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
   s = s.replace(/_([^_]+)_/g, '<em>$1</em>');
+  // Images before links so ![alt](url) is not partially treated as a link.
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (match, alt, url) => (
+    isSafeImageSrc(url)
+      ? `<img src="${url}" alt="${alt}" loading="lazy">`
+      : match
+  ));
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, url) => (
-    /^(https?:|mailto:|\/|#)/i.test(url) ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>` : match
+    isSafeHref(url)
+      ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
+      : match
   ));
   s = s.replace(/\x00CODESPAN:(\d+)\x00/g, (_, i) => `<code>${codeSpans[Number(i)]}</code>`);
   return s;
@@ -216,6 +249,25 @@ function renderMarkdown(text) {
       }
       i++;
       htmlParts.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    // GFM table: header row + separator row, then zero or more body rows.
+    if (i + 1 < lines.length && isTableRow(line) && isTableSeparator(lines[i + 1])) {
+      flushParagraph();
+      flushList();
+      const headers = parseTableCells(line);
+      i += 2;
+      const bodyRows = [];
+      while (i < lines.length && isTableRow(lines[i]) && !isTableSeparator(lines[i]) && lines[i].trim() !== '') {
+        bodyRows.push(parseTableCells(lines[i]));
+        i++;
+      }
+      const thead = `<thead><tr>${headers.map((h) => `<th>${renderInline(h)}</th>`).join('')}</tr></thead>`;
+      const tbody = bodyRows.length
+        ? `<tbody>${bodyRows.map((row) => `<tr>${row.map((c) => `<td>${renderInline(c)}</td>`).join('')}</tr>`).join('')}</tbody>`
+        : '';
+      htmlParts.push(`<table>${thead}${tbody}</table>`);
       continue;
     }
 
