@@ -81,6 +81,12 @@ grep -q "ensureHubRuntimePrompt" "$ROOT/scripts/bizagent-control-plane.js" \
   || fail "control-plane CLI does not generate hub runtime prompt"
 grep -q "append-hub-turn" "$ROOT/scripts/bizagent-control-plane.js" \
   || fail "control-plane CLI cannot append hub turns to session memory"
+grep -q "write-message" "$ROOT/scripts/bizagent-control-plane.js" \
+  || fail "control-plane CLI missing write-message subcommand"
+grep -q "writeOutboxMessage" "$ROOT/control-plane/lib/mail.js" \
+  || fail "mail module missing writeOutboxMessage helper"
+[ -x "$ROOT/scripts/write-message.sh" ] || [ -f "$ROOT/scripts/write-message.sh" ] \
+  || fail "scripts/write-message.sh missing"
 grep -q "pollSeconds\|poll_seconds" "$ROOT/control-plane/lib/config.js" \
   || fail "config does not expose pollSeconds from settings.dispatch.poll_seconds"
 grep -q "pollSeconds\|pollMs\|setInterval" "$SERVER" \
@@ -1516,5 +1522,153 @@ NODE
     fail "latency phase 2 concurrency/product-injection tests failed"
   fi
 fi
+
+  # write-message helper: filename, frontmatter, optional conversation_id, body file/stdin
+  if ! node - "$ROOT" "$TMP2" <<'NODE'
+const root = process.argv[2];
+const hub = process.argv[3];
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const {
+  frontmatterValue,
+  writeOutboxMessage,
+  subjectSlug,
+} = require(`${root}/control-plane/lib/mail`);
+
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents', 'alpha', 'outbox'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 2, lock_lease_secs: 60 } },
+  products: [{ slug: 'alpha', name: 'Alpha', agent_name: 'Agent A', projects: [] }],
+}));
+
+if (subjectSlug('Hello World!!') !== 'hello-world') {
+  console.error('subjectSlug wrong', subjectSlug('Hello World!!'));
+  process.exit(1);
+}
+
+const r1 = writeOutboxMessage(hub, {
+  from: 'hub',
+  to: 'user',
+  subject: 'console reply',
+  body: 'Hello operator',
+  conversationId: '2026-07-24-main-abcdef',
+  date: '2026-07-24',
+});
+if (!fs.existsSync(r1.file)) {
+  console.error('missing file', r1);
+  process.exit(2);
+}
+if (!/^2026-07-24-hub-console-reply/.test(r1.basename)) {
+  console.error('bad basename', r1.basename);
+  process.exit(3);
+}
+const t1 = fs.readFileSync(r1.file, 'utf8');
+if (frontmatterValue(t1, 'from') !== 'hub' || frontmatterValue(t1, 'to') !== 'user') {
+  console.error('bad from/to', t1);
+  process.exit(4);
+}
+if (frontmatterValue(t1, 'subject') !== 'console reply') {
+  console.error('bad subject', t1);
+  process.exit(5);
+}
+if (frontmatterValue(t1, 'conversation_id') !== '2026-07-24-main-abcdef') {
+  console.error('missing conversation_id', t1);
+  process.exit(6);
+}
+if (!t1.includes('Hello operator')) {
+  console.error('missing body', t1);
+  process.exit(7);
+}
+
+// no conversation_id when omitted
+const r2 = writeOutboxMessage(hub, {
+  from: 'alpha',
+  to: 'hub',
+  subject: 'status',
+  body: 'all good',
+  date: '2026-07-24',
+});
+const t2 = fs.readFileSync(r2.file, 'utf8');
+if (frontmatterValue(t2, 'conversation_id')) {
+  console.error('invented conversation_id', t2);
+  process.exit(8);
+}
+if (!r2.file.includes(`${path.sep}agents${path.sep}alpha${path.sep}outbox${path.sep}`)) {
+  console.error('agent outbox path wrong', r2.file);
+  process.exit(9);
+}
+
+// CLI --content-file
+const bodyFile = path.join(hub, 'body.txt');
+fs.writeFileSync(bodyFile, 'from file\n');
+const cli = spawnSync('node', [
+  `${root}/scripts/bizagent-control-plane.js`, 'write-message',
+  '--hub', hub,
+  '--from', 'hub',
+  '--to', 'alpha',
+  '--subject', 'file body',
+  '--content-file', bodyFile,
+], { encoding: 'utf8' });
+if (cli.status !== 0) {
+  console.error('CLI content-file failed', cli.status, cli.stderr, cli.stdout);
+  process.exit(10);
+}
+const outFiles = fs.readdirSync(path.join(hub, 'outbox')).filter((n) => n.includes('file-body'));
+if (outFiles.length < 1) {
+  console.error('CLI did not write file-body', fs.readdirSync(path.join(hub, 'outbox')));
+  process.exit(11);
+}
+const t3 = fs.readFileSync(path.join(hub, 'outbox', outFiles[0]), 'utf8');
+if (!t3.includes('from file')) {
+  console.error('CLI body missing', t3);
+  process.exit(12);
+}
+
+// CLI stdin via shell wrapper
+const sh = spawnSync('bash', [
+  `${root}/scripts/write-message.sh`,
+  '--hub', hub,
+  '--from', 'alpha',
+  '--to', 'hub',
+  '--subject', 'stdin body',
+  '--conversation-id', '2026-07-24-keep-abcdef',
+], { encoding: 'utf8', input: 'stdin payload\n', env: { ...process.env, BIZAGENT_HUB: hub } });
+if (sh.status !== 0) {
+  console.error('write-message.sh failed', sh.status, sh.stderr, sh.stdout);
+  process.exit(13);
+}
+const agentOut = path.join(hub, 'agents', 'alpha', 'outbox');
+const shFiles = fs.readdirSync(agentOut).filter((n) => n.includes('stdin-body'));
+if (shFiles.length < 1) {
+  console.error('shell wrapper missing file', fs.readdirSync(agentOut));
+  process.exit(14);
+}
+const t4 = fs.readFileSync(path.join(agentOut, shFiles[0]), 'utf8');
+if (frontmatterValue(t4, 'conversation_id') !== '2026-07-24-keep-abcdef') {
+  console.error('shell wrapper lost conversation_id', t4);
+  process.exit(15);
+}
+if (!t4.includes('stdin payload')) {
+  console.error('shell wrapper body missing', t4);
+  process.exit(16);
+}
+
+// reject multi-to
+let threw = false;
+try {
+  writeOutboxMessage(hub, { from: 'hub', to: 'a,b', subject: 'x', body: 'y' });
+} catch (_err) {
+  threw = true;
+}
+if (!threw) {
+  console.error('multi-to should throw');
+  process.exit(17);
+}
+NODE
+  then
+    fail "write-message helper tests failed"
+  fi
 
 echo "  ok: control-plane"

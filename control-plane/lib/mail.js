@@ -234,6 +234,71 @@ function agentMailStatus(hub, agents) {
   }));
 }
 
+const VALID_SLUG = /^[A-Za-z0-9_-]+$/;
+
+function subjectSlug(subject) {
+  return String(subject || 'message')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 48) || 'message';
+}
+
+/**
+ * Outbox directory for a sender slug. Hub root outbox for `hub`; else agents/<slug>/outbox.
+ */
+function outboxFor(hub, fromSlug) {
+  if (fromSlug === 'hub') return path.join(hub, 'outbox');
+  return path.join(hub, 'agents', fromSlug, 'outbox');
+}
+
+/**
+ * Write a correctly named outbox markdown message with YAML frontmatter.
+ * Does not invent conversation_id — only stamps when the caller passes one.
+ *
+ * @returns {{ file: string, basename: string }}
+ */
+function writeOutboxMessage(hub, opts = {}) {
+  const from = String(opts.from || '').trim();
+  const to = String(opts.to || '').trim();
+  const subject = String(opts.subject || '').trim();
+  const body = String(opts.body != null ? opts.body : '').replace(/^\uFEFF/, '');
+  const conversationId = opts.conversationId != null
+    ? String(opts.conversationId).trim()
+    : '';
+
+  if (!from || !VALID_SLUG.test(from)) {
+    throw new Error('writeOutboxMessage: invalid or missing from slug');
+  }
+  if (!to || !isValidSingleRecipient(to)) {
+    throw new Error('writeOutboxMessage: invalid or missing to slug');
+  }
+  if (isMultiRecipient(to)) {
+    throw new Error('writeOutboxMessage: multi-recipient to is not allowed');
+  }
+  if (!subject) {
+    throw new Error('writeOutboxMessage: subject is required');
+  }
+
+  const date = opts.date || new Date().toISOString().slice(0, 10);
+  const header = [
+    '---',
+    `from: ${from}`,
+    `to: ${to}`,
+    `date: ${date}`,
+    `subject: ${subject}`,
+    conversationId ? `conversation_id: ${conversationId}` : '',
+    '---',
+  ].filter((line) => line !== '').join('\n');
+
+  const content = `${header}\n\n${body.replace(/\s+$/, '')}\n`;
+  const outbox = outboxFor(hub, from);
+  ensureDir(outbox);
+  const basename = `${date}-${from}-${subjectSlug(subject)}.md`;
+  const file = writeContentUnique(outbox, basename, content);
+  return { file, basename: path.basename(file), outbox };
+}
+
 module.exports = {
   agentMailStatus,
   canRouteToUser,
@@ -242,12 +307,15 @@ module.exports = {
   isMultiRecipient,
   isValidSingleRecipient,
   maybeStampUserConversationId,
+  outboxFor,
   pendingMail,
   quarantineDir,
   quarantineOutboxFile,
   recipientSlugs,
   routeOutboxes,
   safeInboxFor,
+  subjectSlug,
   writeContentUnique,
   writeFileUnique,
+  writeOutboxMessage,
 };
