@@ -118,7 +118,7 @@ function getConversation(hub, id) {
 }
 
 /** Deterministic CP launch ack — no model. Superseded when a real hub reply arrives. */
-const LAUNCH_ACK_TEXT = 'PTL on it…';
+const LAUNCH_ACK_TEXT = 'Working. Stand by...';
 const LAUNCH_ACK_KIND = 'launch-ack';
 const STATUS_ERROR_KIND = 'error';
 
@@ -330,15 +330,66 @@ function readUserInboxMessages(hub) {
   return relayed;
 }
 
+
+function pendingHubTurnsFile(hub) {
+  return path.join(appDir(hub), 'pending-hub-turns.json');
+}
+
+/**
+ * Conversation that initiated an in-flight console hub turn.
+ * Prefer this over the currently-viewed chat when stamping hub→user mail
+ * so a reply cannot land in a different session after the operator switches tabs.
+ */
+function getOriginatingConversationId(hub) {
+  const data = readJson(pendingHubTurnsFile(hub), null);
+  const turns = data && Array.isArray(data.turns) ? data.turns : [];
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    const id = turns[i] && turns[i].conversationId;
+    if (id && getConversation(hub, id)) return id;
+  }
+  return null;
+}
+
+/**
+ * Id to stamp on hub→user mail missing conversation_id.
+ * Originating (in-flight) turn wins; else the open console conversation.
+ */
+function getStampConversationId(hub) {
+  return getOriginatingConversationId(hub) || getActiveConversationId(hub);
+}
+
+function deleteConversation(hub, id) {
+  let file;
+  try {
+    file = safeConversationFile(hub, id);
+  } catch (_err) {
+    return false;
+  }
+  if (!fs.existsSync(file)) return false;
+  fs.unlinkSync(file);
+  const active = readJson(activeConversationFile(hub), null);
+  if (active && active.id === id) {
+    try {
+      fs.unlinkSync(activeConversationFile(hub));
+    } catch (_err) {
+      /* ignore */
+    }
+  }
+  return true;
+}
+
 module.exports = {
   ACTIVE_CONVERSATION_MAX_AGE_MS,
   appendMessage,
   assertValidConversationId,
   conversationNameFromContent,
   createConversation,
+  deleteConversation,
   frontmatterValue,
   getActiveConversationId,
   getConversation,
+  getOriginatingConversationId,
+  getStampConversationId,
   isLaunchAckMessage,
   LAUNCH_ACK_KIND,
   LAUNCH_ACK_TEXT,
