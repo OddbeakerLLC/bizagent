@@ -459,11 +459,19 @@ function excerpt(content) {
   return `${text.slice(0, MAX_EXCERPT_CHARS - 3)}...`;
 }
 
-function roleLabel(role) {
-  return role === 'user' ? 'Operator' : 'Hub';
+function roleLabel(role, hub) {
+  if (role === 'user') {
+    // Lazy require avoids load cycles with conversations → hub-memory.
+    try {
+      return require('./profile').userDisplayName(hub);
+    } catch (_err) {
+      return 'You';
+    }
+  }
+  return 'Hub';
 }
 
-function renderSummary(existingSummary, olderTurns) {
+function renderSummary(existingSummary, olderTurns, hub) {
   const lines = [];
   if (existingSummary) lines.push(existingSummary.trim());
   if (olderTurns.length === 0 && lines.length === 0) return '- No older turns summarized yet.';
@@ -472,15 +480,15 @@ function renderSummary(existingSummary, olderTurns) {
   if (olderTurns.length > 0) lines.push(`- ${olderTurns.length} older turn(s) compressed into summary form.`);
   if (omitted > 0) lines.push(`- ${omitted} earliest summarized turn(s) omitted from this compact runtime file.`);
   for (const turn of shown) {
-    lines.push(`- ${roleLabel(turn.role)}: ${excerpt(turn.content)}`);
+    lines.push(`- ${roleLabel(turn.role, hub)}: ${excerpt(turn.content)}`);
   }
   return lines.join('\n');
 }
 
-function renderRecentTurns(recentTurns) {
+function renderRecentTurns(recentTurns, hub) {
   if (recentTurns.length === 0) return '_No recent turns yet._';
   return recentTurns.map((turn) => [
-    `### ${roleLabel(turn.role)} - ${turn.created_at || 'unknown time'}`,
+    `### ${roleLabel(turn.role, hub)} - ${turn.created_at || 'unknown time'}`,
     '',
     '```text',
     String(turn.content || '').trim(),
@@ -488,7 +496,7 @@ function renderRecentTurns(recentTurns) {
   ].join('\n')).join('\n\n');
 }
 
-function renderHubSession(conversation) {
+function renderHubSession(conversation, hub) {
   const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
   const recent = messages.slice(-MAX_RECENT_TURNS);
   const older = messages.slice(0, Math.max(0, messages.length - recent.length));
@@ -501,11 +509,11 @@ function renderHubSession(conversation) {
     '',
     '## Rolling Summary',
     '',
-    renderSummary(conversation.summary, older),
+    renderSummary(conversation.summary, older, hub),
     '',
     '## Recent Turns',
     '',
-    renderRecentTurns(recent),
+    renderRecentTurns(recent, hub),
     '',
   ].join('\n');
 }
@@ -519,14 +527,14 @@ function resetHubSession(hub, conversation) {
     updated_at: (conversation && conversation.updated_at) || new Date().toISOString(),
     messages: [],
   };
-  fs.writeFileSync(file, renderHubSession(conv));
+  fs.writeFileSync(file, renderHubSession(conv, hub));
   return file;
 }
 
 function compactHubSession(hub, conversation) {
   ensureDir(appDir(hub));
   const file = hubSessionFile(hub);
-  fs.writeFileSync(file, renderHubSession(conversation || {}));
+  fs.writeFileSync(file, renderHubSession(conversation || {}, hub));
   return file;
 }
 

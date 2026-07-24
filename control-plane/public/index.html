@@ -18,8 +18,10 @@
           <label for="conversationSelect">Conversation</label>
           <select id="conversationSelect"></select>
           <button id="newConversation" type="button" title="New conversation" aria-label="New conversation">+</button>
+          <button id="deleteConversation" type="button" class="btn-secondary" title="Delete conversation" aria-label="Delete conversation">Delete</button>
         </div>
         <div class="auth-controls">
+          <button id="editDisplayName" type="button" class="btn-secondary" hidden title="Change your display name">Name</button>
           <span id="authStatus" class="auth-status">Checking session...</span>
           <button id="logout" type="button" hidden>Logout</button>
         </div>
@@ -29,6 +31,12 @@
         <input id="username" autocomplete="username" placeholder="Username">
         <input id="password" autocomplete="current-password" placeholder="Password" type="password">
         <button id="login" type="button">Login</button>
+      </div>
+      <div id="namePanel" class="name-panel" hidden>
+        <p class="name-hint">What should we call you in chat?</p>
+        <input id="displayNameInput" autocomplete="name" placeholder="Your name" maxlength="80">
+        <button id="saveDisplayName" type="button">Save</button>
+        <span id="nameStatus" class="auth-status" hidden></span>
       </div>
       <div id="messages" class="messages" aria-live="polite"></div>
       <form id="composer" class="fixed-composer">

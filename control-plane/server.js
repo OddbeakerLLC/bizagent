@@ -19,6 +19,7 @@ const {
   appendMessage,
   conversationNameFromContent,
   createConversation,
+  deleteConversation,
   getConversation,
   listConversations,
   readUserInboxMessages,
@@ -33,6 +34,7 @@ const {
 } = require("./lib/dispatcher");
 const { ensureHubRuntimePrompt } = require("./lib/hub-memory");
 const { agentMailStatus, routeOutboxes } = require("./lib/mail");
+const { getProfile, setProfile } = require("./lib/profile");
 const { appendLog } = require("./lib/log");
 
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -233,6 +235,19 @@ async function handleApi(config, req, res) {
     return send(res, 200, createConversation(config.hub, body.name));
   }
 
+  if (url.pathname === "/api/profile" && req.method === "GET") {
+    return send(res, 200, getProfile(config.hub));
+  }
+
+  if (url.pathname === "/api/profile" && req.method === "PUT") {
+    const body = await parseBody(req);
+    try {
+      return send(res, 200, setProfile(config.hub, body));
+    } catch (err) {
+      return send(res, 400, { error: err.message || "invalid profile" });
+    }
+  }
+
   const agentDetailMatch = url.pathname.match(/^\/api\/agent-detail\/([^/]+)$/);
   if (agentDetailMatch && req.method === "GET") {
     const slug = decodeURIComponent(agentDetailMatch[1]);
@@ -257,6 +272,17 @@ async function handleApi(config, req, res) {
     // missing conversation_id can be stamped on route and relay into chat.
     setActiveConversation(config.hub, id);
     return send(res, 200, conv);
+  }
+
+  if (conversationMatch && req.method === "DELETE") {
+    const id = decodeURIComponent(conversationMatch[1]);
+    if (!getConversation(config.hub, id)) {
+      return send(res, 404, { error: "conversation not found" });
+    }
+    if (!deleteConversation(config.hub, id)) {
+      return send(res, 500, { error: "could not delete conversation" });
+    }
+    return send(res, 200, { ok: true, id });
   }
 
   const messageMatch = url.pathname.match(

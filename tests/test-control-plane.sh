@@ -61,6 +61,28 @@ grep -q "drainHubTurnSafety" "$ROOT/control-plane/server.js" \
   || fail "server tick does not drain hub-turn safety net"
 grep -q "launch-ack" "$ROOT/control-plane/public/app.js" \
   || fail "UI does not style launch-ack status messages"
+grep -q "Working. Stand by" "$ROOT/control-plane/lib/conversations.js" \
+  || fail "launch-ack text is not 'Working. Stand by...'"
+! grep -q "PTL on it" "$ROOT/control-plane/lib/conversations.js" \
+  || fail "stale 'PTL on it' launch-ack text still present"
+grep -q "getStampConversationId" "$ROOT/control-plane/lib/conversations.js" \
+  || fail "missing originating-conversation stamp helper"
+grep -q "getStampConversationId" "$ROOT/control-plane/lib/mail.js" \
+  || fail "router does not stamp from originating conversation"
+grep -q "deleteConversation" "$ROOT/control-plane/lib/conversations.js" \
+  || fail "missing deleteConversation helper"
+grep -q 'DELETE' "$ROOT/control-plane/server.js" \
+  || fail "server missing conversation DELETE route"
+grep -q "deleteConversation" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing delete conversation control"
+grep -q "display_name" "$ROOT/control-plane/lib/profile.js" \
+  || fail "missing profile/display_name module"
+grep -q "/api/profile" "$ROOT/control-plane/server.js" \
+  || fail "server missing profile API"
+grep -q "displayName" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing display name handling"
+! grep -E "textContent = ['\"]Operator['\"]|['\"]Operator['\"]|'CEO'|\"CEO\"" "$ROOT/control-plane/public/app.js" \
+  || fail "UI still labels the human as Operator/CEO"
 [ -f "$ROOT/control-plane/lib/hub-turn-safety.js" ] \
   || fail "hub-turn-safety module missing"
 grep -q "recordUserInboxDelivery" "$ROOT/control-plane/lib/conversations.js" \
@@ -564,6 +586,70 @@ if (otherAfter.messages.some((m) => m.content === 'keep original')) {
   console.error('keep original wrongly landed in active other conv');
   process.exit(19);
 }
+
+// In-flight originating turn beats currently-viewed (active) conversation
+const origin = createConversation(hub, 'Origin Chat');
+const viewed = createConversation(hub, 'Viewed Chat');
+setActiveConversation(hub, viewed.id);
+const { appDir } = require(`${root}/control-plane/lib/config`);
+const pendingFile = path.join(appDir(hub), 'pending-hub-turns.json');
+fs.mkdirSync(appDir(hub), { recursive: true });
+fs.writeFileSync(pendingFile, JSON.stringify({
+  turns: [{
+    conversationId: origin.id,
+    startedAt: new Date().toISOString(),
+    logByteOffset: 0,
+  }],
+}, null, 2));
+const {
+  getOriginatingConversationId,
+  getStampConversationId,
+} = require(`${root}/control-plane/lib/conversations`);
+if (getOriginatingConversationId(hub) !== origin.id) {
+  console.error('originating id mismatch', getOriginatingConversationId(hub), origin.id);
+  process.exit(20);
+}
+if (getStampConversationId(hub) !== origin.id) {
+  console.error('stamp should prefer originating over active', getStampConversationId(hub));
+  process.exit(21);
+}
+fs.writeFileSync(path.join(hub, 'outbox', '2026-07-24-hub-user-origin.md'), `---
+from: hub
+to: user
+date: 2026-07-24
+subject: origin stamp
+---
+
+origin reply
+`);
+routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected origin stamp deliver', routed);
+  process.exit(22);
+}
+const originPath = path.join(userInbox(hub), '2026-07-24-hub-user-origin.md');
+const originText = fs.readFileSync(originPath, 'utf8');
+if (frontmatterValue(originText, 'conversation_id') !== origin.id) {
+  console.error('stamped active instead of originating', originText);
+  process.exit(23);
+}
+relayed = readUserInboxMessages(hub);
+if (relayed !== 1) {
+  console.error('expected origin relay', relayed);
+  process.exit(24);
+}
+const originAfter = getConversation(hub, origin.id);
+if (!originAfter.messages.some((m) => m.content === 'origin reply')) {
+  console.error('origin reply not in originating conv');
+  process.exit(25);
+}
+const viewedAfter = getConversation(hub, viewed.id);
+if (viewedAfter.messages.some((m) => m.content === 'origin reply')) {
+  console.error('origin reply crossed into viewed conv');
+  process.exit(26);
+}
+// Clear fixture so later dry-run launch tests on the same hub see no pending turns.
+fs.unlinkSync(pendingFile);
 NODE
   then
     fail "conversation_id stamp-on-route failed"
@@ -1872,6 +1958,111 @@ if (!threw) {
 NODE
   then
     fail "write-message helper tests failed"
+  fi
+
+  # delete conversation + display name profile
+  if ! node - "$ROOT" "$TMP2" <<'NODE'
+const root = process.argv[2];
+const hub = process.argv[3];
+const fs = require('fs');
+const path = require('path');
+const {
+  createConversation,
+  deleteConversation,
+  getConversation,
+  listConversations,
+  setActiveConversation,
+  getActiveConversationId,
+} = require(`${root}/control-plane/lib/conversations`);
+const { getProfile, setProfile, userDisplayName } = require(`${root}/control-plane/lib/profile`);
+const { compactHubSession } = require(`${root}/control-plane/lib/hub-memory`);
+
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 2, lock_lease_secs: 60 } },
+  products: [],
+}));
+
+// profile defaults empty; set name
+const empty = getProfile(hub);
+if (empty.display_name) {
+  console.error('expected empty display name', empty);
+  process.exit(1);
+}
+if (userDisplayName(hub) !== 'You') {
+  console.error('fallback display name should be You', userDisplayName(hub));
+  process.exit(2);
+}
+const saved = setProfile(hub, { display_name: '  Ada  ' });
+if (saved.display_name !== 'Ada') {
+  console.error('display name not trimmed', saved);
+  process.exit(3);
+}
+if (getProfile(hub).display_name !== 'Ada') {
+  console.error('profile not persisted');
+  process.exit(4);
+}
+if (userDisplayName(hub) !== 'Ada') {
+  console.error('userDisplayName mismatch');
+  process.exit(5);
+}
+let threw = false;
+try { setProfile(hub, { display_name: '   ' }); } catch (_err) { threw = true; }
+if (!threw) {
+  console.error('empty display name should throw');
+  process.exit(6);
+}
+
+// session memory uses display name, not Operator/CEO
+const conv = createConversation(hub, 'Named');
+const { appendMessage } = require(`${root}/control-plane/lib/conversations`);
+appendMessage(hub, conv.id, 'user', 'hello there');
+const sessionPath = path.join(hub, '.bizagent', 'hub-session.md');
+const session = fs.readFileSync(sessionPath, 'utf8');
+if (!session.includes('### Ada -') && !session.includes('- Ada:')) {
+  // compact writes recent turns with role label
+  if (!/Ada/.test(session)) {
+    console.error('session missing display name', session);
+    process.exit(7);
+  }
+}
+if (/\bOperator\b/.test(session) || /\bCEO\b/.test(session)) {
+  console.error('session still labels human Operator/CEO', session);
+  process.exit(8);
+}
+
+// delete conversation
+const keep = createConversation(hub, 'Keep');
+const drop = createConversation(hub, 'Drop');
+setActiveConversation(hub, drop.id);
+if (!deleteConversation(hub, drop.id)) {
+  console.error('deleteConversation returned false');
+  process.exit(9);
+}
+if (getConversation(hub, drop.id)) {
+  console.error('deleted conversation still readable');
+  process.exit(10);
+}
+if (getActiveConversationId(hub) === drop.id) {
+  console.error('active conversation not cleared on delete');
+  process.exit(11);
+}
+const names = listConversations(hub).map((c) => c.name).sort();
+if (names.includes('Drop')) {
+  console.error('deleted still listed', names);
+  process.exit(12);
+}
+if (!getConversation(hub, keep.id)) {
+  console.error('kept conversation missing');
+  process.exit(13);
+}
+if (deleteConversation(hub, 'not-a-valid-id')) {
+  console.error('invalid id should not delete');
+  process.exit(14);
+}
+NODE
+  then
+    fail "delete conversation / display name profile failed"
   fi
 
 echo "  ok: control-plane"

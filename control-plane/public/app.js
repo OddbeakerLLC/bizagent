@@ -5,6 +5,8 @@ let needsSetup = false;
 let lastConversationStamp = '';
 let lastAgentsJson = '';
 let titleSet = false;
+/** Persisted console display name (never Operator/CEO). */
+let displayName = '';
 
 function conversationPollStamp(conv) {
   const messages = conv && Array.isArray(conv.messages) ? conv.messages : [];
@@ -26,7 +28,29 @@ function setAuthStatus(message, kind = 'neutral') {
 function setAuthenticated(isAuthenticated, message) {
   document.getElementById('authPanel').hidden = isAuthenticated;
   document.getElementById('logout').hidden = !isAuthenticated;
+  document.getElementById('editDisplayName').hidden = !isAuthenticated;
+  if (!isAuthenticated) {
+    document.getElementById('namePanel').hidden = true;
+  }
   setAuthStatus(message || (isAuthenticated ? 'Signed in' : 'Login required'), isAuthenticated ? 'ok' : 'warn');
+}
+
+function setNameStatus(message, kind = 'neutral') {
+  const status = document.getElementById('nameStatus');
+  if (!message) {
+    status.hidden = true;
+    status.textContent = '';
+    return;
+  }
+  status.hidden = false;
+  status.textContent = message;
+  status.dataset.kind = kind;
+}
+
+function messageAuthorLabel(msg) {
+  if (msg.role === 'user') return displayName || 'You';
+  if (msg.role === 'status') return '';
+  return 'Hub';
 }
 
 function setSetupMode(isSetup) {
@@ -340,10 +364,75 @@ function renderMessages(messages) {
   messages.forEach((msg) => {
     const el = document.createElement('div');
     el.className = messageClassName(msg);
-    el.innerHTML = renderMarkdown(msg.content);
+    const author = messageAuthorLabel(msg);
+    if (author) {
+      const label = document.createElement('div');
+      label.className = 'message-author';
+      label.textContent = author;
+      el.appendChild(label);
+    }
+    const body = document.createElement('div');
+    body.className = 'message-body';
+    body.innerHTML = renderMarkdown(msg.content);
+    el.appendChild(body);
     root.appendChild(el);
   });
   root.scrollTop = root.scrollHeight;
+}
+
+async function loadProfile() {
+  const profile = await api('/api/profile');
+  displayName = (profile && profile.display_name) || '';
+  return profile;
+}
+
+function showNamePanel(required) {
+  const panel = document.getElementById('namePanel');
+  panel.hidden = false;
+  panel.dataset.required = required ? '1' : '0';
+  const input = document.getElementById('displayNameInput');
+  input.value = displayName || '';
+  setNameStatus(required ? 'Required before chatting' : '', required ? 'warn' : 'neutral');
+  input.focus();
+}
+
+function hideNamePanel() {
+  document.getElementById('namePanel').hidden = true;
+  setNameStatus('');
+}
+
+async function ensureDisplayName() {
+  await loadProfile();
+  if (displayName) {
+    hideNamePanel();
+    return true;
+  }
+  showNamePanel(true);
+  return false;
+}
+
+async function saveDisplayName() {
+  const input = document.getElementById('displayNameInput');
+  const name = (input.value || '').trim();
+  if (!name) {
+    setNameStatus('Name is required', 'warn');
+    return false;
+  }
+  setNameStatus('Saving...', 'pending');
+  try {
+    const profile = await api('/api/profile', {
+      method: 'PUT',
+      body: JSON.stringify({ display_name: name }),
+    });
+    displayName = profile.display_name || name;
+    hideNamePanel();
+    setAuthStatus(`Signed in as ${displayName}`, 'ok');
+    if (currentConversation) await loadConversation(currentConversation);
+    return true;
+  } catch (err) {
+    setNameStatus(err.message || 'Could not save name', 'warn');
+    return false;
+  }
 }
 
 async function loadConversations() {
@@ -434,8 +523,10 @@ async function boot() {
     setAuthStatus('Checking session...', 'pending');
     await refreshStatus();
     sessionActive = true;
+    const named = await ensureDisplayName();
+    setAuthenticated(true, displayName ? `Signed in as ${displayName}` : 'Signed in');
+    if (!named) return;
     await loadConversations();
-    setAuthenticated(true, 'Signed in');
   } catch (_err) {
     if (!sessionActive && !needsSetup) {
       setAuthenticated(false, 'Login required');
@@ -452,15 +543,47 @@ document.getElementById('logout').addEventListener('click', async () => {
   setAuthenticated(false, 'Signed out');
 });
 document.getElementById('newConversation').addEventListener('click', async () => {
+  if (!displayName) {
+    showNamePanel(true);
+    return;
+  }
   const name = window.prompt('Conversation name', 'New conversation');
   if (!name) return;
   const conv = await api('/api/conversations', { method: 'POST', body: JSON.stringify({ name }) });
   currentConversation = conv.id;
   await loadConversations();
 });
+document.getElementById('deleteConversation').addEventListener('click', async () => {
+  if (!currentConversation) return;
+  const select = document.getElementById('conversationSelect');
+  const label = select.options[select.selectedIndex]
+    ? select.options[select.selectedIndex].textContent
+    : 'this conversation';
+  if (!window.confirm(`Delete conversation “${label}”? This cannot be undone.`)) return;
+  const deletedId = currentConversation;
+  await api(`/api/conversations/${encodeURIComponent(deletedId)}`, { method: 'DELETE' });
+  currentConversation = null;
+  lastConversationStamp = '';
+  await loadConversations();
+});
 document.getElementById('conversationSelect').addEventListener('change', (event) => loadConversation(event.target.value));
+document.getElementById('editDisplayName').addEventListener('click', () => showNamePanel(false));
+document.getElementById('saveDisplayName').addEventListener('click', async () => {
+  const ok = await saveDisplayName();
+  if (ok && !currentConversation) await loadConversations();
+});
+document.getElementById('displayNameInput').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    document.getElementById('saveDisplayName').click();
+  }
+});
 document.getElementById('composer').addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (!displayName) {
+    showNamePanel(true);
+    return;
+  }
   const input = document.getElementById('messageInput');
   const content = input.value.trim();
   if (!content || !currentConversation) return;

@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { agentsFromRegistry, appDir, ensureDir, loadRegistry } = require('./config');
 const {
-  getActiveConversationId,
+  getStampConversationId,
   recordUserInboxDelivery,
   stampConversationId,
   userInbox,
@@ -92,16 +92,18 @@ function writeContentUnique(dir, basename, content) {
 }
 
 /**
- * For to:user mail missing conversation_id: stamp the open console conversation
- * if one is active. Never overwrites an existing conversation_id.
+ * For to:user mail missing conversation_id: stamp the originating console
+ * conversation (in-flight hub turn) when present, else the open console chat.
+ * Never overwrites an existing conversation_id. Prefer originating over the
+ * currently-viewed tab so replies cannot cross sessions after a switch.
  * Returns possibly-modified content.
  */
 function maybeStampUserConversationId(hub, text, base) {
-  const activeId = getActiveConversationId(hub);
-  if (!activeId) return text;
-  const stamped = stampConversationId(text, activeId);
+  const stampId = getStampConversationId(hub);
+  if (!stampId) return text;
+  const stamped = stampConversationId(text, stampId);
   if (stamped !== text) {
-    appendLog(hub, `stamp conversation_id=${activeId} file=${base}`);
+    appendLog(hub, `stamp conversation_id=${stampId} file=${base}`);
   }
   return stamped;
 }
