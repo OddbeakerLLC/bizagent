@@ -11,12 +11,22 @@ const {
 } = require('./hub-memory');
 const { pendingMail } = require('./mail');
 const { appendLog } = require('./log');
-const { writeFileUnique } = require('./conversations');
+const { postLaunchAck, writeFileUnique } = require('./conversations');
+const {
+  drainPendingHubTurns,
+  onHubCliExit,
+  readPendingHubTurns,
+  recordPendingHubTurn,
+} = require('./hub-turn-safety');
 
 function nowIso() {
   return new Date().toISOString();
 }
 
+/**
+ * Newest hub-inbox conversation_id (console turns). Scans all pending .md,
+ * newest filename first. Product-agent mail never carries conversation_id.
+ */
 function getRecentHubInboxMessage(hub) {
   const inboxDir = path.join(hub, 'inbox');
   try {
@@ -24,13 +34,23 @@ function getRecentHubInboxMessage(hub) {
       .filter(f => f.endsWith('.md') && !f.startsWith('.'))
       .sort()
       .reverse();
-    if (files.length === 0) return null;
-    const file = path.join(inboxDir, files[0]);
-    const content = fs.readFileSync(file, 'utf8');
-    const match = content.match(/^conversation_id:\s*(.+?)$/m);
-    return match ? match[1].trim() : null;
+    for (const name of files) {
+      const content = fs.readFileSync(path.join(inboxDir, name), 'utf8');
+      const match = content.match(/^conversation_id:\s*(.+?)$/m);
+      if (match) return match[1].trim();
+    }
+    return null;
   } catch (_err) {
     return null;
+  }
+}
+
+function logByteOffset(file) {
+  try {
+    if (!fs.existsSync(file)) return 0;
+    return fs.statSync(file).size;
+  } catch (_err) {
+    return 0;
   }
 }
 
@@ -336,10 +356,36 @@ function launchHub(config) {
   ensureHubRuntimePrompt(hub);
   const runtimeCwd = ensureHubRuntimeCwd(hub);
 
+  // Console turn id (if any) — used for launch ack + outbox safety net.
+  const conversationId = getRecentHubInboxMessage(hub);
+  const startedAt = nowIso();
+  const logOffset = logByteOffset(agentLog);
+
+  if (conversationId) {
+    // CP-owned first byte: deterministic status line before CLI boot.
+    // One ack per spawn (postLaunchAck is idempotent if ack still visible).
+    try {
+      postLaunchAck(hub, conversationId);
+      appendLog(hub, `launch_ack conversation_id=${conversationId} t=${startedAt}`);
+    } catch (err) {
+      appendLog(hub, `WARN launch_ack failed: ${err.message}`);
+    }
+  }
+
   if (dryRun) {
     fs.rmSync(lock, { recursive: true, force: true });
     appendLog(hub, 'DRY_RUN launch hub using turn prompt + runtime-cwd');
+    // No CLI → no safety-net pending (would false-fail with empty log).
     return;
+  }
+
+  if (conversationId) {
+    recordPendingHubTurn(hub, {
+      conversationId,
+      logByteOffset: logOffset,
+      startedAt,
+      agentLog,
+    });
   }
 
   const promptFile = buildHubTurnPrompt(hub);
@@ -349,14 +395,31 @@ function launchHub(config) {
   const cmdPreview = compileAgentCommand(cliSettings, promptFile);
   appendLog(hub, `cli_spawn slug=hub t=${nowIso()} cwd=${path.relative(hub, runtimeCwd) || runtimeCwd} turn=${path.basename(promptFile)} cmd=${cmdPreview}`);
 
+  // Safety module path for EXIT trap (absolute so cwd isolation does not matter).
+  const safetyModule = path.join(__dirname, 'hub-turn-safety.js');
+  const turnJson = JSON.stringify({
+    conversationId: conversationId || '',
+    logByteOffset: logOffset,
+    startedAt,
+    agentLog,
+  });
+
   const script = [
-    'HUB="$1"; cli="$2"; pflag="$3"; extra="$4"; pfile="$5"; agentlog="$6"; stderrlog="$7"; cwd="$8"',
+    'HUB="$1"; cli="$2"; pflag="$3"; extra="$4"; pfile="$5"; agentlog="$6"; stderrlog="$7"; cwd="$8"; safemod="$9"; turnjson="${10}"',
     'lockdir="$HUB/.bizagent/hub.lock"',
     'cplog="$HUB/logs/control-plane.log"',
     'mkdir -p "$HUB/.bizagent" "$HUB/logs"',
     'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
     'date +%s > "$lockdir/start" 2>/dev/null',
-    'trap \'rm -rf "$lockdir"; rm -f "$pfile"\' EXIT',
+    // On exit: drop lock + ephemeral prompt, then outbox safety net (if console turn).
+    'cleanup() {',
+    '  rm -rf "$lockdir"',
+    '  rm -f "$pfile"',
+    '  if [ -n "$turnjson" ] && [ "$turnjson" != "{}" ] && command -v node >/dev/null 2>&1; then',
+    '    node -e "const m=require(process.argv[1]); const t=JSON.parse(process.argv[3]||\\"{}\\"); if(t.conversationId) m.onHubCliExit(process.argv[2], t);" "$safemod" "$HUB" "$turnjson" >>"$cplog" 2>&1 || true',
+    '  fi',
+    '}',
+    'trap cleanup EXIT',
     'cd "$cwd" || exit 1',
     'start_ms=$(date +%s%3N 2>/dev/null || python3 -c "import time;print(int(time.time()*1000))")',
     'set +e',
@@ -369,10 +432,9 @@ function launchHub(config) {
     'exit "$code"',
   ].join('\n');
 
-  const conversationId = getRecentHubInboxMessage(hub);
   const child = spawn('bash', [
     '-c', script, '_', hub, cliSettings.cli, cliSettings.promptFlag, cliSettings.extraArgs,
-    promptFile, agentLog, agentStderr, runtimeCwd,
+    promptFile, agentLog, agentStderr, runtimeCwd, safetyModule, turnJson,
   ], {
     detached: true,
     stdio: 'ignore',
@@ -382,6 +444,24 @@ function launchHub(config) {
     if (code !== 0 && code !== null) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, 'hub', code, stderrTail, conversationId);
+    }
+    // Backup if shell EXIT hook did not clear the pending turn (tick also drains).
+    if (conversationId) {
+      const stillPending = readPendingHubTurns(hub).some(
+        (t) => t.conversationId === conversationId && t.startedAt === startedAt,
+      );
+      if (stillPending) {
+        try {
+          onHubCliExit(hub, {
+            conversationId,
+            logByteOffset: logOffset,
+            startedAt,
+            agentLog,
+          });
+        } catch (_err) {
+          /* tick drain will retry */
+        }
+      }
     }
   });
 
@@ -448,10 +528,18 @@ function dispatchPendingAgents(config) {
   };
 }
 
+/** Tick backup: finish safety net for hub turns whose CLI has exited. */
+function drainHubTurnSafety(config) {
+  return drainPendingHubTurns(config.hub, () =>
+    isAgentActive(config.hub, 'hub', config.lockLeaseSecs),
+  );
+}
+
 module.exports = {
   dispatchPendingAgents,
   dispatchFingerprint,
   dispatchRetrySecs,
+  drainHubTurnSafety,
   ensureDispatchPrompt,
   getRecentHubInboxMessage,
   isAgentActive,
