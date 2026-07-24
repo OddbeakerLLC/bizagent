@@ -324,10 +324,48 @@ function createServer(config) {
   });
 }
 
+function pidFilePath(hub) {
+  return path.join(hub, ".bizagent", "control-plane.pid");
+}
+
+/** Write our PID so control-plane.sh can manage us even when systemd/nohup started us. */
+function writePidFile(hub) {
+  try {
+    const dir = path.join(hub, ".bizagent");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(pidFilePath(hub), `${process.pid}\n`, "utf8");
+  } catch (_err) {
+    // Non-fatal: shell discovery can still find us via /proc.
+  }
+}
+
+/** Remove the PID file only if it still points at this process. */
+function clearPidFile(hub) {
+  const file = pidFilePath(hub);
+  try {
+    const existing = fs.readFileSync(file, "utf8").trim();
+    if (existing === String(process.pid)) fs.unlinkSync(file);
+  } catch (_err) {
+    // absent or unreadable — fine
+  }
+}
+
 function start(hubInput) {
   const config = loadRuntimeConfig(hubInput);
   const server = createServer(config);
   ensureHubRuntimePrompt(config.hub);
+  // Own the pidfile for the lifetime of this process (systemd, nohup, or bare node).
+  writePidFile(config.hub);
+  const clear = () => clearPidFile(config.hub);
+  process.once("exit", clear);
+  process.once("SIGINT", () => {
+    clear();
+    process.exit(130);
+  });
+  process.once("SIGTERM", () => {
+    clear();
+    process.exit(143);
+  });
   runTick(config);
   // Honor settings.dispatch.poll_seconds (default 2; was previously hard-coded).
   const pollMs = Math.max(1000, Math.min(30000, Number(config.pollSeconds || 2) * 1000));
