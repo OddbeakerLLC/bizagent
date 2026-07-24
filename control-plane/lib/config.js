@@ -98,7 +98,17 @@ function deriveRegistrySettings(registry) {
   const hubAgent = (registry.settings && registry.settings.hub_agent) || {};
   const models = (registry.settings && registry.settings.models) || {};
 
+  // Poll interval: honor settings.dispatch.poll_seconds (was ignored; server hard-coded 2s).
+  // Clamp 1–30s. Default 2. Env BIZAGENT_POLL_SECONDS wins when set.
+  const rawPoll = Number(
+    process.env.BIZAGENT_POLL_SECONDS || dispatch.poll_seconds || 2,
+  );
+  const pollSeconds = Number.isFinite(rawPoll)
+    ? Math.max(1, Math.min(30, rawPoll))
+    : 2;
+
   return {
+    pollSeconds,
     maxConcurrency: Number(
       process.env.BIZAGENT_MAX_CONCURRENCY || dispatch.max_concurrency || 4,
     ),

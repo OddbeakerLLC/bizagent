@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { agentsFromRegistry, loadRegistry } = require('./config');
+const { agentsFromRegistry, appDir, loadRegistry } = require('./config');
 const { recordUserInboxDelivery, userInbox } = require('./conversations');
 const { appendLog } = require('./log');
 
@@ -68,21 +68,69 @@ function writeFileUnique(dir, basename, source) {
   throw new Error(`could not allocate unique delivery filename for ${basename}`);
 }
 
+function quarantineDir(hub) {
+  return path.join(appDir(hub), 'quarantine');
+}
+
+/**
+ * Move a stuck/invalid outbox file into .bizagent/quarantine/ so it no longer
+ * spams WARN every poll tick. One log line per quarantine action.
+ */
+function quarantineOutboxFile(hub, file, reason) {
+  const destDir = quarantineDir(hub);
+  fs.mkdirSync(destDir, { recursive: true });
+  const base = path.basename(file);
+  let dest = path.join(destDir, base);
+  if (fs.existsSync(dest)) {
+    dest = path.join(destDir, `${Date.now()}-${base}`);
+  }
+  try {
+    fs.renameSync(file, dest);
+  } catch (_err) {
+    try {
+      fs.copyFileSync(file, dest);
+      fs.unlinkSync(file);
+    } catch (copyErr) {
+      appendLog(hub, `WARN quarantine failed for ${base}: ${copyErr.message}`);
+      return null;
+    }
+  }
+  appendLog(hub, `quarantine ${base} reason=${reason} dest=${path.relative(hub, dest)}`);
+  return dest;
+}
+
+function isMultiRecipient(to) {
+  if (!to) return false;
+  // Single slug only: letters, digits, underscore, hyphen. Comma/space = multi-to (invalid).
+  return /[,\s]/.test(to);
+}
+
 function routeOutboxes(hub) {
   let delivered = 0;
   let warnings = 0;
+  let quarantined = 0;
+  const tRoute = new Date().toISOString();
   for (const outbox of outboxes(hub)) {
     for (const file of markdownFiles(outbox)) {
       const text = fs.readFileSync(file, 'utf8');
       const to = frontmatterValue(text, 'to');
+      const base = path.basename(file);
+
+      if (isMultiRecipient(to)) {
+        quarantineOutboxFile(hub, file, `multi-to:${to}`);
+        quarantined += 1;
+        warnings += 1;
+        continue;
+      }
+
       if (to === 'user' && !canRouteToUser(hub, outbox)) {
         warnings += 1;
-        appendLog(hub, `WARN user recipient is only allowed from hub outbox in ${path.basename(file)}`);
+        appendLog(hub, `WARN user recipient is only allowed from hub outbox in ${base}`);
         continue;
       }
       if (!to) {
         warnings += 1;
-        appendLog(hub, `WARN no to field in ${path.basename(file)}`);
+        appendLog(hub, `WARN no to field in ${base}`);
         continue;
       }
       const dest = safeInboxFor(hub, to);
@@ -90,17 +138,20 @@ function routeOutboxes(hub) {
         if (to === 'user' && dest) fs.mkdirSync(dest, { recursive: true });
       }
       if (!dest || !fs.existsSync(dest)) {
+        // Unknown single recipient: leave in place + WARN (operator may fix `to:`).
+        // Multi-to is already quarantined above; do not auto-quarantine path tricks.
         warnings += 1;
-        appendLog(hub, `WARN unknown recipient ${to} in ${path.basename(file)}`);
+        appendLog(hub, `WARN unknown recipient ${to} in ${base}`);
         continue;
       }
-      const deliveredFile = writeFileUnique(dest, path.basename(file), file);
+      const deliveredFile = writeFileUnique(dest, base, file);
       if (to === 'user') recordUserInboxDelivery(hub, deliveredFile);
       delivered += 1;
-      appendLog(hub, `routed ${path.basename(file)} -> ${to}`);
+      appendLog(hub, `route file=${base} to=${to} t=${tRoute}`);
+      appendLog(hub, `routed ${base} -> ${to}`);
     }
   }
-  return { delivered, warnings };
+  return { delivered, warnings, quarantined };
 }
 
 function pendingMail(hub, slug) {
@@ -120,7 +171,10 @@ module.exports = {
   canRouteToUser,
   frontmatterValue,
   inboxFor,
+  isMultiRecipient,
   pendingMail,
+  quarantineDir,
+  quarantineOutboxFile,
   recipientSlugs,
   routeOutboxes,
   safeInboxFor,

@@ -1,30 +1,31 @@
 {
-  "_comment": "CLI configuration keyed by CLI name (e.g., claude, codex, agy). Each entry defines how to invoke that CLI.",
+  "_comment": "CLI configuration keyed by CLI name (e.g., claude, codex, agy, grok). promptFlag is the flag that receives a prompt *file path*. Grok: use --prompt-file (not -p, which is prompt text). Claude/agy: -p. Codex: --prompt.",
   "claude": {
     "executable": "claude",
+    "promptFlag": "-p",
     "flags": {
-      "model": "--model claude-opus-4-8"
-    },
-    "yolo": "--dangerously-skip-permissions",
-    "path": ".",
-    "prompt": "-p"
+      "extra": ""
+    }
   },
   "codex": {
     "executable": "codex",
+    "promptFlag": "--prompt",
     "flags": {
-      "model": "--model codex-pro"
-    },
-    "yolo": "--skip-auth",
-    "path": ".",
-    "prompt": "--prompt"
+      "extra": ""
+    }
   },
   "agy": {
     "executable": "agy",
+    "promptFlag": "-p",
     "flags": {
-      "model": "--model claude-opus-4-8"
-    },
-    "yolo": "--dangerously-skip-permissions",
-    "path": ".",
-    "prompt": "-p"
+      "extra": ""
+    }
+  },
+  "grok": {
+    "executable": "grok",
+    "promptFlag": "--prompt-file",
+    "flags": {
+      "extra": "--always-approve"
+    }
   }
 }

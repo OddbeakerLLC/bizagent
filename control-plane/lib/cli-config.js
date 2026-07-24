@@ -26,7 +26,14 @@ function getCliSettings(hub, cliJson, cliFileSettings, cliName = "", modelOverri
   const cliDef = cliJson[cliName_] || {};
 
   const executable = process.env.BIZAGENT_CLI || cliDef.executable || cliFileSettings.cli || cliName_;
-  const promptFlag = process.env.BIZAGENT_CLI_PROMPT_FLAG || cliDef.prompt || cliFileSettings.promptFlag || "-p";
+  // Prefer promptFlag (cli.json schema); accept legacy `prompt` for older trees.
+  // Grok: -p/--single is prompt *text*; --prompt-file is path. Default stays -p for Claude.
+  const promptFlag =
+    process.env.BIZAGENT_CLI_PROMPT_FLAG ||
+    cliDef.promptFlag ||
+    cliDef.prompt ||
+    cliFileSettings.promptFlag ||
+    "-p";
 
   // Build extraArgs from cliDef.flags, .cli file, and env vars; apply model override
   let baseArgs = process.env.BIZAGENT_CLI_EXTRA_ARGS || cliDef.flags?.extra || cliFileSettings.extraArgs || "";

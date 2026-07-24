@@ -10,8 +10,8 @@
     "archive_after_days": 30,
     "autonomy": "maintenance-only",
     "dispatch": {
-      "_comment": "Node control-plane dispatch tunables. Enable the server via scripts/install-control-plane.sh.",
-      "poll_seconds": 6,
+      "_comment": "Node control-plane dispatch tunables. Enable the server via scripts/install-control-plane.sh. poll_seconds is honored (default 2; clamped 1–30).",
+      "poll_seconds": 2,
       "max_concurrency": 4,
       "lock_lease_secs": 1800
     },
