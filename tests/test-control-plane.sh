@@ -565,7 +565,7 @@ NODE
     fail "conversation_id stamp-on-route failed"
   fi
 
-  # CP launch ack + outbox safety net (promote blob / hard fail)
+  # CP launch ack + outbox safety net (reserved body / promote / hard fail / write-message)
   if ! node - "$ROOT" "$TMP2" <<'NODE'
 const root = process.argv[2];
 const hub = process.argv[3];
@@ -584,10 +584,14 @@ const {
 const {
   ensureHubUserReply,
   extractFinalAssistantBlob,
+  prepareReservedReplyBody,
   recordPendingHubTurn,
   readPendingHubTurns,
+  reservedReplyBodyPath,
 } = require(`${root}/control-plane/lib/hub-turn-safety`);
 const { launchHub } = require(`${root}/control-plane/lib/dispatcher`);
+const { buildHubTurnPrompt, deriveHubRuntimePrompt } = require(`${root}/control-plane/lib/hub-memory`);
+const { writeOutboxMessage } = require(`${root}/control-plane/lib/mail`);
 
 fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
 fs.mkdirSync(path.join(hub, 'inbox'), { recursive: true });
@@ -604,9 +608,9 @@ const blob = extractFinalAssistantBlob([
   '',
   'Checking registry.',
   '',
-  'On it — Agent B is implementing the fix. Stand by.',
+  'On it — **Agent B** is implementing the fix. Stand by for the deploy note.',
 ].join('\n'));
-if (!blob.includes('Agent B is implementing')) {
+if (!/Agent B/.test(blob) || !/implementing/.test(blob)) {
   console.error('blob missed final answer', blob);
   process.exit(1);
 }
@@ -614,6 +618,39 @@ const noisy = extractFinalAssistantBlob('Error: Internal error:\n{"message":"API
 if (noisy) {
   console.error('blob should drop API noise', noisy);
   process.exit(2);
+}
+// Narration-only should not promote junk
+const narrOnly = extractFinalAssistantBlob('I\'ll check the registry.\n\nReading session memory.\n\nWriting the reply.');
+if (narrOnly && /I\'ll check|Reading session|Writing the reply/.test(narrOnly) && narrOnly.length < 80) {
+  // OK if empty; not OK if we only got narration
+  if (!/\*\*|Agent |Fixed|Done/i.test(narrOnly)) {
+    // pure narration — extractor may return last block; prefer empty
+    // allow empty only
+    if (narrOnly.split('\n').length <= 1 && /^(I\'ll|Reading|Writing)/i.test(narrOnly)) {
+      console.error('blob should skip pure process narration', narrOnly);
+      process.exit(2);
+    }
+  }
+}
+const authNoise = extractFinalAssistantBlob('Not signed in. To authenticate without a browser, run:\n  grok login --device-code\n');
+if (authNoise) {
+  console.error('blob should drop auth noise', authNoise);
+  process.exit(2);
+}
+
+// --- runtime prompt bans free-form outbox / mandates write path ---
+const runtimePrompt = deriveHubRuntimePrompt(hub);
+if (!/write-message\.sh/.test(runtimePrompt)) {
+  console.error('runtime prompt missing write-message mandate');
+  process.exit(25);
+}
+if (!/Stdout is debug only/i.test(runtimePrompt) && !/stdout is \*\*not\*\*/i.test(runtimePrompt) && !/Stdout is \*\*debug only\*\*/i.test(runtimePrompt)) {
+  console.error('runtime prompt missing stdout-is-debug rule', runtimePrompt.slice(0, 400));
+  process.exit(26);
+}
+if (!/banned/i.test(runtimePrompt)) {
+  console.error('runtime prompt should ban free-form outbox');
+  process.exit(27);
 }
 
 // --- postLaunchAck + supersede ---
@@ -694,8 +731,32 @@ if (launched.messages.some((m) => m.kind === STATUS_ERROR_KIND)) {
   console.error('dry-run false-failed');
   process.exit(11);
 }
+// dry-run builds turn prompt with reserved body path
+const reservedDry = reservedReplyBodyPath(hub, conv2.id);
+if (!reservedDry || !fs.existsSync(reservedDry)) {
+  console.error('dry-run should prepare reserved reply body', reservedDry);
+  process.exit(28);
+}
+const turnFiles = fs.readdirSync(path.join(hub, '.bizagent', 'prompts', 'turns') || path.join(hub, '.bizagent', 'prompts'))
+  .filter((n) => n.startsWith('hub-'));
+// turns dir may exist after buildHubTurnPrompt
+const turnsDir = path.join(hub, '.bizagent', 'prompts', 'turns');
+if (fs.existsSync(turnsDir)) {
+  const latest = fs.readdirSync(turnsDir).filter((n) => n.startsWith('hub-')).sort().pop();
+  if (latest) {
+    const turnText = fs.readFileSync(path.join(turnsDir, latest), 'utf8');
+    if (!turnText.includes('RESERVED_REPLY_BODY') && !turnText.includes(reservedDry)) {
+      console.error('turn prompt missing reserved body path');
+      process.exit(29);
+    }
+    if (!/write-message\.sh/.test(turnText)) {
+      console.error('turn prompt missing write-message');
+      process.exit(30);
+    }
+  }
+}
 
-// --- safety net: promote stdout blob when no outbox ---
+// --- safety net: promote stdout blob when no outbox (stdout-only simulated hub) ---
 const conv3 = createConversation(hub, 'Promote');
 postLaunchAck(hub, conv3.id);
 const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
@@ -709,6 +770,8 @@ fs.appendFileSync(agentLog, [
   '**Agent B** finished the CP launch-ack work. Ready to verify live.',
   '',
 ].join('\n'));
+// Ensure empty reserved body so promote path is exercised
+prepareReservedReplyBody(hub, conv3.id);
 recordPendingHubTurn(hub, {
   conversationId: conv3.id,
   logByteOffset: offset,
@@ -759,13 +822,19 @@ if (hubCount2 !== hubCount) {
 const conv4 = createConversation(hub, 'Fail');
 postLaunchAck(hub, conv4.id);
 const emptyLog = path.join(hub, 'logs', 'dispatch-hub-empty.log');
+const emptyStderr = path.join(hub, 'logs', 'dispatch-hub-empty.stderr');
 fs.writeFileSync(emptyLog, '');
+fs.writeFileSync(emptyStderr, 'Not signed in. To authenticate without a browser, run:\n  grok login --device-code\n');
 const startedFail = new Date().toISOString();
+prepareReservedReplyBody(hub, conv4.id);
 const failed = ensureHubUserReply(hub, {
   conversationId: conv4.id,
   logByteOffset: 0,
+  stderrByteOffset: 0,
   startedAt: startedFail,
   agentLog: emptyLog,
+  agentStderr: emptyStderr,
+  exitCode: 1,
 });
 if (failed.action !== 'failed') {
   console.error('expected failed', failed);
@@ -776,9 +845,14 @@ if (afterFail.messages.some(isLaunchAckMessage)) {
   console.error('ack survived hard fail');
   process.exit(17);
 }
-if (!afterFail.messages.some((m) => m.role === 'status' && m.kind === STATUS_ERROR_KIND)) {
+const failMsg = afterFail.messages.find((m) => m.role === 'status' && m.kind === STATUS_ERROR_KIND);
+if (!failMsg) {
   console.error('hard fail status missing', afterFail.messages);
   process.exit(18);
+}
+if (!/exit code:\s*1/i.test(failMsg.content) || !/auth failure/i.test(failMsg.content)) {
+  console.error('hard fail should mention exit code + auth', failMsg.content);
+  process.exit(31);
 }
 // idempotent fail
 const failed2 = ensureHubUserReply(hub, {
@@ -840,6 +914,115 @@ supersedeLaunchAcks(hub, conv6.id);
 if (getConversation(hub, conv6.id).messages.some(isLaunchAckMessage)) {
   console.error('supersedeLaunchAcks failed');
   process.exit(24);
+}
+
+// --- reserved body path: body-only file becomes user-visible hub mail ---
+const conv7 = createConversation(hub, 'Reserved');
+postLaunchAck(hub, conv7.id);
+const startedRes = new Date().toISOString();
+const bodyPath = prepareReservedReplyBody(hub, conv7.id);
+fs.writeFileSync(bodyPath, '**Reserved path works.** Operator should see only this.\n');
+// Also dump narration to log — must NOT prefer log over reserved body
+fs.appendFileSync(agentLog, '\nI am thinking out loud only.\n\n');
+const reserved = ensureHubUserReply(hub, {
+  conversationId: conv7.id,
+  logByteOffset: 0,
+  startedAt: startedRes,
+  agentLog,
+  replyBodyFile: bodyPath,
+});
+if (reserved.action !== 'reserved-body') {
+  console.error('expected reserved-body', reserved);
+  process.exit(32);
+}
+const afterRes = getConversation(hub, conv7.id);
+if (!afterRes.messages.some((m) => m.role === 'hub' && /Reserved path works/.test(m.content))) {
+  console.error('reserved body not in conversation', afterRes.messages);
+  process.exit(33);
+}
+if (afterRes.messages.some(isLaunchAckMessage)) {
+  console.error('ack survived reserved body');
+  process.exit(34);
+}
+if (fs.existsSync(bodyPath)) {
+  console.error('reserved body file should be cleared after success');
+  process.exit(35);
+}
+
+// --- write-message helper path: always routes with conversation_id ---
+const conv8 = createConversation(hub, 'WriteMsg');
+postLaunchAck(hub, conv8.id);
+const startedWm = new Date().toISOString();
+prepareReservedReplyBody(hub, conv8.id); // empty — write-message wins via outbox
+const wm = writeOutboxMessage(hub, {
+  from: 'hub',
+  to: 'user',
+  subject: 'console reply',
+  body: 'Delivered via write-message helper.',
+  conversationId: conv8.id,
+});
+if (!wm.file || !fs.existsSync(wm.file)) {
+  console.error('writeOutboxMessage did not create file', wm);
+  process.exit(36);
+}
+const wmRaw = fs.readFileSync(wm.file, 'utf8');
+if (!new RegExp(`conversation_id:\\s*${conv8.id}`).test(wmRaw)) {
+  console.error('write-message outbox missing conversation_id', wmRaw);
+  process.exit(39);
+}
+if (!/^to:\s*user\s*$/m.test(wmRaw) || !/^from:\s*hub\s*$/m.test(wmRaw)) {
+  console.error('write-message outbox bad headers', wmRaw);
+  process.exit(39);
+}
+const viaWm = ensureHubUserReply(hub, {
+  conversationId: conv8.id,
+  logByteOffset: 0,
+  startedAt: startedWm,
+  agentLog: emptyLog,
+});
+if (viaWm.action !== 'ok-existing') {
+  console.error('expected ok-existing after write-message', viaWm);
+  process.exit(37);
+}
+const afterWm = getConversation(hub, conv8.id);
+if (!afterWm.messages.some((m) => m.role === 'hub' && /write-message helper/.test(m.content))) {
+  console.error('write-message body not relayed', afterWm.messages);
+  process.exit(38);
+}
+// After relay, mail lives in user/inbox/archive with same conversation_id
+const archived = path.join(hub, 'user', 'inbox', 'archive');
+const archMail = fs.existsSync(archived)
+  ? fs.readdirSync(archived).filter((n) => n.endsWith('.md'))
+    .map((n) => fs.readFileSync(path.join(archived, n), 'utf8'))
+    .find((t) => /write-message helper/.test(t))
+  : null;
+if (!archMail || !new RegExp(`conversation_id:\\s*${conv8.id}`).test(archMail)) {
+  console.error('write-message archived mail missing conversation_id', archMail);
+  process.exit(39);
+}
+
+// --- buildHubTurnPrompt injects reserved path for console mail ---
+const conv9 = createConversation(hub, 'TurnInject');
+fs.writeFileSync(path.join(hub, 'inbox', '2026-07-24-operator-turn-inject.md'), `---
+from: operator
+to: hub
+date: 2026-07-24
+subject: inject
+conversation_id: ${conv9.id}
+---
+
+ping
+`);
+const turnFile = buildHubTurnPrompt(hub);
+const turnBody = fs.readFileSync(turnFile, 'utf8');
+const expectedPath = reservedReplyBodyPath(hub, conv9.id);
+if (!turnBody.includes(expectedPath)) {
+  console.error('buildHubTurnPrompt missing reserved path', expectedPath, turnBody.slice(0, 500));
+  process.exit(40);
+}
+if (!fs.existsSync(expectedPath)) {
+  console.error('reserved body not created by buildHubTurnPrompt');
+  process.exit(41);
 }
 NODE
   then

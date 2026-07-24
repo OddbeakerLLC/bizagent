@@ -1,10 +1,13 @@
 /**
  * Hub-turn UX safety net (control-plane owned).
  *
- * 1. Launch ack is posted by dispatcher via conversations.postLaunchAck.
- * 2. When a hub CLI run ends with no user-visible reply for the turn's
- *    conversation_id, promote a truncated final assistant blob from the
- *    dispatch log into hub outbox → user, or surface a hard in-UI failure.
+ * Operator-visible replies must land as outbox mail (or CP status). Paths:
+ * 1. Reserved reply body file — CP pre-creates path; hub writes body only.
+ * 2. write-message / normal hub→user outbox with conversation_id.
+ * 3. Last-resort promote of a final assistant blob from dispatch log/stderr.
+ * 4. Hard in-UI failure if nothing recoverable.
+ *
+ * Stdout is debug only — never the delivery channel.
  */
 const fs = require('fs');
 const path = require('path');
@@ -19,14 +22,67 @@ const {
   supersedeLaunchAcks,
 } = require('./conversations');
 const { appendLog } = require('./log');
-const { routeOutboxes, writeContentUnique } = require('./mail');
+const { routeOutboxes, writeOutboxMessage } = require('./mail');
 
 const DEFAULT_MAX_BLOB_CHARS = 4000;
 const MIN_BLOB_CHARS = 12;
+const MIN_RESERVED_BODY_CHARS = 1;
 const PENDING_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h — drop abandoned markers
 
 function pendingHubTurnsFile(hub) {
   return path.join(appDir(hub), 'pending-hub-turns.json');
+}
+
+function pendingRepliesDir(hub) {
+  return path.join(appDir(hub), 'pending-replies');
+}
+
+/** Safe filename stem from conversation id (ids are already constrained). */
+function safeConversationFileStem(conversationId) {
+  return String(conversationId || '')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .slice(0, 120) || 'unknown';
+}
+
+/**
+ * Absolute path for the CP-reserved operator reply body (no frontmatter).
+ * Hub CLI must write the final operator-visible markdown body here (or use write-message).
+ */
+function reservedReplyBodyPath(hub, conversationId) {
+  if (!conversationId) return '';
+  return path.join(pendingRepliesDir(hub), `${safeConversationFileStem(conversationId)}.body.md`);
+}
+
+/**
+ * Create/truncate the reserved body file for a console turn.
+ * Returns absolute path, or '' if no conversationId.
+ */
+function prepareReservedReplyBody(hub, conversationId) {
+  if (!conversationId) return '';
+  ensureDir(pendingRepliesDir(hub));
+  const file = reservedReplyBodyPath(hub, conversationId);
+  fs.writeFileSync(file, '');
+  return file;
+}
+
+function readReservedReplyBody(hub, conversationId) {
+  const file = reservedReplyBodyPath(hub, conversationId);
+  if (!file || !fs.existsSync(file)) return '';
+  try {
+    return fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '').trim();
+  } catch (_err) {
+    return '';
+  }
+}
+
+function clearReservedReplyBody(hub, conversationId) {
+  const file = reservedReplyBodyPath(hub, conversationId);
+  if (!file) return;
+  try {
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  } catch (_err) {
+    /* ignore */
+  }
 }
 
 function readPendingHubTurns(hub) {
@@ -58,8 +114,12 @@ function recordPendingHubTurn(hub, turn) {
   turns.push({
     conversationId: turn.conversationId,
     logByteOffset: Number(turn.logByteOffset || 0),
+    stderrByteOffset: Number(turn.stderrByteOffset || 0),
     startedAt: turn.startedAt || new Date().toISOString(),
     agentLog: turn.agentLog || path.join(hub, 'logs', 'dispatch-hub.log'),
+    agentStderr: turn.agentStderr || path.join(hub, 'logs', 'dispatch-hub.stderr'),
+    replyBodyFile: turn.replyBodyFile || reservedReplyBodyPath(hub, turn.conversationId),
+    exitCode: turn.exitCode != null ? turn.exitCode : null,
   });
   writePendingHubTurns(hub, turns);
 }
@@ -89,9 +149,69 @@ function readLogDelta(logPath, byteOffset) {
   }
 }
 
+/** Whole-line noise from CLI wrappers / auth failures. */
+function isNoiseLine(t) {
+  if (!t) return true;
+  if (/^control-plane:/.test(t)) return true;
+  if (/^Error:\s*Internal error:/i.test(t)) return true;
+  if (/^Internal error:\s*\{/i.test(t)) return true;
+  if (/^API error \(status \d+/i.test(t)) return true;
+  if (/"message"\s*:\s*"API error/i.test(t)) return true;
+  if (/"http_status"\s*:/i.test(t)) return true;
+  if (/^\{[\s\S]*"message"\s*:\s*"API error/i.test(t)) return true;
+  if (/^\{[\s\S]*"http_status"\s*:/i.test(t) && t.length < 400) return true;
+  if (/^Not signed in\./i.test(t)) return true;
+  if (/^To authenticate without a browser/i.test(t)) return true;
+  if (/^Alternatively, set the XAI_API_KEY/i.test(t)) return true;
+  if (/^Error:\s*Not signed in/i.test(t)) return true;
+  if (/^\s*grok login/i.test(t)) return true;
+  if (/^Warning:\s*The 'NO_COLOR'/i.test(t)) return true;
+  if (/^\(node:\d+\)/i.test(t)) return true;
+  return false;
+}
+
 /**
- * Heuristic: last substantial blank-line block(s) from hub stdout delta.
- * Filters obvious CLI/API noise. Truncates from the front if over maxChars.
+ * First-person / tool-loop narration that is not an operator-facing answer.
+ * Single short lines only — multi-line blocks or marked-up answers are kept.
+ */
+function isProcessNarrationBlock(block) {
+  const t = String(block || '').trim();
+  if (!t) return true;
+  if (t.includes('\n')) return false; // multi-line → likely real content
+  // Substance markers → treat as answer even if it starts with "On it"
+  if (/\*\*[^*]+\*\*/.test(t) || /^#+\s/m.test(t) || /`[^`]+`/.test(t)) return false;
+  if (t.length >= 200) return false;
+  // Imperative / progress lines models dump to stdout while working
+  if (/^(I('ll| will| need| am|'m)|Let me|Checking|Reading|Loading|Writing|Dispatching|Waiting|Acknowledging|Processing|Looking|Opening|Searching|Confirming|Acting|Found|System is|There's |There is |Continuing|Reporting|Archiving|Journaling|Detecting|I'll |I'm the |Acting as )/i.test(t)) {
+    return true;
+  }
+  // Bare ack without substance
+  if (/^(Stand by\.?|On it\.?)$/i.test(t)) return true;
+  if (/^(Stand by|On it)\b/i.test(t) && t.length < 40) return true;
+  return false;
+}
+
+/**
+ * Score a candidate block: higher = more likely the operator-facing final answer.
+ */
+function scoreAnswerBlock(block) {
+  const t = String(block || '').trim();
+  if (!t || t.length < MIN_BLOB_CHARS) return -1;
+  if (isProcessNarrationBlock(t)) return -1;
+  let score = Math.min(t.length, 800);
+  // Prefer markdown that looks like a finished reply
+  if (/\*\*[^*]+\*\*/.test(t)) score += 80;
+  if (/^#+\s/m.test(t)) score += 40;
+  if (/^- /m.test(t) || /^\| /m.test(t)) score += 40;
+  if (/\b(Agent [A-Z]{1,3}|fixed|shipped|done|yes|no)\b/i.test(t)) score += 30;
+  // Penalize pure meta
+  if (/outbox|inbox\/archive|conversation_id/i.test(t) && t.length < 120) score -= 40;
+  return score;
+}
+
+/**
+ * Heuristic: best trailing assistant blob from hub stdout/stderr delta.
+ * Filters CLI/API noise and short process-narration. Truncates from the front if over maxChars.
  */
 function extractFinalAssistantBlob(logChunk, maxChars = DEFAULT_MAX_BLOB_CHARS) {
   let text = String(logChunk || '').replace(/\r\n/g, '\n');
@@ -102,16 +222,7 @@ function extractFinalAssistantBlob(logChunk, maxChars = DEFAULT_MAX_BLOB_CHARS) 
     .filter((line) => {
       const t = line.trim();
       if (!t) return true;
-      if (/^control-plane:/.test(t)) return false;
-      if (/^Error:\s*Internal error:/i.test(t)) return false;
-      if (/^Internal error:\s*\{/i.test(t)) return false;
-      if (/^API error \(status \d+/i.test(t)) return false;
-      if (/"message"\s*:\s*"API error/i.test(t)) return false;
-      if (/"http_status"\s*:/i.test(t)) return false;
-      // Whole-line JSON error blobs from CLI wrappers
-      if (/^\{[\s\S]*"message"\s*:\s*"API error/i.test(t)) return false;
-      if (/^\{[\s\S]*"http_status"\s*:/i.test(t) && t.length < 400) return false;
-      return true;
+      return !isNoiseLine(t);
     })
     .join('\n')
     .trim();
@@ -123,14 +234,34 @@ function extractFinalAssistantBlob(logChunk, maxChars = DEFAULT_MAX_BLOB_CHARS) 
     .filter(Boolean);
   if (blocks.length === 0) return '';
 
-  // Prefer the last block that looks like operator-facing prose (≥ MIN chars).
-  // If the last few blocks are short tool-narration, still take the last one.
-  let start = blocks.length - 1;
-  while (start > 0 && blocks[start].length < MIN_BLOB_CHARS) start -= 1;
-  // Include up to 3 trailing blocks so multi-paragraph finals stay intact.
-  start = Math.max(0, Math.min(start, blocks.length - 1));
-  const from = Math.max(0, start - 2);
-  let blob = blocks.slice(from).join('\n\n').trim();
+  // Walk from the end: pick the best-scoring trailing window (1–3 blocks).
+  let best = { score: -1, blob: '' };
+  for (let end = blocks.length - 1; end >= 0; end -= 1) {
+    for (let span = 1; span <= 3 && end - span + 1 >= 0; span += 1) {
+      const from = end - span + 1;
+      const slice = blocks.slice(from, end + 1);
+      // Drop leading narration within the window
+      while (slice.length && isProcessNarrationBlock(slice[0])) slice.shift();
+      if (slice.length === 0) continue;
+      const blob = slice.join('\n\n').trim();
+      const score = scoreAnswerBlock(blob) + (end === blocks.length - 1 ? 20 : 0) + span;
+      if (score > best.score) best = { score, blob };
+    }
+    // Only consider the last ~8 blocks as "final answer" candidates
+    if (blocks.length - 1 - end >= 8) break;
+  }
+
+  let blob = best.score >= 0 ? best.blob : '';
+  // Fallback: last non-narration block even if score was weak
+  if (!blob) {
+    for (let i = blocks.length - 1; i >= 0; i -= 1) {
+      if (!isProcessNarrationBlock(blocks[i]) && blocks[i].length >= MIN_BLOB_CHARS) {
+        blob = blocks[i];
+        break;
+      }
+    }
+  }
+  if (!blob) return '';
 
   if (blob.length > maxChars) {
     blob = blob.slice(blob.length - maxChars);
@@ -178,25 +309,54 @@ function pendingUserOutboxFor(hub, conversationId) {
   return false;
 }
 
-function promoteBlobToOutbox(hub, conversationId, body) {
-  const date = new Date().toISOString().slice(0, 10);
-  const content = [
-    '---',
-    'from: hub',
-    'to: user',
-    `date: ${date}`,
-    'subject: recovered hub reply',
-    `conversation_id: ${conversationId}`,
-    '---',
-    '',
+function promoteBlobToOutbox(hub, conversationId, body, subject = 'recovered hub reply') {
+  return writeOutboxMessage(hub, {
+    from: 'hub',
+    to: 'user',
+    subject,
     body,
-    '',
-  ].join('\n');
-  return writeContentUnique(
-    path.join(hub, 'outbox'),
-    `${date}-hub-recovered-reply.md`,
-    content,
+    conversationId,
+  });
+}
+
+function finalizeViaOutbox(hub, conversationId, body, subject, actionTag) {
+  promoteBlobToOutbox(hub, conversationId, body, subject);
+  routeOutboxes(hub);
+  readUserInboxMessages(hub);
+  appendLog(
+    hub,
+    `hub_safety ${actionTag} conversation_id=${conversationId} chars=${body.length}`,
   );
+  return { action: actionTag, chars: body.length };
+}
+
+function stderrSnippet(turn, maxChars = 400) {
+  const delta = readLogDelta(turn.agentStderr, turn.stderrByteOffset || 0);
+  const auth = /Not signed in|XAI_API_KEY|grok login|authentication/i.test(delta || '');
+  if (auth) {
+    return 'CLI auth failure (not signed in / missing API key). Check `logs/dispatch-hub.stderr`.';
+  }
+  const cleaned = String(delta || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !/^Warning:\s*The 'NO_COLOR'/i.test(l) && !/^\(node:\d+\)/i.test(l))
+    .join('\n')
+    .trim();
+  if (!cleaned) return '';
+  return cleaned.length > maxChars ? cleaned.slice(-maxChars) : cleaned;
+}
+
+function hardFailMessage(turn) {
+  const parts = [
+    'Hub produced no user-visible reply (no reserved body, no outbox mail, and no recoverable dispatch output).',
+  ];
+  if (turn && turn.exitCode != null && turn.exitCode !== '' && Number(turn.exitCode) !== 0) {
+    parts.push(`CLI exit code: ${turn.exitCode}.`);
+  }
+  const err = turn ? stderrSnippet(turn) : '';
+  if (err) parts.push(err);
+  parts.push('Stdout is not delivered to the console — only outbox mail (or this status). Check `logs/dispatch-hub.log`.');
+  return parts.join(' ');
 }
 
 /**
@@ -208,6 +368,7 @@ function ensureHubUserReply(hub, turn) {
   if (!conversationId) return { action: 'skip' };
   if (!getConversation(hub, conversationId)) {
     clearPendingHubTurn(hub, turn);
+    clearReservedReplyBody(hub, conversationId);
     return { action: 'skip-no-conversation' };
   }
 
@@ -217,11 +378,13 @@ function ensureHubUserReply(hub, turn) {
 
   if (hubReplySince(hub, conversationId, turn.startedAt)) {
     clearPendingHubTurn(hub, turn);
+    clearReservedReplyBody(hub, conversationId);
     return { action: 'ok-existing' };
   }
   // Idempotent: shell EXIT + Node exit + tick drain may all fire.
   if (hubFailureSince(hub, conversationId, turn.startedAt)) {
     clearPendingHubTurn(hub, turn);
+    clearReservedReplyBody(hub, conversationId);
     return { action: 'ok-failed-already' };
   }
   if (pendingUserOutboxFor(hub, conversationId)) {
@@ -229,32 +392,58 @@ function ensureHubUserReply(hub, turn) {
     readUserInboxMessages(hub);
     if (hubReplySince(hub, conversationId, turn.startedAt)) {
       clearPendingHubTurn(hub, turn);
+      clearReservedReplyBody(hub, conversationId);
       return { action: 'ok-existing' };
     }
   }
 
-  const delta = readLogDelta(turn.agentLog, turn.logByteOffset);
-  const blob = extractFinalAssistantBlob(delta);
-  if (blob) {
-    // Re-check after reading log — a concurrent handler may have finished.
+  // Reserved body path: model wrote markdown body only; CP owns frontmatter + route.
+  const reservedBody = readReservedReplyBody(hub, conversationId);
+  if (reservedBody && reservedBody.length >= MIN_RESERVED_BODY_CHARS) {
     if (hubReplySince(hub, conversationId, turn.startedAt)) {
       clearPendingHubTurn(hub, turn);
+      clearReservedReplyBody(hub, conversationId);
       return { action: 'ok-existing' };
     }
-    promoteBlobToOutbox(hub, conversationId, blob);
-    routeOutboxes(hub);
-    readUserInboxMessages(hub);
-    clearPendingHubTurn(hub, turn);
-    appendLog(
+    const result = finalizeViaOutbox(
       hub,
-      `hub_safety promote conversation_id=${conversationId} chars=${blob.length}`,
+      conversationId,
+      reservedBody,
+      'console reply',
+      'reserved-body',
     );
-    return { action: 'promoted', chars: blob.length };
+    clearPendingHubTurn(hub, turn);
+    clearReservedReplyBody(hub, conversationId);
+    return result;
+  }
+
+  // Last resort: promote from stdout (+ stderr) delta — recovery only, not the happy path.
+  const stdoutDelta = readLogDelta(turn.agentLog, turn.logByteOffset);
+  const stderrDelta = readLogDelta(turn.agentStderr, turn.stderrByteOffset || 0);
+  const combined = [stdoutDelta, stderrDelta].filter(Boolean).join('\n\n');
+  const blob = extractFinalAssistantBlob(combined);
+  if (blob) {
+    if (hubReplySince(hub, conversationId, turn.startedAt)) {
+      clearPendingHubTurn(hub, turn);
+      clearReservedReplyBody(hub, conversationId);
+      return { action: 'ok-existing' };
+    }
+    const result = finalizeViaOutbox(
+      hub,
+      conversationId,
+      blob,
+      'recovered hub reply',
+      'promoted',
+    );
+    clearPendingHubTurn(hub, turn);
+    clearReservedReplyBody(hub, conversationId);
+    return result;
   }
 
   if (hubReplySince(hub, conversationId, turn.startedAt)
     || hubFailureSince(hub, conversationId, turn.startedAt)) {
     clearPendingHubTurn(hub, turn);
+    clearReservedReplyBody(hub, conversationId);
     return { action: 'ok-existing' };
   }
 
@@ -263,10 +452,11 @@ function ensureHubUserReply(hub, turn) {
     hub,
     conversationId,
     'status',
-    'Hub produced no user-visible reply (no outbox mail and no recoverable dispatch output). Check `logs/dispatch-hub.log`.',
+    hardFailMessage(turn),
     { kind: STATUS_ERROR_KIND },
   );
   clearPendingHubTurn(hub, turn);
+  clearReservedReplyBody(hub, conversationId);
   appendLog(hub, `hub_safety fail conversation_id=${conversationId}`);
   return { action: 'failed' };
 }
@@ -286,6 +476,7 @@ function drainPendingHubTurns(hub, isHubActive) {
     const age = now - Date.parse(turn.startedAt || 0);
     if (Number.isFinite(age) && age > PENDING_MAX_AGE_MS) {
       clearPendingHubTurn(hub, turn);
+      clearReservedReplyBody(hub, turn.conversationId);
       results.push({ turn, action: 'expired' });
       continue;
     }
@@ -307,7 +498,9 @@ function drainPendingHubTurns(hub, isHubActive) {
 }
 
 /**
- * CLI / shell EXIT entry: `node -e 'require(m).onHubCliExit(hub, JSON.parse(process.argv[2]))' mod '{...}'`
+ * CLI / shell EXIT entry:
+ * node -e 'require(m).onHubCliExit(hub, JSON.parse(process.argv[2]))' mod hub '{...}'
+ * Optional exitCode on the turn object improves hard-fail text.
  */
 function onHubCliExit(hub, turn) {
   return ensureHubUserReply(hub, turn || {});
@@ -315,19 +508,27 @@ function onHubCliExit(hub, turn) {
 
 module.exports = {
   DEFAULT_MAX_BLOB_CHARS,
+  clearPendingHubTurn,
+  clearReservedReplyBody,
   drainPendingHubTurns,
   ensureHubUserReply,
   extractFinalAssistantBlob,
   hubFailureSince,
   hubReplySince,
+  isNoiseLine,
+  isProcessNarrationBlock,
   LAUNCH_ACK_KIND,
   MIN_BLOB_CHARS,
+  MIN_RESERVED_BODY_CHARS,
   onHubCliExit,
   pendingHubTurnsFile,
+  pendingRepliesDir,
+  prepareReservedReplyBody,
   promoteBlobToOutbox,
   readLogDelta,
   readPendingHubTurns,
+  readReservedReplyBody,
   recordPendingHubTurn,
-  clearPendingHubTurn,
+  reservedReplyBodyPath,
   writePendingHubTurns,
 };

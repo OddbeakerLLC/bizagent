@@ -15,8 +15,10 @@ const { postLaunchAck, writeFileUnique } = require('./conversations');
 const {
   drainPendingHubTurns,
   onHubCliExit,
+  prepareReservedReplyBody,
   readPendingHubTurns,
   recordPendingHubTurn,
+  reservedReplyBodyPath,
 } = require('./hub-turn-safety');
 
 function nowIso() {
@@ -356,10 +358,11 @@ function launchHub(config) {
   ensureHubRuntimePrompt(hub);
   const runtimeCwd = ensureHubRuntimeCwd(hub);
 
-  // Console turn id (if any) — used for launch ack + outbox safety net.
+  // Console turn id (if any) — used for launch ack + reserved reply + outbox safety net.
   const conversationId = getRecentHubInboxMessage(hub);
   const startedAt = nowIso();
   const logOffset = logByteOffset(agentLog);
+  const stderrOffset = logByteOffset(agentStderr);
 
   if (conversationId) {
     // CP-owned first byte: deterministic status line before CLI boot.
@@ -376,19 +379,29 @@ function launchHub(config) {
     fs.rmSync(lock, { recursive: true, force: true });
     appendLog(hub, 'DRY_RUN launch hub using turn prompt + runtime-cwd');
     // No CLI → no safety-net pending (would false-fail with empty log).
+    // Still build turn prompt so reserved path + delivery instructions are exercised.
+    try { buildHubTurnPrompt(hub); } catch (_err) { /* optional in dry-run */ }
     return;
   }
+
+  // Build turn prompt first (creates reserved body file when conversation_id present).
+  const promptFile = buildHubTurnPrompt(hub);
+  const replyBodyFile = conversationId
+    ? (reservedReplyBodyPath(hub, conversationId) || prepareReservedReplyBody(hub, conversationId))
+    : '';
 
   if (conversationId) {
     recordPendingHubTurn(hub, {
       conversationId,
       logByteOffset: logOffset,
+      stderrByteOffset: stderrOffset,
       startedAt,
       agentLog,
+      agentStderr,
+      replyBodyFile,
     });
   }
 
-  const promptFile = buildHubTurnPrompt(hub);
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
   // Prefer settings.hub_agent.cliName (via config.hubCliName); empty falls back to .cli / default.
   const cliSettings = getCliSettings(hub, cliJson, config, hubCliName || '', hubModel || '');
@@ -397,11 +410,15 @@ function launchHub(config) {
 
   // Safety module path for EXIT trap (absolute so cwd isolation does not matter).
   const safetyModule = path.join(__dirname, 'hub-turn-safety.js');
-  const turnJson = JSON.stringify({
+  // turnjson is a template; shell substitutes exit code before node runs.
+  const turnJsonBase = JSON.stringify({
     conversationId: conversationId || '',
     logByteOffset: logOffset,
+    stderrByteOffset: stderrOffset,
     startedAt,
     agentLog,
+    agentStderr,
+    replyBodyFile,
   });
 
   const script = [
@@ -411,12 +428,14 @@ function launchHub(config) {
     'mkdir -p "$HUB/.bizagent" "$HUB/logs"',
     'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
     'date +%s > "$lockdir/start" 2>/dev/null',
+    'code=0',
     // On exit: drop lock + ephemeral prompt, then outbox safety net (if console turn).
     'cleanup() {',
     '  rm -rf "$lockdir"',
     '  rm -f "$pfile"',
     '  if [ -n "$turnjson" ] && [ "$turnjson" != "{}" ] && command -v node >/dev/null 2>&1; then',
-    '    node -e "const m=require(process.argv[1]); const t=JSON.parse(process.argv[3]||\\"{}\\"); if(t.conversationId) m.onHubCliExit(process.argv[2], t);" "$safemod" "$HUB" "$turnjson" >>"$cplog" 2>&1 || true',
+    // Merge exit code in Node (safer than sed on JSON).
+    '    node -e "const m=require(process.argv[1]); const t=JSON.parse(process.argv[3]||\\"{}\\"); t.exitCode=Number(process.argv[4]); if(t.conversationId) m.onHubCliExit(process.argv[2], t);" "$safemod" "$HUB" "$turnjson" "$code" >>"$cplog" 2>&1 || true',
     '  fi',
     '}',
     'trap cleanup EXIT',
@@ -434,7 +453,7 @@ function launchHub(config) {
 
   const child = spawn('bash', [
     '-c', script, '_', hub, cliSettings.cli, cliSettings.promptFlag, cliSettings.extraArgs,
-    promptFile, agentLog, agentStderr, runtimeCwd, safetyModule, turnJson,
+    promptFile, agentLog, agentStderr, runtimeCwd, safetyModule, turnJsonBase,
   ], {
     detached: true,
     stdio: 'ignore',
@@ -455,8 +474,12 @@ function launchHub(config) {
           onHubCliExit(hub, {
             conversationId,
             logByteOffset: logOffset,
+            stderrByteOffset: stderrOffset,
             startedAt,
             agentLog,
+            agentStderr,
+            replyBodyFile,
+            exitCode: code,
           });
         } catch (_err) {
           /* tick drain will retry */

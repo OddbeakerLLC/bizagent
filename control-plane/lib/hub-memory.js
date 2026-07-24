@@ -78,30 +78,42 @@ function deriveHubRuntimePrompt(hub) {
     'Replies to the operator default to **two sentences or less**. Longer only when the work requires it.',
     'Messages to product agents: only what the recipient needs to act — no preamble, recap, or signoff.',
     '',
+    '## Channel rules (non-negotiable)',
+    '',
+    '- **Stdout is debug only.** Nothing you print is shown to the operator. Never "answer" in chat text alone.',
+    '- **Operator-visible text** must go through a CP-owned write path (below). Free-form `outbox/*.md` creation is **banned** — wrong filename, missing `conversation_id`, or wrong `to:` silently drops the reply.',
+    '- Product-agent mail (to a slug) also uses the write-message helper — same rule.',
+    '',
     '## This-turn order (outbox-first)',
     '',
-    '1. **Answer first:** write the operator-visible reply to `outbox/` addressed to `user` (include `conversation_id` when present). Success = first outbox write.',
+    '1. **Answer first** via the mandatory write path (see Message delivery). Success = that write returns OK / the reserved body file is non-empty.',
     '2. **Then housekeep:** archive handled `inbox/*.md` into `inbox/archive/` immediately after acting on each.',
     '3. Session memory is **CP-owned** (see Runtime Memory). Do not rewrite or compress it.',
     '4. Only then: optional journal `[Maintenance]` / `[Company]` bullets if warranted.',
     '',
-    '## Message format',
+    '## Message delivery (mandatory write path)',
     '',
-    'Write a `.md` file in `outbox/`. Filename `YYYY-MM-DD-{from}-{subject-slug}.md`. Address `to:` by slug (`user`, `hub`, or product slug). Replies are new files — no threads.',
+    '### Operator / console reply (`to: user`)',
     '',
-    '```markdown',
-    '---',
-    'from: hub',
-    'to: user',
-    'date: YYYY-MM-DD',
-    'subject: short subject',
-    'conversation_id: <same as inbox when present>',
-    '---',
+    'When this turn has a `conversation_id`, prefer **one** of:',
     '',
-    'Body only. No padding.',
+    '1. **Reserved body file** (preferred when the turn prompt gives `RESERVED_REPLY_BODY`): write **only the markdown body** (no YAML frontmatter) to that absolute path with your file tool. The control plane wraps frontmatter and routes it.',
+    '2. **write-message helper:**',
+    '   ```bash',
+    '   scripts/write-message.sh --to user --from hub --subject "short subject" \\',
+    '     --conversation-id "<id from this turn>" --body "Your reply here."',
+    '   # or: echo "body" | scripts/write-message.sh --to user --from hub --subject "..." --conversation-id "..."',
+    '   ```',
+    '',
+    'Do **not** hand-write files under `outbox/`. Do **not** invent a `conversation_id`.',
+    '',
+    '### Product-agent mail',
+    '',
+    '```bash',
+    'scripts/write-message.sh --to <slug> --from hub --subject "short subject" --body "..."',
     '```',
     '',
-    '**Interim messages** only for unbounded delays (dispatch, URL fetch): brief outbox first, full reply second, same `conversation_id`. Skip interims for quick synthesis.',
+    '**Interim messages** only for unbounded delays (dispatch, URL fetch): brief write-message first, full reply second, same `conversation_id`. Skip interims for quick synthesis.',
     '',
     '## Runtime Memory (CP-owned)',
     '',
@@ -258,12 +270,53 @@ function buildHubTurnPrompt(hub) {
     ].join('\n');
   });
 
-  const convLine = conversationIds.length
+  const convId = conversationIds.length
     ? conversationIds[conversationIds.length - 1]
-    : '(none in pending mail)';
+    : '';
+  const convLine = convId || '(none in pending mail)';
+
+  // Lazy require avoids circular load (conversations → hub-memory → hub-turn-safety).
+  let reservedBodyAbs = '';
+  if (convId) {
+    const safety = require('./hub-turn-safety');
+    reservedBodyAbs = safety.prepareReservedReplyBody(hub, convId);
+  }
 
   const turnId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const turnFile = path.join(hubTurnsDir(hub), `hub-${turnId}.md`);
+
+  const deliveryBlock = convId
+    ? [
+      '### Operator reply delivery (MANDATORY — pick one)',
+      '',
+      'Stdout is **not** shown to the operator. Free-form `outbox/` files are **banned**.',
+      '',
+      `**conversation_id:** \`${convId}\``,
+      '',
+      '**Option A — reserved body file (preferred):** write **only the final markdown body** (no YAML) to:',
+      '',
+      '```text',
+      reservedBodyAbs,
+      '```',
+      '',
+      'Use your file write/edit tool. Overwrite the file with the complete operator-visible reply. The control plane adds frontmatter and routes it.',
+      '',
+      '**Option B — write-message helper:**',
+      '',
+      '```bash',
+      `scripts/write-message.sh --to user --from hub --subject "console reply" --conversation-id "${convId}" --body "Your reply here."`,
+      '```',
+      '',
+      'Success = reserved body file non-empty **or** write-message wrote hub→user outbox with this conversation_id.',
+      '',
+    ].join('\n')
+    : [
+      '### Operator reply delivery',
+      '',
+      'No console `conversation_id` on this turn (agent→hub or maintenance). Still use',
+      '`scripts/write-message.sh` for any mail you send. Stdout is not a delivery channel.',
+      '',
+    ].join('\n');
 
   const content = [
     '# Hub turn prompt (ephemeral)',
@@ -278,12 +331,14 @@ function buildHubTurnPrompt(hub) {
     '',
     `- Hub absolute path: \`${hubAbs}\``,
     `- conversation_id: \`${convLine}\``,
+    reservedBodyAbs ? `- RESERVED_REPLY_BODY: \`${reservedBodyAbs}\`` : '',
     `- Session file (read-only, already compacted by CP): \`${sessionRel}\``,
     `- Pending inbox files: ${pending.length}`,
     '',
+    deliveryBlock,
     '### Order',
     '1. Read **Pending mail** and **Session excerpt** below (already inlined — avoid tool-reads unless needed).',
-    '2. Write operator reply to `outbox/` → `to: user` with the same `conversation_id` when present.',
+    '2. Deliver operator-visible text via reserved body file or `scripts/write-message.sh` (never free-form outbox; never stdout-only).',
     '3. Archive each handled inbox message to `inbox/archive/`.',
     '4. Do not implement product work; do not run setup; do not rewrite session memory.',
     '',
@@ -297,7 +352,7 @@ function buildHubTurnPrompt(hub) {
     clip(sessionBody, MAX_TURN_SESSION_CHARS),
     '```',
     '',
-  ].join('\n');
+  ].filter((line) => line !== undefined).join('\n');
 
   fs.writeFileSync(turnFile, content);
   return turnFile;
