@@ -101,8 +101,17 @@ function quarantineOutboxFile(hub, file, reason) {
 
 function isMultiRecipient(to) {
   if (!to) return false;
-  // Single slug only: letters, digits, underscore, hyphen. Comma/space = multi-to (invalid).
-  return /[,\s]/.test(to);
+  // Single slug only: letters, digits, underscore, hyphen.
+  // Comma / semicolon / pipe / whitespace = multi-to (invalid; quarantine).
+  return /[,;|\s]/.test(to);
+}
+
+/**
+ * Single-slug recipients only: [a-zA-Z0-9_-]+. Anything else (path tricks,
+ * empty after multi-to strip) is unrouteable.
+ */
+function isValidSingleRecipient(to) {
+  return typeof to === 'string' && /^[A-Za-z0-9_-]+$/.test(to);
 }
 
 function routeOutboxes(hub) {
@@ -116,8 +125,23 @@ function routeOutboxes(hub) {
       const to = frontmatterValue(text, 'to');
       const base = path.basename(file);
 
+      if (!to) {
+        // Unrouteable forever — quarantine once instead of WARN every tick.
+        quarantineOutboxFile(hub, file, 'missing-to');
+        quarantined += 1;
+        warnings += 1;
+        continue;
+      }
+
       if (isMultiRecipient(to)) {
         quarantineOutboxFile(hub, file, `multi-to:${to}`);
+        quarantined += 1;
+        warnings += 1;
+        continue;
+      }
+
+      if (!isValidSingleRecipient(to)) {
+        quarantineOutboxFile(hub, file, `invalid-to:${to}`);
         quarantined += 1;
         warnings += 1;
         continue;
@@ -128,18 +152,13 @@ function routeOutboxes(hub) {
         appendLog(hub, `WARN user recipient is only allowed from hub outbox in ${base}`);
         continue;
       }
-      if (!to) {
-        warnings += 1;
-        appendLog(hub, `WARN no to field in ${base}`);
-        continue;
-      }
       const dest = safeInboxFor(hub, to);
       if (!dest || !fs.existsSync(dest)) {
         if (to === 'user' && dest) fs.mkdirSync(dest, { recursive: true });
       }
       if (!dest || !fs.existsSync(dest)) {
-        // Unknown single recipient: leave in place + WARN (operator may fix `to:`).
-        // Multi-to is already quarantined above; do not auto-quarantine path tricks.
+        // Unknown single recipient: leave in place + WARN (operator may fix `to:`
+        // or add the product). Multi-to / missing / invalid already quarantined.
         warnings += 1;
         appendLog(hub, `WARN unknown recipient ${to} in ${base}`);
         continue;
@@ -172,6 +191,7 @@ module.exports = {
   frontmatterValue,
   inboxFor,
   isMultiRecipient,
+  isValidSingleRecipient,
   pendingMail,
   quarantineDir,
   quarantineOutboxFile,

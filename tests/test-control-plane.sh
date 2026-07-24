@@ -21,8 +21,10 @@ grep -q "pbkdf2Sync" "$ROOT/control-plane/lib/auth.js" \
   || fail "auth does not use PBKDF2 password hashing"
 grep -q "timingSafeEqual" "$ROOT/control-plane/lib/auth.js" \
   || fail "auth does not use constant-time password comparison"
-grep -q "agents/.*/.dispatch.md" "$ROOT/control-plane/lib/dispatcher.js" \
-  || fail "dispatcher does not launch from agents/<slug>/.dispatch.md"
+grep -q "\.dispatch\.md" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher does not ensure agents/<slug>/.dispatch.md"
+grep -q "buildAgentTurnPrompt" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher does not inject product-agent turn prompts"
 grep -q "launchHub" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not launch the hub runtime prompt"
 grep -q "hubCliName" "$ROOT/control-plane/lib/config.js" \
@@ -274,8 +276,10 @@ hello bad
 MSG
   node "$ROOT/scripts/bizagent-control-plane.js" route-once --hub "$TMP" >/dev/null \
     || fail "route-once rejected invalid recipient with non-zero status"
-  [ -f "$TMP/agents/alpha/outbox/2026-07-09-alpha-traverse.md" ] \
-    || fail "route-once moved invalid-recipient mail"
+  [ ! -f "$TMP/agents/alpha/outbox/2026-07-09-alpha-traverse.md" ] \
+    || fail "route-once left path-trick recipient in outbox (should quarantine)"
+  [ -f "$TMP/.bizagent/quarantine/2026-07-09-alpha-traverse.md" ] \
+    || fail "route-once did not quarantine path-trick recipient"
 
   # Multi-to outbox must be quarantined (not re-WARN every tick)
   cat > "$TMP/agents/alpha/outbox/2026-07-09-alpha-multi.md" <<'MSG'
@@ -293,6 +297,22 @@ MSG
     || fail "route-once left multi-to mail in outbox"
   [ -f "$TMP/.bizagent/quarantine/2026-07-09-alpha-multi.md" ] \
     || fail "route-once did not quarantine multi-to mail"
+
+  # Missing to: must quarantine (not re-WARN every tick)
+  cat > "$TMP/agents/alpha/outbox/2026-07-09-alpha-noto.md" <<'MSG'
+---
+from: alpha
+date: 2026-07-09
+subject: missing to
+---
+no recipient
+MSG
+  node "$ROOT/scripts/bizagent-control-plane.js" route-once --hub "$TMP" >/dev/null \
+    || fail "route-once rejected missing-to with non-zero status"
+  [ ! -f "$TMP/agents/alpha/outbox/2026-07-09-alpha-noto.md" ] \
+    || fail "route-once left missing-to mail in outbox"
+  [ -f "$TMP/.bizagent/quarantine/2026-07-09-alpha-noto.md" ] \
+    || fail "route-once did not quarantine missing-to mail"
 
   node "$ROOT/scripts/bizagent-control-plane.js" auth-init --hub "$TMP" --username ceo --password secret >/dev/null \
     || fail "auth-init failed"
@@ -891,6 +911,152 @@ fs.rmSync(hub, { recursive: true, force: true });
 NODE
   then
     fail "latency phase 0/1 hub prompt/turn/cwd/poll tests failed"
+  fi
+
+  # Phase 2: concurrency tiers + product-agent turn injection
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { loadRuntimeConfig } = require(`${root}/control-plane/lib/config`);
+const { buildAgentTurnPrompt } = require(`${root}/control-plane/lib/hub-memory`);
+const {
+  dispatchPendingAgents,
+  liveAgentCount,
+  liveHubCount,
+} = require(`${root}/control-plane/lib/dispatcher`);
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-phase2-'));
+fs.mkdirSync(path.join(hub, 'inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'templates'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents/alpha/inbox/archive'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents/alpha/outbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents/beta/inbox/archive'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents/beta/outbox'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'templates/dispatch.md.template'), [
+  "You are the '{{slug}}' agent. Read {{agent_md}}.",
+  'Process {{inbox}}; write {{outbox}}.',
+].join('\n'));
+fs.writeFileSync(path.join(hub, 'agents/alpha/agent.md'), '# Alpha\n');
+fs.writeFileSync(path.join(hub, 'agents/beta/agent.md'), '# Beta\n');
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: {
+    dispatch: {
+      poll_seconds: 2,
+      max_concurrency: 8,
+      hub_slots: 1,
+      agent_slots: 8,
+      lock_lease_secs: 60,
+    },
+  },
+  products: [
+    { slug: 'alpha', name: 'Alpha', agent_name: 'Agent A', projects: [] },
+    { slug: 'beta', name: 'Beta', agent_name: 'Agent B', projects: [] },
+  ],
+}));
+
+const cfg = loadRuntimeConfig(hub);
+if (cfg.hubSlots !== 1 || cfg.agentSlots !== 8 || cfg.maxConcurrency !== 8) {
+  console.error('tier defaults wrong:', {
+    hubSlots: cfg.hubSlots,
+    agentSlots: cfg.agentSlots,
+    maxConcurrency: cfg.maxConcurrency,
+  });
+  process.exit(1);
+}
+if (cfg.pollSeconds !== 2) {
+  console.error('pollSeconds not 2:', cfg.pollSeconds);
+  process.exit(2);
+}
+
+// agent_slots overrides max_concurrency when set
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 4, agent_slots: 6, hub_slots: 1, lock_lease_secs: 60 } },
+  products: [
+    { slug: 'alpha', name: 'Alpha', agent_name: 'Agent A', projects: [] },
+    { slug: 'beta', name: 'Beta', agent_name: 'Agent B', projects: [] },
+  ],
+}));
+const cfg2 = loadRuntimeConfig(hub);
+if (cfg2.agentSlots !== 6 || cfg2.hubSlots !== 1 || cfg2.maxConcurrency !== 4) {
+  console.error('agent_slots override wrong:', cfg2);
+  process.exit(3);
+}
+
+// Product turn injects pending mail body
+fs.writeFileSync(path.join(hub, 'agents/alpha/.dispatch.md'), 'Standing alpha dispatch.');
+fs.writeFileSync(path.join(hub, 'agents/alpha/inbox/2026-07-24-hub-status.md'), [
+  '---',
+  'from: hub',
+  'to: alpha',
+  'date: 2026-07-24',
+  'subject: status request',
+  '---',
+  '',
+  'Reply with a one-line status.',
+].join('\n'));
+const turnFile = buildAgentTurnPrompt(hub, 'alpha');
+const turn = fs.readFileSync(turnFile, 'utf8');
+if (!turn.includes('Reply with a one-line status') || !turn.includes('status request')) {
+  console.error('agent turn missing pending mail body/subject');
+  process.exit(4);
+}
+if (!turn.includes('Standing alpha dispatch')) {
+  console.error('agent turn missing standing dispatch text');
+  process.exit(5);
+}
+if (!/agents\/alpha\/inbox/.test(turn)) {
+  console.error('agent turn missing archive path hint');
+  process.exit(6);
+}
+
+// Dry-run dispatch with agent_slots=1 should launch one of two pending agents
+fs.writeFileSync(path.join(hub, 'agents/beta/inbox/2026-07-24-hub-status.md'), [
+  '---',
+  'from: hub',
+  'to: beta',
+  'date: 2026-07-24',
+  'subject: status request',
+  '---',
+  '',
+  'status please',
+].join('\n'));
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 1, agent_slots: 1, hub_slots: 1, lock_lease_secs: 60 } },
+  products: [
+    { slug: 'alpha', name: 'Alpha', agent_name: 'Agent A', projects: [] },
+    { slug: 'beta', name: 'Beta', agent_name: 'Agent B', projects: [] },
+  ],
+}));
+process.env.BIZAGENT_DRY_RUN = '1';
+const cfg3 = loadRuntimeConfig(hub);
+const result = dispatchPendingAgents(cfg3);
+if (result.launched !== 1) {
+  console.error('expected 1 launch under agent_slots=1, got', result);
+  process.exit(7);
+}
+if (result.skippedCap < 1) {
+  console.error('expected skippedCap for second agent, got', result);
+  process.exit(8);
+}
+if (result.agentSlots !== 1 || result.hubSlots !== 1) {
+  console.error('dispatch result missing tier fields', result);
+  process.exit(9);
+}
+// Hub pending should not be blocked by agent_slots alone: hub has its own pool.
+// (No hub mail here — live counts should be zero after dry-run unlocks.)
+if (liveHubCount(hub, 60) !== 0 || liveAgentCount(hub, 60) !== 0) {
+  console.error('dry-run left live locks');
+  process.exit(10);
+}
+
+fs.rmSync(hub, { recursive: true, force: true });
+NODE
+  then
+    fail "latency phase 2 concurrency/product-injection tests failed"
   fi
 fi
 

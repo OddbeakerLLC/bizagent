@@ -303,6 +303,101 @@ function buildHubTurnPrompt(hub) {
   return turnFile;
 }
 
+function listAgentPendingInboxFiles(hub, slug) {
+  const inboxDir = path.join(hub, 'agents', slug, 'inbox');
+  try {
+    return fs.readdirSync(inboxDir)
+      .filter((f) => f.endsWith('.md') && !f.startsWith('.'))
+      .sort()
+      .map((f) => path.join(inboxDir, f));
+  } catch (_err) {
+    return [];
+  }
+}
+
+/**
+ * Light product-agent turn prompt (Phase 2): standing dispatch text + pending
+ * inbox bodies inlined so the agent need not tool-list/read inbox first.
+ * Still memoryless across dispatches — injection is per-launch only.
+ * Caller deletes the turn file after CLI exit.
+ */
+function buildAgentTurnPrompt(hub, slug) {
+  ensureDir(hubTurnsDir(hub));
+  const hubAbs = path.resolve(hub);
+  const agentMd = path.join('agents', slug, 'agent.md');
+  const dispatchPath = path.join(hub, 'agents', slug, '.dispatch.md');
+  let standing = '';
+  try {
+    standing = fs.readFileSync(dispatchPath, 'utf8').trim();
+  } catch (_err) {
+    standing = [
+      `You are the '${slug}' agent. Read ${agentMd} for your role, scope, and projects.`,
+      `Process every message in agents/${slug}/inbox and ignore archive/.`,
+      `Write replies to agents/${slug}/outbox; archive each handled message immediately.`,
+    ].join('\n');
+  }
+
+  const pending = listAgentPendingInboxFiles(hub, slug);
+  const subjects = [];
+  const mailBlocks = pending.map((file) => {
+    let body = '';
+    try {
+      body = fs.readFileSync(file, 'utf8');
+    } catch (_err) {
+      body = `_unreadable: ${file}_`;
+    }
+    const subj = String(body).match(/^subject:\s*(.+?)\s*$/m);
+    if (subj) subjects.push(subj[1].trim());
+    return [
+      `### ${path.basename(file)}`,
+      '',
+      '```markdown',
+      clip(body, MAX_TURN_MAIL_CHARS),
+      '```',
+      '',
+    ].join('\n');
+  });
+
+  const turnId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const turnFile = path.join(hubTurnsDir(hub), `agent-${slug}-${turnId}.md`);
+  const subjectHint = subjects.length ? subjects.join('; ') : '(none)';
+
+  const content = [
+    `# Agent turn prompt (ephemeral) — ${slug}`,
+    '',
+    'Control plane injected this file at launch. Prefer **Pending mail** below over listing the inbox with tools.',
+    'You still run memoryless across dispatches: only this turn is injected.',
+    '',
+    '## Standing dispatch instructions',
+    '',
+    standing,
+    '',
+    '## This turn',
+    '',
+    `- Hub absolute path: \`${hubAbs}\``,
+    `- Agent slug: \`${slug}\``,
+    `- Role/scope file: \`${agentMd}\` (open if you need product details not in the mail)`,
+    `- Inbox (real files to archive after work): \`agents/${slug}/inbox/\``,
+    `- Outbox: \`agents/${slug}/outbox/\``,
+    `- Pending subjects: ${subjectHint}`,
+    `- Pending inbox files: ${pending.length}`,
+    '',
+    '### Order',
+    '1. Act on **Pending mail** (bodies inlined below). Archive the real files under `agents/' + slug + '/inbox/` after each is done.',
+    '2. Write reply messages to `agents/' + slug + '/outbox/` (`to: hub` unless directed otherwise).',
+    '3. Before changing project code: read that project\'s `sitemap.md` (Active Work / Known Issues) and recent `.agent/journal/` — skip deep project reads for pure status/ack subjects when mail alone answers.',
+    '4. Do not create a worktree unless the dispatch asks or the checkout is unsafe.',
+    '',
+    '## Pending mail',
+    '',
+    mailBlocks.length ? mailBlocks.join('\n') : '_No pending inbox mail._',
+    '',
+  ].join('\n');
+
+  fs.writeFileSync(turnFile, content);
+  return turnFile;
+}
+
 function excerpt(content) {
   const text = String(content || '').replace(/\s+/g, ' ').trim();
   if (text.length <= MAX_EXCERPT_CHARS) return text;
@@ -381,6 +476,7 @@ function compactHubSession(hub, conversation) {
 }
 
 module.exports = {
+  buildAgentTurnPrompt,
   buildHubTurnPrompt,
   compactHubSession,
   deriveHubRuntimePrompt,
@@ -391,6 +487,7 @@ module.exports = {
   hubRuntimePromptFile,
   hubSessionFile,
   hubTurnsDir,
+  listAgentPendingInboxFiles,
   listPendingInboxFiles,
   resetHubSession,
 };

@@ -90,6 +90,12 @@ function deriveCliSettings(cli, cliJson) {
   };
 }
 
+function clampInt(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
 // Fields derived from registry.json that should stay in sync with the file
 // on disk for the lifetime of a long-running process (e.g. the control-plane
 // server), without requiring a process restart. See refreshRegistry().
@@ -100,20 +106,46 @@ function deriveRegistrySettings(registry) {
 
   // Poll interval: honor settings.dispatch.poll_seconds (was ignored; server hard-coded 2s).
   // Clamp 1–30s. Default 2. Env BIZAGENT_POLL_SECONDS wins when set.
-  const rawPoll = Number(
+  const pollSeconds = clampInt(
     process.env.BIZAGENT_POLL_SECONDS || dispatch.poll_seconds || 2,
+    1,
+    30,
+    2,
   );
-  const pollSeconds = Number.isFinite(rawPoll)
-    ? Math.max(1, Math.min(30, rawPoll))
-    : 2;
+
+  // Concurrency tiers (Phase 2): hub and product agents have separate slot pools
+  // so a long hub turn does not starve a multi-agent fanout (and vice versa).
+  // max_concurrency remains the product-agent pool size (default raised 4 → 8).
+  // agent_slots overrides that when set; hub_slots defaults to 1.
+  const maxConcurrency = clampInt(
+    process.env.BIZAGENT_MAX_CONCURRENCY || dispatch.max_concurrency || 8,
+    1,
+    32,
+    8,
+  );
+  const hubSlots = clampInt(
+    process.env.BIZAGENT_HUB_SLOTS || dispatch.hub_slots || 1,
+    1,
+    4,
+    1,
+  );
+  const agentSlots = clampInt(
+    process.env.BIZAGENT_AGENT_SLOTS || dispatch.agent_slots || maxConcurrency,
+    1,
+    32,
+    maxConcurrency,
+  );
 
   return {
     pollSeconds,
-    maxConcurrency: Number(
-      process.env.BIZAGENT_MAX_CONCURRENCY || dispatch.max_concurrency || 4,
-    ),
-    lockLeaseSecs: Number(
+    maxConcurrency,
+    hubSlots,
+    agentSlots,
+    lockLeaseSecs: clampInt(
       process.env.BIZAGENT_LOCK_LEASE_SECS || dispatch.lock_lease_secs || 1800,
+      60,
+      86400,
+      1800,
     ),
     hubModel:
       process.env.BIZAGENT_HUB_MODEL ||

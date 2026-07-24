@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-24  
 **Author:** Agent B (bizagent-oss)  
-**Status:** Phase 0 + Phase 1 implemented (2026-07-24). Phase 2+ not started.  
+**Status:** Phase 0–2 implemented (2026-07-24). Phase 3 (warm hub) only with hub approval.  
 **Scope:** Control plane, hub PTL launches, product-agent launches  
 **Measured on:** Live hub `/home/tmanso/bizagent` + OSS tree `bizagent-public` @ `7dc024d`
 
@@ -376,13 +376,14 @@ Launch: `grok --prompt-file <turnFile> --always-approve` with `--cwd` = sandbox 
 
 **Exit metrics (Phase 1 success):** see §6.
 
-### Phase 2 — Throughput & fanout (1–2 days)
+### Phase 2 — Throughput & fanout (1–2 days) — **done 2026-07-24**
 
-1. O7 concurrency tiering.
-2. Product-agent light injection (pending message body only) to cut status times toward **15–25s**.
-3. Optional: skip sitemap re-read for pure “status” subjects when journal mtime unchanged (careful with correctness).
+1. O7 concurrency tiering: `hub_slots` (default 1) + `agent_slots` (default = `max_concurrency`, default raised **4→8**). Hub no longer consumes a product slot.
+2. Product-agent light injection: `buildAgentTurnPrompt` inlines pending inbox bodies; launch uses ephemeral turn file (cleaned on exit).
+3. Optional sitemap skip for pure status: prompt soft-guidance only (no mtime heuristic — correctness over cleverness).
+4. Stuck-mail hygiene: multi-to + missing `to` + invalid slug path-tricks quarantine once.
 
-**Exit:** 10-agent status fanout **&lt; 90s** wall on this machine.
+**Exit:** 10-agent status fanout **&lt; 90s** wall on this machine (measure after live apply + restart).
 
 ### Phase 3 — Warm hub & UX (optional, 3–7 days)
 
