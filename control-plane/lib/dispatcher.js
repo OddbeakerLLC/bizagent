@@ -269,7 +269,6 @@ function launchAgent(config, slug, model = '', cliName = '') {
   const agentLog = path.join(hub, 'logs', `dispatch-${slug}.log`);
   const agentStderr = path.join(hub, 'logs', `dispatch-${slug}.stderr`);
   const promptFile = ensureDispatchPrompt(hub, slug);
-  const startMs = Date.now();
   appendLog(hub, `dispatch_start slug=${slug} t=${nowIso()}`);
 
   if (dryRun) {
@@ -283,14 +282,25 @@ function launchAgent(config, slug, model = '', cliName = '') {
   const cmdPreview = compileAgentCommand(cliSettings, promptFile);
   appendLog(hub, `cli_spawn slug=${slug} t=${nowIso()} cmd=${cmdPreview}`);
 
+  // Timing + exit log live in the shell wrapper: detached+unref children do not
+  // reliably deliver Node 'exit' events to a long-running control plane.
   const script = [
     'HUB="$1"; slug="$2"; cli="$3"; pflag="$4"; extra="$5"; pfile="$6"; agentlog="$7"; stderrlog="$8"',
     'lockdir="$HUB/agents/$slug/.lock"',
+    'cplog="$HUB/logs/control-plane.log"',
     'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
     'date +%s > "$lockdir/start" 2>/dev/null',
     'trap "rm -rf \\"$lockdir\\"" EXIT',
     'cd "$HUB" || exit 1',
+    'start_ms=$(date +%s%3N 2>/dev/null || python3 -c "import time;print(int(time.time()*1000))")',
+    'set +e',
     '"$cli" $pflag "$pfile" $extra >> "$agentlog" 2>> "$stderrlog"',
+    'code=$?',
+    'end_ms=$(date +%s%3N 2>/dev/null || python3 -c "import time;print(int(time.time()*1000))")',
+    'dur=$((end_ms - start_ms))',
+    'ts=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)',
+    'printf "%s control-plane: cli_exit slug=%s code=%s duration_ms=%s t=%s\\n" "$ts" "$slug" "$code" "$dur" "$ts" >> "$cplog"',
+    'exit "$code"',
   ].join('\n');
 
   const child = spawn('bash', ['-c', script, '_', hub, slug, cliSettings.cli, cliSettings.promptFlag, cliSettings.extraArgs, promptFile, agentLog, agentStderr], {
@@ -299,8 +309,6 @@ function launchAgent(config, slug, model = '', cliName = '') {
   });
 
   child.on('exit', (code) => {
-    const durationMs = Date.now() - startMs;
-    appendLog(hub, `cli_exit slug=${slug} code=${code === null ? 'null' : code} duration_ms=${durationMs} t=${nowIso()}`);
     if (code !== 0 && code !== null) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, slug, code, stderrTail, null);
@@ -317,7 +325,6 @@ function launchHub(config) {
   const lock = lockDir(hub, 'hub');
   const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
   const agentStderr = path.join(hub, 'logs', 'dispatch-hub.stderr');
-  const startMs = Date.now();
   appendLog(hub, `dispatch_start slug=hub t=${nowIso()}`);
 
   // Always refresh base hub.md for tools that still open it; launch uses turn file.
@@ -340,12 +347,21 @@ function launchHub(config) {
   const script = [
     'HUB="$1"; cli="$2"; pflag="$3"; extra="$4"; pfile="$5"; agentlog="$6"; stderrlog="$7"; cwd="$8"',
     'lockdir="$HUB/.bizagent/hub.lock"',
-    'mkdir -p "$HUB/.bizagent"',
+    'cplog="$HUB/logs/control-plane.log"',
+    'mkdir -p "$HUB/.bizagent" "$HUB/logs"',
     'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
     'date +%s > "$lockdir/start" 2>/dev/null',
-    'trap "rm -rf \\"$lockdir\\"" EXIT',
+    'trap \'rm -rf "$lockdir"; rm -f "$pfile"\' EXIT',
     'cd "$cwd" || exit 1',
+    'start_ms=$(date +%s%3N 2>/dev/null || python3 -c "import time;print(int(time.time()*1000))")',
+    'set +e',
     '"$cli" $pflag "$pfile" $extra >> "$agentlog" 2>> "$stderrlog"',
+    'code=$?',
+    'end_ms=$(date +%s%3N 2>/dev/null || python3 -c "import time;print(int(time.time()*1000))")',
+    'dur=$((end_ms - start_ms))',
+    'ts=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)',
+    'printf "%s control-plane: cli_exit slug=hub code=%s duration_ms=%s t=%s\\n" "$ts" "$code" "$dur" "$ts" >> "$cplog"',
+    'exit "$code"',
   ].join('\n');
 
   const conversationId = getRecentHubInboxMessage(hub);
@@ -358,10 +374,6 @@ function launchHub(config) {
   });
 
   child.on('exit', (code) => {
-    const durationMs = Date.now() - startMs;
-    appendLog(hub, `cli_exit slug=hub code=${code === null ? 'null' : code} duration_ms=${durationMs} t=${nowIso()}`);
-    // Ephemeral turn prompt: delete after exit (keep hub.md).
-    safeUnlink(promptFile);
     if (code !== 0 && code !== null) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, 'hub', code, stderrTail, conversationId);
