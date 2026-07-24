@@ -3,10 +3,18 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { agentsFromRegistry, appDir } = require('./config');
 const { compileAgentCommand, getCliSettings } = require('./cli-config');
-const { ensureHubRuntimePrompt } = require('./hub-memory');
+const {
+  buildHubTurnPrompt,
+  ensureHubRuntimeCwd,
+  ensureHubRuntimePrompt,
+} = require('./hub-memory');
 const { pendingMail } = require('./mail');
 const { appendLog } = require('./log');
 const { writeFileUnique } = require('./conversations');
+
+function nowIso() {
+  return new Date().toISOString();
+}
 
 function getRecentHubInboxMessage(hub) {
   const inboxDir = path.join(hub, 'inbox');
@@ -246,6 +254,14 @@ function buildArgs(extraArgs, modelOverride) {
   return stripped ? `${stripped} --model ${modelOverride}` : `--model ${modelOverride}`;
 }
 
+function safeUnlink(file) {
+  try {
+    if (file && fs.existsSync(file)) fs.unlinkSync(file);
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
 function launchAgent(config, slug, model = '', cliName = '') {
   const { hub, dryRun, _cliJson } = config;
   const cliJson = _cliJson || {};
@@ -253,6 +269,8 @@ function launchAgent(config, slug, model = '', cliName = '') {
   const agentLog = path.join(hub, 'logs', `dispatch-${slug}.log`);
   const agentStderr = path.join(hub, 'logs', `dispatch-${slug}.stderr`);
   const promptFile = ensureDispatchPrompt(hub, slug);
+  const startMs = Date.now();
+  appendLog(hub, `dispatch_start slug=${slug} t=${nowIso()}`);
 
   if (dryRun) {
     fs.rmSync(lock, { recursive: true, force: true });
@@ -262,6 +280,9 @@ function launchAgent(config, slug, model = '', cliName = '') {
 
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
   const cliSettings = getCliSettings(hub, cliJson, config, cliName, model);
+  const cmdPreview = compileAgentCommand(cliSettings, promptFile);
+  appendLog(hub, `cli_spawn slug=${slug} t=${nowIso()} cmd=${cmdPreview}`);
+
   const script = [
     'HUB="$1"; slug="$2"; cli="$3"; pflag="$4"; extra="$5"; pfile="$6"; agentlog="$7"; stderrlog="$8"',
     'lockdir="$HUB/agents/$slug/.lock"',
@@ -278,6 +299,8 @@ function launchAgent(config, slug, model = '', cliName = '') {
   });
 
   child.on('exit', (code) => {
+    const durationMs = Date.now() - startMs;
+    appendLog(hub, `cli_exit slug=${slug} code=${code === null ? 'null' : code} duration_ms=${durationMs} t=${nowIso()}`);
     if (code !== 0 && code !== null) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, slug, code, stderrTail, null);
@@ -294,35 +317,51 @@ function launchHub(config) {
   const lock = lockDir(hub, 'hub');
   const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
   const agentStderr = path.join(hub, 'logs', 'dispatch-hub.stderr');
-  const promptFile = ensureHubRuntimePrompt(hub);
+  const startMs = Date.now();
+  appendLog(hub, `dispatch_start slug=hub t=${nowIso()}`);
+
+  // Always refresh base hub.md for tools that still open it; launch uses turn file.
+  ensureHubRuntimePrompt(hub);
+  const runtimeCwd = ensureHubRuntimeCwd(hub);
 
   if (dryRun) {
     fs.rmSync(lock, { recursive: true, force: true });
-    appendLog(hub, 'DRY_RUN launch hub using .bizagent/prompts/hub.md');
+    appendLog(hub, 'DRY_RUN launch hub using turn prompt + runtime-cwd');
     return;
   }
 
+  const promptFile = buildHubTurnPrompt(hub);
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
   // Prefer settings.hub_agent.cliName (via config.hubCliName); empty falls back to .cli / default.
   const cliSettings = getCliSettings(hub, cliJson, config, hubCliName || '', hubModel || '');
+  const cmdPreview = compileAgentCommand(cliSettings, promptFile);
+  appendLog(hub, `cli_spawn slug=hub t=${nowIso()} cwd=${path.relative(hub, runtimeCwd) || runtimeCwd} turn=${path.basename(promptFile)} cmd=${cmdPreview}`);
+
   const script = [
-    'HUB="$1"; cli="$2"; pflag="$3"; extra="$4"; pfile="$5"; agentlog="$6"; stderrlog="$7"',
+    'HUB="$1"; cli="$2"; pflag="$3"; extra="$4"; pfile="$5"; agentlog="$6"; stderrlog="$7"; cwd="$8"',
     'lockdir="$HUB/.bizagent/hub.lock"',
     'mkdir -p "$HUB/.bizagent"',
     'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
     'date +%s > "$lockdir/start" 2>/dev/null',
     'trap "rm -rf \\"$lockdir\\"" EXIT',
-    'cd "$HUB" || exit 1',
+    'cd "$cwd" || exit 1',
     '"$cli" $pflag "$pfile" $extra >> "$agentlog" 2>> "$stderrlog"',
   ].join('\n');
 
   const conversationId = getRecentHubInboxMessage(hub);
-  const child = spawn('bash', ['-c', script, '_', hub, cliSettings.cli, cliSettings.promptFlag, cliSettings.extraArgs, promptFile, agentLog, agentStderr], {
+  const child = spawn('bash', [
+    '-c', script, '_', hub, cliSettings.cli, cliSettings.promptFlag, cliSettings.extraArgs,
+    promptFile, agentLog, agentStderr, runtimeCwd,
+  ], {
     detached: true,
     stdio: 'ignore',
   });
 
   child.on('exit', (code) => {
+    const durationMs = Date.now() - startMs;
+    appendLog(hub, `cli_exit slug=hub code=${code === null ? 'null' : code} duration_ms=${durationMs} t=${nowIso()}`);
+    // Ephemeral turn prompt: delete after exit (keep hub.md).
+    safeUnlink(promptFile);
     if (code !== 0 && code !== null) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, 'hub', code, stderrTail, conversationId);
@@ -330,7 +369,7 @@ function launchHub(config) {
   });
 
   child.unref();
-  appendLog(hub, 'launched hub using .bizagent/prompts/hub.md');
+  appendLog(hub, `launched hub using turn prompt ${path.basename(promptFile)} cwd=${path.basename(runtimeCwd)}`);
 }
 
 function dispatchPendingAgents(config) {

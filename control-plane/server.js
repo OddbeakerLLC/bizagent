@@ -294,13 +294,18 @@ function start(hubInput) {
   const server = createServer(config);
   ensureHubRuntimePrompt(config.hub);
   runTick(config);
-  setInterval(() => runTick(config), 2000);
+  // Honor settings.dispatch.poll_seconds (default 2; was previously hard-coded).
+  const pollMs = Math.max(1000, Math.min(30000, Number(config.pollSeconds || 2) * 1000));
+  setInterval(() => {
+    refreshRuntimeConfig(config);
+    runTick(config);
+  }, pollMs);
   server.listen(config.port, config.host, () => {
     const bindUrl = `http://${config.host}:${config.port}`;
     const openUrl = config.host === '0.0.0.0' ? `http://localhost:${config.port}` : bindUrl;
     const logLine = openUrl !== bindUrl
-      ? `bizagent-control-plane listening on ${config.host}:${config.port} (open ${openUrl})`
-      : `bizagent-control-plane listening on ${bindUrl}`;
+      ? `bizagent-control-plane listening on ${config.host}:${config.port} poll=${config.pollSeconds}s (open ${openUrl})`
+      : `bizagent-control-plane listening on ${bindUrl} poll=${config.pollSeconds}s`;
     appendLog(config.hub, logLine);
     console.log(logLine);
   });
