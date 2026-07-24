@@ -149,6 +149,58 @@ function frontmatterValue(text, key) {
   return match ? match[1].trim() : '';
 }
 
+/** How long a console conversation stays "open" after last GET/POST touch. */
+const ACTIVE_CONVERSATION_MAX_AGE_MS = 30_000;
+
+function activeConversationFile(hub) {
+  return path.join(appDir(hub), 'active-conversation.json');
+}
+
+/**
+ * Mark a conversation as the open console chat. Called when the web UI
+ * loads or posts to a conversation (poll every ~2s keeps it fresh).
+ */
+function setActiveConversation(hub, id) {
+  if (!id || !getConversation(hub, id)) return false;
+  ensureDir(appDir(hub));
+  fs.writeFileSync(
+    activeConversationFile(hub),
+    `${JSON.stringify({ id, updated_at: new Date().toISOString() }, null, 2)}\n`,
+  );
+  return true;
+}
+
+/**
+ * Return the open console conversation id, or null if none / stale / invalid.
+ * @param {number} [maxAgeMs] - override staleness window (default 30s)
+ */
+function getActiveConversationId(hub, maxAgeMs = ACTIVE_CONVERSATION_MAX_AGE_MS) {
+  const data = readJson(activeConversationFile(hub), null);
+  if (!data || !data.id || !data.updated_at) return null;
+  const age = Date.now() - Date.parse(data.updated_at);
+  if (!Number.isFinite(age) || age < 0 || age > maxAgeMs) return null;
+  if (!getConversation(hub, data.id)) return null;
+  return data.id;
+}
+
+/**
+ * Insert conversation_id into YAML frontmatter if the key is absent.
+ * Never invents an id; never overwrites a present conversation_id key
+ * (including empty values).
+ */
+function stampConversationId(text, conversationId) {
+  const raw = String(text || '');
+  if (!conversationId) return raw;
+  const match = raw.match(/^(---\r?\n)([\s\S]*?)(\r?\n---)(\r?\n?)/);
+  if (!match) return raw;
+  const body = match[2];
+  if (/^conversation_id:/m.test(body)) return raw;
+  const insert = body === '' || body.endsWith('\n')
+    ? `${body}conversation_id: ${conversationId}`
+    : `${body}\nconversation_id: ${conversationId}`;
+  return `${match[1]}${insert}${match[3]}${match[4]}${raw.slice(match[0].length)}`;
+}
+
 function userInboxFingerprint(file) {
   const stat = fs.statSync(file);
   return {
@@ -216,16 +268,21 @@ function readUserInboxMessages(hub) {
 }
 
 module.exports = {
+  ACTIVE_CONVERSATION_MAX_AGE_MS,
   appendMessage,
   assertValidConversationId,
   conversationNameFromContent,
   createConversation,
+  frontmatterValue,
+  getActiveConversationId,
   getConversation,
   listConversations,
   readUserInboxMessages,
   recordUserInboxDelivery,
+  setActiveConversation,
   shouldStartNewConversation,
   safeConversationFile,
+  stampConversationId,
   userInbox,
   writeFileUnique,
   writeHubInboxMessage,

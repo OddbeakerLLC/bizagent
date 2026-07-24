@@ -383,6 +383,172 @@ NODE
   then
     fail "conversation API path safety or user inbox relay failed"
   fi
+
+  # CP stamps conversation_id on hub→user route when console chat is open
+  if ! node - "$ROOT" "$TMP2" <<'NODE'
+const root = process.argv[2];
+const hub = process.argv[3];
+const fs = require('fs');
+const path = require('path');
+const { routeOutboxes } = require(`${root}/control-plane/lib/mail`);
+const {
+  createConversation,
+  frontmatterValue,
+  getActiveConversationId,
+  getConversation,
+  readUserInboxMessages,
+  setActiveConversation,
+  stampConversationId,
+  userInbox,
+} = require(`${root}/control-plane/lib/conversations`);
+
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'inbox'), { recursive: true });
+fs.mkdirSync(userInbox(hub), { recursive: true });
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 2, lock_lease_secs: 60 } },
+  products: [],
+}));
+
+// unit: stampConversationId never overwrites
+const withId = `---\nfrom: hub\nto: user\nconversation_id: 2026-07-24-keep-abcdef\n---\nbody\n`;
+if (stampConversationId(withId, '2026-07-24-other-123456') !== withId) {
+  console.error('stamp overwrote existing conversation_id');
+  process.exit(1);
+}
+const emptyKey = `---\nfrom: hub\nto: user\nconversation_id:\n---\nbody\n`;
+if (stampConversationId(emptyKey, '2026-07-24-other-123456') !== emptyKey) {
+  console.error('stamp overwrote empty conversation_id key');
+  process.exit(2);
+}
+const missing = `---\nfrom: hub\nto: user\ndate: 2026-07-24\nsubject: reply\n---\n\nstatus fanout\n`;
+const stampedOnly = stampConversationId(missing, '2026-07-24-main-abcdef');
+if (!/^conversation_id:\s*2026-07-24-main-abcdef\s*$/m.test(stampedOnly)) {
+  console.error('stamp did not insert conversation_id');
+  process.exit(3);
+}
+
+const conv = createConversation(hub, 'Stamp Test');
+// No active conversation → route leaves mail without conversation_id
+fs.writeFileSync(path.join(hub, 'outbox', '2026-07-24-hub-user-nostamp.md'), `---
+from: hub
+to: user
+date: 2026-07-24
+subject: no open chat
+---
+
+file only
+`);
+let routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected 1 deliver without stamp', routed);
+  process.exit(4);
+}
+const noStampPath = path.join(userInbox(hub), '2026-07-24-hub-user-nostamp.md');
+if (!fs.existsSync(noStampPath)) {
+  console.error('missing delivered no-stamp file');
+  process.exit(5);
+}
+const noStampText = fs.readFileSync(noStampPath, 'utf8');
+if (frontmatterValue(noStampText, 'conversation_id')) {
+  console.error('stamped without active conversation');
+  process.exit(6);
+}
+// relay skips (no conversation_id) and archives
+let relayed = readUserInboxMessages(hub);
+if (relayed !== 0) {
+  console.error('unexpected relay without conversation_id');
+  process.exit(7);
+}
+
+// Active conversation → stamp on route + relay into chat
+if (!setActiveConversation(hub, conv.id)) {
+  console.error('setActiveConversation failed');
+  process.exit(8);
+}
+if (getActiveConversationId(hub) !== conv.id) {
+  console.error('getActiveConversationId mismatch', getActiveConversationId(hub), conv.id);
+  process.exit(9);
+}
+fs.writeFileSync(path.join(hub, 'outbox', '2026-07-24-hub-user-stamp.md'), `---
+from: hub
+to: user
+date: 2026-07-24
+subject: status fanout
+---
+
+stamped reply
+`);
+routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected 1 deliver with stamp', routed);
+  process.exit(10);
+}
+const stampPath = path.join(userInbox(hub), '2026-07-24-hub-user-stamp.md');
+if (!fs.existsSync(stampPath)) {
+  console.error('missing stamped delivery file');
+  process.exit(11);
+}
+const stampText = fs.readFileSync(stampPath, 'utf8');
+if (frontmatterValue(stampText, 'conversation_id') !== conv.id) {
+  console.error('route did not stamp active conversation_id', stampText);
+  process.exit(12);
+}
+relayed = readUserInboxMessages(hub);
+if (relayed !== 1) {
+  console.error('expected relay after stamp', relayed);
+  process.exit(13);
+}
+const after = getConversation(hub, conv.id);
+if (!after.messages.some((m) => m.role === 'hub' && m.content === 'stamped reply')) {
+  console.error('stamped reply not in conversation', after.messages);
+  process.exit(14);
+}
+
+// Existing conversation_id must not be overwritten even when another is active
+const other = createConversation(hub, 'Other Chat');
+setActiveConversation(hub, other.id);
+fs.writeFileSync(path.join(hub, 'outbox', '2026-07-24-hub-user-keep.md'), `---
+from: hub
+to: user
+date: 2026-07-24
+subject: keep id
+conversation_id: ${conv.id}
+---
+
+keep original
+`);
+routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected keep-id deliver', routed);
+  process.exit(15);
+}
+const keepPath = path.join(userInbox(hub), '2026-07-24-hub-user-keep.md');
+const keepText = fs.readFileSync(keepPath, 'utf8');
+if (frontmatterValue(keepText, 'conversation_id') !== conv.id) {
+  console.error('overwrote existing conversation_id', keepText);
+  process.exit(16);
+}
+relayed = readUserInboxMessages(hub);
+if (relayed !== 1) {
+  console.error('expected relay for keep-id', relayed);
+  process.exit(17);
+}
+const afterKeep = getConversation(hub, conv.id);
+if (!afterKeep.messages.some((m) => m.content === 'keep original')) {
+  console.error('keep original not relayed to original conv');
+  process.exit(18);
+}
+const otherAfter = getConversation(hub, other.id);
+if (otherAfter.messages.some((m) => m.content === 'keep original')) {
+  console.error('keep original wrongly landed in active other conv');
+  process.exit(19);
+}
+NODE
+  then
+    fail "conversation_id stamp-on-route failed"
+  fi
+
   # buildArgs: strips existing --model before appending override
   if ! node - "$ROOT" <<'NODE'
 const root = process.argv[2];
