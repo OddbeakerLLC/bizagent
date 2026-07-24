@@ -139,8 +139,12 @@ grep -q "/api/setup" "$ROOT/control-plane/public/app.js" \
   || fail "UI does not call setup endpoint on first run"
 grep -q "needsSetup" "$ROOT/control-plane/public/app.js" \
   || fail "UI does not track setup-required state separately from login"
-grep -q "lastMessageCount" "$ROOT/control-plane/public/app.js" \
-  || fail "poll does not track last message count to skip unchanged renders"
+grep -q "conversationPollStamp" "$ROOT/control-plane/public/app.js" \
+  || fail "poll does not stamp conversation state (count-only misses ack→reply swap)"
+grep -q "lastConversationStamp" "$ROOT/control-plane/public/app.js" \
+  || fail "poll does not track last conversation stamp to skip unchanged renders"
+grep -q "updated_at" "$ROOT/control-plane/public/app.js" \
+  || fail "poll stamp must include updated_at so same-length message swaps re-render"
 grep -q "buildArgs" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher missing buildArgs (strip-then-append model override)"
 grep -q "hubModel" "$ROOT/control-plane/lib/config.js" \
@@ -677,6 +681,8 @@ if (noSpam.messages.find(isLaunchAckMessage).content !== LAUNCH_ACK_TEXT) {
 }
 
 // hub reply supersedes ack
+const lenWithAck = noSpam.messages.length;
+const stampWithAck = noSpam.updated_at;
 appendMessage(hub, conv.id, 'hub', 'Real reply from outbox path');
 const afterHub = getConversation(hub, conv.id);
 if (afterHub.messages.some(isLaunchAckMessage)) {
@@ -685,6 +691,20 @@ if (afterHub.messages.some(isLaunchAckMessage)) {
 }
 if (!afterHub.messages.some((m) => m.role === 'hub' && m.content === 'Real reply from outbox path')) {
   console.error('hub reply missing');
+  process.exit(8);
+}
+// Regression: strip-ack + append-hub keeps messages.length stable. UI poll must
+// not key only on count (stuck interim); updated_at must advance so stamp differs.
+if (afterHub.messages.length !== lenWithAck) {
+  console.error('expected same-length supersede (ack out, hub in)', {
+    before: lenWithAck, after: afterHub.messages.length,
+  });
+  process.exit(8);
+}
+if (!afterHub.updated_at || afterHub.updated_at === stampWithAck) {
+  console.error('updated_at must change on ack→hub supersede for console poll', {
+    before: stampWithAck, after: afterHub.updated_at,
+  });
   process.exit(8);
 }
 
