@@ -117,15 +117,78 @@ function getConversation(hub, id) {
   return conv;
 }
 
-function appendMessage(hub, id, role, content) {
-  const conv = getConversation(hub, id);
-  if (!conv) throw new Error('conversation not found');
-  conv.messages.push({ role, content, created_at: new Date().toISOString() });
+/** Deterministic CP launch ack — no model. Superseded when a real hub reply arrives. */
+const LAUNCH_ACK_TEXT = 'PTL on it…';
+const LAUNCH_ACK_KIND = 'launch-ack';
+const STATUS_ERROR_KIND = 'error';
+
+function isLaunchAckMessage(msg) {
+  return msg && msg.role === 'status' && msg.kind === LAUNCH_ACK_KIND;
+}
+
+/**
+ * Remove CP launch-ack status lines from a conversation (in memory).
+ * Called when a real hub reply or hard failure is posted.
+ */
+function stripLaunchAcks(conv) {
+  if (!conv || !Array.isArray(conv.messages)) return 0;
+  const before = conv.messages.length;
+  conv.messages = conv.messages.filter((msg) => !isLaunchAckMessage(msg));
+  return before - conv.messages.length;
+}
+
+function saveConversation(hub, conv) {
   conv.updated_at = new Date().toISOString();
   compactConversation(conv);
-  fs.writeFileSync(safeConversationFile(hub, id), `${JSON.stringify(conv, null, 2)}\n`);
+  fs.writeFileSync(safeConversationFile(hub, conv.id), `${JSON.stringify(conv, null, 2)}\n`);
   compactHubSession(hub, conv);
   return conv;
+}
+
+/**
+ * Append a message. Optional meta: { kind } (e.g. launch-ack, error).
+ * Real hub replies and error statuses supersede any launch-ack lines.
+ */
+function appendMessage(hub, id, role, content, meta = {}) {
+  const conv = getConversation(hub, id);
+  if (!conv) throw new Error('conversation not found');
+  if (role === 'hub' || (role === 'status' && meta.kind === STATUS_ERROR_KIND)) {
+    stripLaunchAcks(conv);
+  }
+  const msg = { role, content, created_at: new Date().toISOString() };
+  if (meta.kind) msg.kind = meta.kind;
+  conv.messages.push(msg);
+  return saveConversation(hub, conv);
+}
+
+/**
+ * Post one CP-owned launch ack into the conversation (idempotent per open ack).
+ * Returns the conversation, or null if id is missing/invalid.
+ */
+function postLaunchAck(hub, conversationId, text = LAUNCH_ACK_TEXT) {
+  if (!conversationId) return null;
+  const conv = getConversation(hub, conversationId);
+  if (!conv) return null;
+  const last = conv.messages[conv.messages.length - 1];
+  // One visible ack at a time — do not spam if the previous ack is still showing.
+  if (isLaunchAckMessage(last)) return conv;
+  conv.messages.push({
+    role: 'status',
+    kind: LAUNCH_ACK_KIND,
+    content: text,
+    created_at: new Date().toISOString(),
+  });
+  return saveConversation(hub, conv);
+}
+
+/** Drop any launch-ack status lines now that a real reply (or failure) is in. */
+function supersedeLaunchAcks(hub, conversationId) {
+  if (!conversationId) return null;
+  const conv = getConversation(hub, conversationId);
+  if (!conv) return null;
+  const removed = stripLaunchAcks(conv);
+  if (removed === 0) return conv;
+  return saveConversation(hub, conv);
 }
 
 function writeHubInboxMessage(hub, content, conversationId) {
@@ -276,13 +339,20 @@ module.exports = {
   frontmatterValue,
   getActiveConversationId,
   getConversation,
+  isLaunchAckMessage,
+  LAUNCH_ACK_KIND,
+  LAUNCH_ACK_TEXT,
   listConversations,
+  postLaunchAck,
   readUserInboxMessages,
   recordUserInboxDelivery,
   setActiveConversation,
   shouldStartNewConversation,
   safeConversationFile,
   stampConversationId,
+  STATUS_ERROR_KIND,
+  stripLaunchAcks,
+  supersedeLaunchAcks,
   userInbox,
   writeFileUnique,
   writeHubInboxMessage,

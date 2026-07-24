@@ -26,7 +26,11 @@ const {
   shouldStartNewConversation,
   writeHubInboxMessage,
 } = require("./lib/conversations");
-const { dispatchPendingAgents, isAgentActive } = require("./lib/dispatcher");
+const {
+  dispatchPendingAgents,
+  drainHubTurnSafety,
+  isAgentActive,
+} = require("./lib/dispatcher");
 const { ensureHubRuntimePrompt } = require("./lib/hub-memory");
 const { agentMailStatus, routeOutboxes } = require("./lib/mail");
 const { appendLog } = require("./lib/log");
@@ -277,6 +281,8 @@ function runTick(config) {
   refreshRuntimeConfig(config);
   routeOutboxes(config.hub);
   syncUserInbox(config);
+  // Backup: if hub CLI exited without the shell safety hook, finish the turn.
+  drainHubTurnSafety(config);
   dispatchPendingAgents(config);
 }
 

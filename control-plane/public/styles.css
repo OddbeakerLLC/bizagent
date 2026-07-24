@@ -229,6 +229,27 @@ button {
   background: #e7f0ff;
   border-color: #b7cef5;
 }
+/* CP-owned status lines (launch ack, hard failures) — not model replies */
+.message.status {
+  max-width: min(520px, 70%);
+  padding: 8px 12px;
+  font-size: 13px;
+  color: #475569;
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  border-style: dashed;
+}
+.message.status.launch-ack {
+  color: #1d4ed8;
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+.message.status.error {
+  color: #9a3412;
+  background: #fff7ed;
+  border-color: #fed7aa;
+  border-style: solid;
+}
 .fixed-composer {
   position: fixed;
   left: 248px;

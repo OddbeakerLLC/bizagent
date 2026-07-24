@@ -312,12 +312,21 @@ function renderMarkdown(text) {
   return htmlParts.join('');
 }
 
+function messageClassName(msg) {
+  if (msg.role === 'user') return 'message user';
+  if (msg.role === 'status') {
+    const kind = msg.kind === 'error' ? 'error' : (msg.kind === 'launch-ack' ? 'launch-ack' : '');
+    return `message status${kind ? ` ${kind}` : ''}`;
+  }
+  return 'message system';
+}
+
 function renderMessages(messages) {
   const root = document.getElementById('messages');
   root.innerHTML = '';
   messages.forEach((msg) => {
     const el = document.createElement('div');
-    el.className = `message ${msg.role === 'user' ? 'user' : 'system'}`;
+    el.className = messageClassName(msg);
     el.innerHTML = renderMarkdown(msg.content);
     root.appendChild(el);
   });

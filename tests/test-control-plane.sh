@@ -53,6 +53,16 @@ grep -q "userInbox" "$ROOT/control-plane/lib/conversations.js" \
   || fail "control plane does not define a user inbox"
 grep -q "readUserInboxMessages" "$ROOT/control-plane/lib/conversations.js" \
   || fail "control plane does not relay user inbox messages into conversations"
+grep -q "postLaunchAck" "$ROOT/control-plane/lib/conversations.js" \
+  || fail "control plane missing CP launch-ack helper"
+grep -q "hub-turn-safety" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher does not wire hub-turn safety net"
+grep -q "drainHubTurnSafety" "$ROOT/control-plane/server.js" \
+  || fail "server tick does not drain hub-turn safety net"
+grep -q "launch-ack" "$ROOT/control-plane/public/app.js" \
+  || fail "UI does not style launch-ack status messages"
+[ -f "$ROOT/control-plane/lib/hub-turn-safety.js" ] \
+  || fail "hub-turn-safety module missing"
 grep -q "recordUserInboxDelivery" "$ROOT/control-plane/lib/conversations.js" \
   || fail "control plane does not track router-delivered user inbox messages"
 ! grep -q "user-inbox-deliveries" "$ROOT/control-plane/lib/conversations.js" \
@@ -547,6 +557,287 @@ if (otherAfter.messages.some((m) => m.content === 'keep original')) {
 NODE
   then
     fail "conversation_id stamp-on-route failed"
+  fi
+
+  # CP launch ack + outbox safety net (promote blob / hard fail)
+  if ! node - "$ROOT" "$TMP2" <<'NODE'
+const root = process.argv[2];
+const hub = process.argv[3];
+const fs = require('fs');
+const path = require('path');
+const {
+  appendMessage,
+  createConversation,
+  getConversation,
+  isLaunchAckMessage,
+  LAUNCH_ACK_TEXT,
+  postLaunchAck,
+  STATUS_ERROR_KIND,
+  supersedeLaunchAcks,
+} = require(`${root}/control-plane/lib/conversations`);
+const {
+  ensureHubUserReply,
+  extractFinalAssistantBlob,
+  recordPendingHubTurn,
+  readPendingHubTurns,
+} = require(`${root}/control-plane/lib/hub-turn-safety`);
+const { launchHub } = require(`${root}/control-plane/lib/dispatcher`);
+
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'user', 'inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 2, lock_lease_secs: 60 } },
+  products: [],
+}));
+
+// --- extractFinalAssistantBlob unit ---
+const blob = extractFinalAssistantBlob([
+  'Reading inbox…',
+  '',
+  'Checking registry.',
+  '',
+  'On it — Agent B is implementing the fix. Stand by.',
+].join('\n'));
+if (!blob.includes('Agent B is implementing')) {
+  console.error('blob missed final answer', blob);
+  process.exit(1);
+}
+const noisy = extractFinalAssistantBlob('Error: Internal error:\n{"message":"API error"}\n');
+if (noisy) {
+  console.error('blob should drop API noise', noisy);
+  process.exit(2);
+}
+
+// --- postLaunchAck + supersede ---
+const conv = createConversation(hub, 'Ack Test');
+const afterAck = postLaunchAck(hub, conv.id);
+if (!afterAck.messages.some(isLaunchAckMessage)) {
+  console.error('launch ack not posted', afterAck.messages);
+  process.exit(3);
+}
+if (afterAck.messages.filter(isLaunchAckMessage).length !== 1) {
+  console.error('expected exactly one ack');
+  process.exit(4);
+}
+// second post while ack visible → no spam
+postLaunchAck(hub, conv.id);
+const noSpam = getConversation(hub, conv.id);
+if (noSpam.messages.filter(isLaunchAckMessage).length !== 1) {
+  console.error('ack spammed', noSpam.messages);
+  process.exit(5);
+}
+if (noSpam.messages.find(isLaunchAckMessage).content !== LAUNCH_ACK_TEXT) {
+  console.error('unexpected ack text');
+  process.exit(6);
+}
+
+// hub reply supersedes ack
+appendMessage(hub, conv.id, 'hub', 'Real reply from outbox path');
+const afterHub = getConversation(hub, conv.id);
+if (afterHub.messages.some(isLaunchAckMessage)) {
+  console.error('ack not superseded by hub reply', afterHub.messages);
+  process.exit(7);
+}
+if (!afterHub.messages.some((m) => m.role === 'hub' && m.content === 'Real reply from outbox path')) {
+  console.error('hub reply missing');
+  process.exit(8);
+}
+
+// --- launchHub dry-run posts ack once, does not false-fail ---
+const conv2 = createConversation(hub, 'Launch Ack');
+fs.writeFileSync(path.join(hub, 'inbox', '2026-07-24-operator-console.md'), `---
+from: operator
+to: hub
+date: 2026-07-24
+subject: console message
+conversation_id: ${conv2.id}
+---
+
+Hi
+`);
+// Minimal hub runtime scaffolding for launchHub
+fs.mkdirSync(path.join(hub, '.bizagent', 'prompts'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'AGENT.md'), [
+  '## § 3 — Operating',
+  'You are PTL.',
+  '## § 4 — Honest limits',
+  'Limits here.',
+  '',
+].join('\n'));
+launchHub({
+  hub,
+  dryRun: true,
+  hubModel: '',
+  hubCliName: '',
+  lockLeaseSecs: 60,
+  _cliJson: {},
+});
+const launched = getConversation(hub, conv2.id);
+if (!launched.messages.some(isLaunchAckMessage)) {
+  console.error('launchHub dry-run did not post ack', launched.messages);
+  process.exit(9);
+}
+if (readPendingHubTurns(hub).length !== 0) {
+  console.error('dry-run should not leave pending hub turns');
+  process.exit(10);
+}
+// no error status from dry-run
+if (launched.messages.some((m) => m.kind === STATUS_ERROR_KIND)) {
+  console.error('dry-run false-failed');
+  process.exit(11);
+}
+
+// --- safety net: promote stdout blob when no outbox ---
+const conv3 = createConversation(hub, 'Promote');
+postLaunchAck(hub, conv3.id);
+const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
+const prefix = 'old log line before this turn\n\n';
+fs.writeFileSync(agentLog, prefix);
+const offset = Buffer.byteLength(prefix);
+const startedAt = new Date().toISOString();
+fs.appendFileSync(agentLog, [
+  'Loading session…',
+  '',
+  '**Agent B** finished the CP launch-ack work. Ready to verify live.',
+  '',
+].join('\n'));
+recordPendingHubTurn(hub, {
+  conversationId: conv3.id,
+  logByteOffset: offset,
+  startedAt,
+  agentLog,
+});
+const promoted = ensureHubUserReply(hub, {
+  conversationId: conv3.id,
+  logByteOffset: offset,
+  startedAt,
+  agentLog,
+});
+if (promoted.action !== 'promoted') {
+  console.error('expected promote', promoted);
+  process.exit(12);
+}
+const afterPromote = getConversation(hub, conv3.id);
+if (afterPromote.messages.some(isLaunchAckMessage)) {
+  console.error('ack survived promote', afterPromote.messages);
+  process.exit(13);
+}
+if (!afterPromote.messages.some((m) => m.role === 'hub' && /finished the CP launch-ack/.test(m.content))) {
+  console.error('promoted body not in conversation', afterPromote.messages);
+  process.exit(14);
+}
+// idempotent second call
+const again = ensureHubUserReply(hub, {
+  conversationId: conv3.id,
+  logByteOffset: offset,
+  startedAt,
+  agentLog,
+});
+if (again.action !== 'ok-existing' && again.action !== 'skip') {
+  // pending cleared → may skip-no pending path via ok-existing
+  if (again.action !== 'ok-existing') {
+    // still must not double-post hub messages
+  }
+}
+const hubCount = afterPromote.messages.filter((m) => m.role === 'hub').length;
+const afterAgain = getConversation(hub, conv3.id);
+const hubCount2 = afterAgain.messages.filter((m) => m.role === 'hub').length;
+if (hubCount2 !== hubCount) {
+  console.error('double promote', hubCount, hubCount2);
+  process.exit(15);
+}
+
+// --- safety net: hard fail when no outbox and no blob ---
+const conv4 = createConversation(hub, 'Fail');
+postLaunchAck(hub, conv4.id);
+const emptyLog = path.join(hub, 'logs', 'dispatch-hub-empty.log');
+fs.writeFileSync(emptyLog, '');
+const startedFail = new Date().toISOString();
+const failed = ensureHubUserReply(hub, {
+  conversationId: conv4.id,
+  logByteOffset: 0,
+  startedAt: startedFail,
+  agentLog: emptyLog,
+});
+if (failed.action !== 'failed') {
+  console.error('expected failed', failed);
+  process.exit(16);
+}
+const afterFail = getConversation(hub, conv4.id);
+if (afterFail.messages.some(isLaunchAckMessage)) {
+  console.error('ack survived hard fail');
+  process.exit(17);
+}
+if (!afterFail.messages.some((m) => m.role === 'status' && m.kind === STATUS_ERROR_KIND)) {
+  console.error('hard fail status missing', afterFail.messages);
+  process.exit(18);
+}
+// idempotent fail
+const failed2 = ensureHubUserReply(hub, {
+  conversationId: conv4.id,
+  logByteOffset: 0,
+  startedAt: startedFail,
+  agentLog: emptyLog,
+});
+if (failed2.action !== 'ok-failed-already' && failed2.action !== 'ok-existing') {
+  console.error('expected idempotent fail', failed2);
+  process.exit(19);
+}
+const errCount = getConversation(hub, conv4.id).messages.filter(
+  (m) => m.kind === STATUS_ERROR_KIND,
+).length;
+if (errCount !== 1) {
+  console.error('duplicate hard fail', errCount);
+  process.exit(20);
+}
+
+// --- real outbox path: safety net is no-op after route ---
+const conv5 = createConversation(hub, 'RealOutbox');
+postLaunchAck(hub, conv5.id);
+const startedReal = new Date().toISOString();
+fs.writeFileSync(path.join(hub, 'outbox', '2026-07-24-hub-real.md'), `---
+from: hub
+to: user
+date: 2026-07-24
+subject: real
+conversation_id: ${conv5.id}
+---
+
+Proper outbox reply
+`);
+const real = ensureHubUserReply(hub, {
+  conversationId: conv5.id,
+  logByteOffset: 0,
+  startedAt: startedReal,
+  agentLog: emptyLog,
+});
+if (real.action !== 'ok-existing') {
+  console.error('expected ok-existing for real outbox', real);
+  process.exit(21);
+}
+const afterReal = getConversation(hub, conv5.id);
+if (!afterReal.messages.some((m) => m.content === 'Proper outbox reply')) {
+  console.error('real outbox not relayed', afterReal.messages);
+  process.exit(22);
+}
+if (afterReal.messages.some(isLaunchAckMessage)) {
+  console.error('ack not superseded by real outbox');
+  process.exit(23);
+}
+
+// supersedeLaunchAcks direct
+const conv6 = createConversation(hub, 'Super');
+postLaunchAck(hub, conv6.id);
+supersedeLaunchAcks(hub, conv6.id);
+if (getConversation(hub, conv6.id).messages.some(isLaunchAckMessage)) {
+  console.error('supersedeLaunchAcks failed');
+  process.exit(24);
+}
+NODE
+  then
+    fail "launch ack / outbox safety net failed"
   fi
 
   # buildArgs: strips existing --model before appending override
