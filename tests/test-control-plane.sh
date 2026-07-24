@@ -69,8 +69,12 @@ grep -q "ensureHubRuntimePrompt" "$ROOT/scripts/bizagent-control-plane.js" \
   || fail "control-plane CLI does not generate hub runtime prompt"
 grep -q "append-hub-turn" "$ROOT/scripts/bizagent-control-plane.js" \
   || fail "control-plane CLI cannot append hub turns to session memory"
-grep -q "setInterval(.*2000" "$SERVER" \
-  || fail "server does not poll every 2 seconds"
+grep -q "pollSeconds\|poll_seconds" "$ROOT/control-plane/lib/config.js" \
+  || fail "config does not expose pollSeconds from settings.dispatch.poll_seconds"
+grep -q "pollSeconds\|pollMs\|setInterval" "$SERVER" \
+  || fail "server does not schedule poll interval from config"
+grep -q "setInterval" "$SERVER" \
+  || fail "server does not poll on an interval"
 grep -q "routeOutboxes" "$SERVER" \
   || fail "server does not route mail"
 ! grep -q "route result delivered=" "$SERVER" \
@@ -272,6 +276,23 @@ MSG
     || fail "route-once rejected invalid recipient with non-zero status"
   [ -f "$TMP/agents/alpha/outbox/2026-07-09-alpha-traverse.md" ] \
     || fail "route-once moved invalid-recipient mail"
+
+  # Multi-to outbox must be quarantined (not re-WARN every tick)
+  cat > "$TMP/agents/alpha/outbox/2026-07-09-alpha-multi.md" <<'MSG'
+---
+from: alpha
+to: hub, beta
+date: 2026-07-09
+subject: multi to invalid
+---
+should quarantine
+MSG
+  node "$ROOT/scripts/bizagent-control-plane.js" route-once --hub "$TMP" >/dev/null \
+    || fail "route-once rejected multi-to with non-zero status"
+  [ ! -f "$TMP/agents/alpha/outbox/2026-07-09-alpha-multi.md" ] \
+    || fail "route-once left multi-to mail in outbox"
+  [ -f "$TMP/.bizagent/quarantine/2026-07-09-alpha-multi.md" ] \
+    || fail "route-once did not quarantine multi-to mail"
 
   node "$ROOT/scripts/bizagent-control-plane.js" auth-init --hub "$TMP" --username ceo --password secret >/dev/null \
     || fail "auth-init failed"
@@ -628,12 +649,25 @@ for (const slug of knownSlugs) {
 }
 
 // cli.json keys should be valid CLI names
-const validCliNames = ['claude', 'codex', 'agy'];
+const validCliNames = ['claude', 'codex', 'agy', 'grok'];
 for (const key of cliKeys) {
   if (!validCliNames.includes(key)) {
     console.error('cli.json has unexpected CLI name:', key);
     process.exit(2);
   }
+}
+// Each CLI entry should define promptFlag (path-based), not only legacy prompt
+for (const key of cliKeys) {
+  const def = cliExample[key] || {};
+  if (!def.promptFlag && !def.prompt) {
+    console.error('cli.json entry missing promptFlag:', key);
+    process.exit(8);
+  }
+}
+// Grok must use --prompt-file (path), not -p (prompt text)
+if (cliExample.grok && cliExample.grok.promptFlag !== '--prompt-file') {
+  console.error('grok promptFlag must be --prompt-file, got:', cliExample.grok.promptFlag);
+  process.exit(9);
 }
 
 // Each product must have cliName field (string), not inline cli object
@@ -681,7 +715,7 @@ fs.writeFileSync(path.join(hub, '.cli'), [
 ].join('\n'));
 fs.writeFileSync(path.join(hub, 'cli.json'), JSON.stringify({
   claude: { executable: 'claude', promptFlag: '-p', flags: { extra: '' } },
-  grok: { executable: 'grok', promptFlag: '-p', flags: { extra: '--always-approve' } },
+  grok: { executable: 'grok', promptFlag: '--prompt-file', flags: { extra: '--always-approve' } },
 }));
 
 const config = loadRuntimeConfig(hub);
@@ -697,6 +731,10 @@ const settings = getCliSettings(hub, config._cliJson, config, config.hubCliName 
 if (settings.cli !== 'grok') {
   console.error('hub executable wrong:', settings.cli);
   process.exit(3);
+}
+if (settings.promptFlag !== '--prompt-file') {
+  console.error('hub grok promptFlag wrong:', settings.promptFlag);
+  process.exit(10);
 }
 if (!settings.extraArgs.includes('--model grok-4.5')) {
   console.error('hub model not applied:', settings.extraArgs);
@@ -729,6 +767,130 @@ fs.rmSync(hub, { recursive: true, force: true });
 NODE
   then
     fail "hub_agent.cliName does not control hub CLI selection"
+  fi
+
+  # Phase 0/1: slim hub prompt, turn injection, runtime cwd, pollSeconds, promptFlag key
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const {
+  buildHubTurnPrompt,
+  deriveHubRuntimePrompt,
+  ensureHubRuntimeCwd,
+  ensureHubRuntimePrompt,
+  hubRuntimeCwd,
+  hubSessionFile,
+} = require(`${root}/control-plane/lib/hub-memory`);
+const { getCliSettings } = require(`${root}/control-plane/lib/cli-config`);
+const { loadRuntimeConfig } = require(`${root}/control-plane/lib/config`);
+const { isMultiRecipient, routeOutboxes } = require(`${root}/control-plane/lib/mail`);
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-latency-'));
+fs.mkdirSync(path.join(hub, 'inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { poll_seconds: 2, max_concurrency: 4, lock_lease_secs: 60 } },
+  products: [],
+}));
+fs.writeFileSync(path.join(hub, 'AGENT.md'), [
+  '# AGENT.md',
+  '',
+  '## § 3 — Operating',
+  '',
+  'You are the PTL.',
+  '',
+  '## § 4 — Honest limits',
+  '',
+  'Limits here.',
+  '',
+].join('\n'));
+fs.writeFileSync(path.join(hub, 'inbox/2026-07-24-user-hi.md'), [
+  '---',
+  'from: user',
+  'to: hub',
+  'date: 2026-07-24',
+  'subject: hi',
+  'conversation_id: 2026-07-24-test-abc123',
+  '---',
+  '',
+  'Hi',
+].join('\n'));
+
+const prompt = deriveHubRuntimePrompt(hub);
+if (!/BUILT/i.test(prompt)) {
+  console.error('slim prompt missing BUILT assumption');
+  process.exit(1);
+}
+if (!/outbox-first|Answer first/i.test(prompt)) {
+  console.error('slim prompt missing outbox-first order');
+  process.exit(2);
+}
+if (/Keep that file compact\. Compress older turns/i.test(prompt)) {
+  console.error('slim prompt still asks LLM to compress session');
+  process.exit(3);
+}
+if (Buffer.byteLength(prompt, 'utf8') > 6000) {
+  console.error('always-on hub prompt too large:', Buffer.byteLength(prompt, 'utf8'));
+  process.exit(4);
+}
+
+ensureHubRuntimePrompt(hub);
+const turnFile = buildHubTurnPrompt(hub);
+const turn = fs.readFileSync(turnFile, 'utf8');
+if (!turn.includes('Hi') || !turn.includes('2026-07-24-test-abc123')) {
+  console.error('turn prompt missing pending mail body or conversation_id');
+  process.exit(5);
+}
+if (!turn.includes(path.basename(hubSessionFile(hub))) && !/hub-session\.md/.test(turn)) {
+  console.error('turn prompt missing session pointer');
+  process.exit(6);
+}
+
+const cwd = ensureHubRuntimeCwd(hub);
+if (!fs.existsSync(path.join(cwd, 'inbox'))) {
+  console.error('runtime-cwd missing inbox symlink');
+  process.exit(7);
+}
+if (fs.existsSync(path.join(cwd, 'AGENT.md'))) {
+  console.error('runtime-cwd must not include AGENT.md');
+  process.exit(8);
+}
+
+// promptFlag (not legacy-only `prompt`)
+const settings = getCliSettings(hub, {
+  grok: { executable: 'grok', promptFlag: '--prompt-file', flags: { extra: '--always-approve' } },
+}, { cli: 'claude', promptFlag: '-p', extraArgs: '' }, 'grok', '');
+if (settings.promptFlag !== '--prompt-file') {
+  console.error('getCliSettings ignored promptFlag:', settings.promptFlag);
+  process.exit(9);
+}
+// legacy `prompt` still works
+const legacy = getCliSettings(hub, {
+  grok: { executable: 'grok', prompt: '-p', flags: { extra: '' } },
+}, { cli: 'claude', promptFlag: '-p', extraArgs: '' }, 'grok', '');
+if (legacy.promptFlag !== '-p') {
+  console.error('legacy prompt key broken:', legacy.promptFlag);
+  process.exit(10);
+}
+
+const cfg = loadRuntimeConfig(hub);
+if (cfg.pollSeconds !== 2) {
+  console.error('pollSeconds wrong:', cfg.pollSeconds);
+  process.exit(11);
+}
+
+if (!isMultiRecipient('hub, o-protocol') || isMultiRecipient('hub')) {
+  console.error('isMultiRecipient logic wrong');
+  process.exit(12);
+}
+
+fs.rmSync(hub, { recursive: true, force: true });
+NODE
+  then
+    fail "latency phase 0/1 hub prompt/turn/cwd/poll tests failed"
   fi
 fi
 

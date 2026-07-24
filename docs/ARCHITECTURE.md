@@ -68,16 +68,25 @@ The server does not replace the hub filesystem with a database:
 
 - Mailboxes still live at `inbox/`, `outbox/`, `user/inbox/`, and
   `agents/<slug>/...`.
-- The hub runtime prompt lives in `.bizagent/prompts/hub.md`, generated from
-  `AGENT.md §§ 3-4`. Runtime hub launches read that compact prompt file instead
-  of the whole setup manual.
+- The hub always-on runtime prompt lives in `.bizagent/prompts/hub.md` (slim
+  identity/limits/outbox rules; derived for runtime, not a dump of the full
+  setup manual). Each hub launch also gets an **ephemeral turn prompt** under
+  `.bizagent/prompts/turns/` that injects pending inbox bodies, `conversation_id`,
+  and a CP-compacted session excerpt. Hub CLI processes run with cwd
+  `.bizagent/runtime-cwd/` (operational symlinks, **no** root `AGENT.md`) so
+  workspace project-instructions do not re-run setup §0 “detect built”.
+  Historical note: early builds derived hub.md from `AGENT.md §§ 3-4`; the
+  always-on file is now a dedicated slim prompt with on-demand path refs.
 - Agent launch prompts live in `agents/<slug>/.dispatch.md`, generated from
   `templates/dispatch.md.template`. Dispatch code reads this file instead of
   embedding product-agent prompt text inline.
 - Current hub session memory lives in `.bizagent/hub-session.md` as markdown:
-  a rolling summary plus recent turns. Older turns are compacted into the
-  summary, and a new session file starts when the operator changes topic or
-  explicitly creates a new conversation.
+  a rolling summary plus recent turns. The **control plane** compacts this file
+  on conversation updates; the hub LLM must not rewrite it. A new session file
+  starts when the operator changes topic or explicitly creates a new conversation.
+- Invalid multi-recipient outbox mail (`to: a, b`) is moved once to
+  `.bizagent/quarantine/` so it does not WARN every poll tick.
+- `settings.dispatch.poll_seconds` is honored (default 2, clamped 1–30).
 - Console-originated hub inbox messages carry `conversation_id`. The launched
   hub sends its operator-visible response or delegation summary as a markdown
   file in `outbox/` addressed to `user` with the same `conversation_id`; the
