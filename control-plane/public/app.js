@@ -1,8 +1,21 @@
 let currentConversation = null;
 let needsSetup = false;
-let lastMessageCount = 0;
+/** Detect conversation changes even when message count is unchanged
+ *  (e.g. launch-ack stripped + hub reply appended → same length). */
+let lastConversationStamp = '';
 let lastAgentsJson = '';
 let titleSet = false;
+
+function conversationPollStamp(conv) {
+  const messages = conv && Array.isArray(conv.messages) ? conv.messages : [];
+  const last = messages[messages.length - 1];
+  // updated_at alone is enough for normal saves; last-message fields catch
+  // any same-second edge cases and make the stamp self-explanatory in tests.
+  const lastPart = last
+    ? `${last.role || ''}|${last.kind || ''}|${last.created_at || ''}|${String(last.content || '').length}`
+    : '';
+  return `${conv && conv.updated_at ? conv.updated_at : ''}\0${messages.length}\0${lastPart}`;
+}
 
 function setAuthStatus(message, kind = 'neutral') {
   const status = document.getElementById('authStatus');
@@ -356,7 +369,7 @@ async function loadConversation(id) {
   currentConversation = id;
   const conv = await api(`/api/conversations/${encodeURIComponent(id)}`);
   const messages = conv.messages || [];
-  lastMessageCount = messages.length;
+  lastConversationStamp = conversationPollStamp(conv);
   renderMessages(messages);
 }
 
@@ -375,10 +388,12 @@ async function refreshStatus() {
 async function pollConversation() {
   if (!currentConversation) return;
   const conv = await api(`/api/conversations/${encodeURIComponent(currentConversation)}`);
-  const messages = conv.messages || [];
-  if (messages.length === lastMessageCount) return;
-  lastMessageCount = messages.length;
-  renderMessages(messages);
+  const stamp = conversationPollStamp(conv);
+  // Same length is not "unchanged": superseding launch-ack with a hub reply
+  // keeps messages.length stable while content changes (stuck interim bug).
+  if (stamp === lastConversationStamp) return;
+  lastConversationStamp = stamp;
+  renderMessages(conv.messages || []);
 }
 
 async function login() {
