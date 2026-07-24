@@ -22,6 +22,7 @@ const {
   getConversation,
   listConversations,
   readUserInboxMessages,
+  setActiveConversation,
   shouldStartNewConversation,
   writeHubInboxMessage,
 } = require("./lib/conversations");
@@ -245,11 +246,12 @@ async function handleApi(config, req, res) {
     /^\/api\/conversations\/([^/]+)$/,
   );
   if (conversationMatch && req.method === "GET") {
-    const conv = getConversation(
-      config.hub,
-      decodeURIComponent(conversationMatch[1]),
-    );
+    const id = decodeURIComponent(conversationMatch[1]);
+    const conv = getConversation(config.hub, id);
     if (!conv) return send(res, 404, { error: "conversation not found" });
+    // Console poll / open: keep this conversation active so hub→user mail
+    // missing conversation_id can be stamped on route and relay into chat.
+    setActiveConversation(config.hub, id);
     return send(res, 200, conv);
   }
 
@@ -264,6 +266,7 @@ async function handleApi(config, req, res) {
       : decodeURIComponent(messageMatch[1]);
     writeHubInboxMessage(config.hub, content, id);
     const conv = appendMessage(config.hub, id, "user", content);
+    setActiveConversation(config.hub, id);
     return send(res, 200, conv);
   }
 

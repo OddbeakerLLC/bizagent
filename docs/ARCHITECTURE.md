@@ -100,6 +100,12 @@ The server does not replace the hub filesystem with a database:
   web conversation. Only the hub root `outbox/` may address `user`; product
   agents still report to the hub. `scripts/bizagent-control-plane.js
   append-hub-turn` remains available for manual repair/imports.
+- **Stamp on route:** if hub→user mail lacks `conversation_id` and a console
+  conversation is open (recent GET/POST; tracked in
+  `.bizagent/active-conversation.json`, ~30s TTL), the control plane stamps
+  that id on delivery so the reply still relays into chat. Existing
+  `conversation_id` is never overwritten; with no open conversation the file
+  is delivered to `user/inbox/` only (no chat relay).
 - Login config and salted password hash live in `.bizagent/auth.json`.
 - Sessions live in `.bizagent/sessions.json` and are deleted on logout.
 - Named conversation history lives as JSON files under `.bizagent/conversations/`.

@@ -1,7 +1,12 @@
 const fs = require('fs');
 const path = require('path');
-const { agentsFromRegistry, appDir, loadRegistry } = require('./config');
-const { recordUserInboxDelivery, userInbox } = require('./conversations');
+const { agentsFromRegistry, appDir, ensureDir, loadRegistry } = require('./config');
+const {
+  getActiveConversationId,
+  recordUserInboxDelivery,
+  stampConversationId,
+  userInbox,
+} = require('./conversations');
 const { appendLog } = require('./log');
 
 function frontmatterValue(text, key) {
@@ -66,6 +71,39 @@ function writeFileUnique(dir, basename, source) {
     }
   }
   throw new Error(`could not allocate unique delivery filename for ${basename}`);
+}
+
+/** Write string content uniquely (used when stamping conversation_id on route). */
+function writeContentUnique(dir, basename, content) {
+  ensureDir(dir);
+  const ext = path.extname(basename);
+  const stem = basename.slice(0, basename.length - ext.length);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const suffix = attempt === 0 ? '' : `-${Math.random().toString(16).slice(2, 8)}`;
+    const dest = path.join(dir, `${stem}${suffix}${ext}`);
+    try {
+      fs.writeFileSync(dest, content, { flag: 'wx' });
+      return dest;
+    } catch (err) {
+      if (!err || err.code !== 'EEXIST') throw err;
+    }
+  }
+  throw new Error(`could not allocate unique delivery filename for ${basename}`);
+}
+
+/**
+ * For to:user mail missing conversation_id: stamp the open console conversation
+ * if one is active. Never overwrites an existing conversation_id.
+ * Returns possibly-modified content.
+ */
+function maybeStampUserConversationId(hub, text, base) {
+  const activeId = getActiveConversationId(hub);
+  if (!activeId) return text;
+  const stamped = stampConversationId(text, activeId);
+  if (stamped !== text) {
+    appendLog(hub, `stamp conversation_id=${activeId} file=${base}`);
+  }
+  return stamped;
 }
 
 function quarantineDir(hub) {
@@ -163,8 +201,19 @@ function routeOutboxes(hub) {
         appendLog(hub, `WARN unknown recipient ${to} in ${base}`);
         continue;
       }
-      const deliveredFile = writeFileUnique(dest, base, file);
-      if (to === 'user') recordUserInboxDelivery(hub, deliveredFile);
+      let deliveredFile;
+      if (to === 'user') {
+        const stamped = maybeStampUserConversationId(hub, text, base);
+        if (stamped !== text) {
+          deliveredFile = writeContentUnique(dest, base, stamped);
+          fs.unlinkSync(file);
+        } else {
+          deliveredFile = writeFileUnique(dest, base, file);
+        }
+        recordUserInboxDelivery(hub, deliveredFile);
+      } else {
+        deliveredFile = writeFileUnique(dest, base, file);
+      }
       delivered += 1;
       appendLog(hub, `route file=${base} to=${to} t=${tRoute}`);
       appendLog(hub, `routed ${base} -> ${to}`);
@@ -192,11 +241,13 @@ module.exports = {
   inboxFor,
   isMultiRecipient,
   isValidSingleRecipient,
+  maybeStampUserConversationId,
   pendingMail,
   quarantineDir,
   quarantineOutboxFile,
   recipientSlugs,
   routeOutboxes,
   safeInboxFor,
+  writeContentUnique,
   writeFileUnique,
 };
