@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const { agentsFromRegistry, appDir } = require('./config');
 const { compileAgentCommand, getCliSettings } = require('./cli-config');
 const {
+  buildAgentTurnPrompt,
   buildHubTurnPrompt,
   ensureHubRuntimeCwd,
   ensureHubRuntimePrompt,
@@ -211,23 +212,24 @@ function tryLock(hub, slug, leaseSecs) {
   }
 }
 
-function liveRunCount(hub, leaseSecs) {
+function liveHubCount(hub, leaseSecs) {
+  return isAgentActive(hub, 'hub', leaseSecs) ? 1 : 0;
+}
+
+function liveAgentCount(hub, leaseSecs) {
   const agentsDir = path.join(hub, 'agents');
   let count = 0;
-  if (isAgentActive(hub, 'hub', leaseSecs)) count += 1;
-  if (!fs.existsSync(agentsDir)) return count;
+  if (!fs.existsSync(agentsDir)) return 0;
   for (const slug of fs.readdirSync(agentsDir)) {
-    const lock = lockDir(hub, slug);
-    if (!fs.existsSync(lock)) continue;
-    let pid = '';
-    try {
-      pid = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim();
-    } catch (_err) {
-      pid = '';
-    }
-    if (pidAlive(pid) && lockAgeSecs(lock) < leaseSecs) count += 1;
+    if (slug === 'hub') continue;
+    if (isAgentActive(hub, slug, leaseSecs)) count += 1;
   }
   return count;
+}
+
+/** Total live runs (hub + product agents). Kept for status/back-compat. */
+function liveRunCount(hub, leaseSecs) {
+  return liveHubCount(hub, leaseSecs) + liveAgentCount(hub, leaseSecs);
 }
 
 function isAgentActive(hub, slug, leaseSecs) {
@@ -268,29 +270,32 @@ function launchAgent(config, slug, model = '', cliName = '') {
   const lock = lockDir(hub, slug);
   const agentLog = path.join(hub, 'logs', `dispatch-${slug}.log`);
   const agentStderr = path.join(hub, 'logs', `dispatch-${slug}.stderr`);
-  const promptFile = ensureDispatchPrompt(hub, slug);
+  // Ensure standing .dispatch.md exists; launch uses ephemeral turn with mail inject.
+  ensureDispatchPrompt(hub, slug);
   appendLog(hub, `dispatch_start slug=${slug} t=${nowIso()}`);
 
   if (dryRun) {
     fs.rmSync(lock, { recursive: true, force: true });
-    appendLog(hub, `DRY_RUN launch ${slug} using agents/${slug}/.dispatch.md`);
+    appendLog(hub, `DRY_RUN launch ${slug} using agent turn prompt + pending mail inject`);
     return;
   }
 
+  const promptFile = buildAgentTurnPrompt(hub, slug);
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
   const cliSettings = getCliSettings(hub, cliJson, config, cliName, model);
   const cmdPreview = compileAgentCommand(cliSettings, promptFile);
-  appendLog(hub, `cli_spawn slug=${slug} t=${nowIso()} cmd=${cmdPreview}`);
+  appendLog(hub, `cli_spawn slug=${slug} t=${nowIso()} turn=${path.basename(promptFile)} cmd=${cmdPreview}`);
 
   // Timing + exit log live in the shell wrapper: detached+unref children do not
   // reliably deliver Node 'exit' events to a long-running control plane.
+  // Delete ephemeral turn prompt on exit (same pattern as hub).
   const script = [
     'HUB="$1"; slug="$2"; cli="$3"; pflag="$4"; extra="$5"; pfile="$6"; agentlog="$7"; stderrlog="$8"',
     'lockdir="$HUB/agents/$slug/.lock"',
     'cplog="$HUB/logs/control-plane.log"',
     'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
     'date +%s > "$lockdir/start" 2>/dev/null',
-    'trap "rm -rf \\"$lockdir\\"" EXIT',
+    'trap \'rm -rf "$lockdir"; rm -f "$pfile"\' EXIT',
     'cd "$HUB" || exit 1',
     'start_ms=$(date +%s%3N 2>/dev/null || python3 -c "import time;print(int(time.time()*1000))")',
     'set +e',
@@ -316,7 +321,7 @@ function launchAgent(config, slug, model = '', cliName = '') {
   });
 
   child.unref();
-  appendLog(hub, `launched ${slug} using agents/${slug}/.dispatch.md`);
+  appendLog(hub, `launched ${slug} using turn prompt ${path.basename(promptFile)}`);
 }
 
 function launchHub(config) {
@@ -386,7 +391,11 @@ function launchHub(config) {
 
 function dispatchPendingAgents(config) {
   const agents = agentsFromRegistry(config.registry);
-  let running = liveRunCount(config.hub, config.lockLeaseSecs);
+  // Phase 2 tiers: hub and product agents use separate slot pools.
+  const hubSlots = Math.max(1, Number(config.hubSlots || 1));
+  const agentSlots = Math.max(1, Number(config.agentSlots || config.maxConcurrency || 8));
+  let hubRunning = liveHubCount(config.hub, config.lockLeaseSecs);
+  let agentRunning = liveAgentCount(config.hub, config.lockLeaseSecs);
   let launched = 0;
   let skippedLocked = 0;
   let skippedCap = 0;
@@ -394,13 +403,13 @@ function dispatchPendingAgents(config) {
 
   const hubNew = pendingUndispatchedMail(config.hub, 'hub', retrySecs);
   if (hubNew.length > 0) {
-    if (running >= config.maxConcurrency) {
+    if (hubRunning >= hubSlots) {
       skippedCap += 1;
     } else if (tryLock(config.hub, 'hub', config.lockLeaseSecs)) {
       markMailDispatched(config.hub, 'hub', hubNew, retrySecs);
       launchHub(config);
       launched += 1;
-      running += 1;
+      hubRunning += 1;
     } else {
       skippedLocked += 1;
     }
@@ -413,7 +422,7 @@ function dispatchPendingAgents(config) {
     if (fresh.length === 0) {
       continue;
     }
-    if (running >= config.maxConcurrency) {
+    if (agentRunning >= agentSlots) {
       skippedCap += 1;
       continue;
     }
@@ -421,13 +430,22 @@ function dispatchPendingAgents(config) {
       markMailDispatched(config.hub, agent.slug, fresh, retrySecs);
       launchAgent(config, agent.slug, agent.model || config.agentDefaultModel || '', agent.cliName || '');
       launched += 1;
-      running += 1;
+      agentRunning += 1;
     } else {
       skippedLocked += 1;
     }
   }
 
-  return { launched, skippedLocked, skippedCap, running };
+  return {
+    launched,
+    skippedLocked,
+    skippedCap,
+    running: hubRunning + agentRunning,
+    hubRunning,
+    agentRunning,
+    hubSlots,
+    agentSlots,
+  };
 }
 
 module.exports = {
@@ -437,7 +455,10 @@ module.exports = {
   ensureDispatchPrompt,
   getRecentHubInboxMessage,
   isAgentActive,
+  launchAgent,
   launchHub,
+  liveAgentCount,
+  liveHubCount,
   liveRunCount,
   markMailDispatched,
   pendingUndispatchedMail,

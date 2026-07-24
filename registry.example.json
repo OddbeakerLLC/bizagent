@@ -10,9 +10,11 @@
     "archive_after_days": 30,
     "autonomy": "maintenance-only",
     "dispatch": {
-      "_comment": "Node control-plane dispatch tunables. Enable the server via scripts/install-control-plane.sh. poll_seconds is honored (default 2; clamped 1–30).",
+      "_comment": "Node control-plane dispatch tunables. poll_seconds honored (default 2; clamp 1–30). hub_slots and agent_slots are separate pools so hub turns do not starve product fanout (defaults: hub 1, agents = max_concurrency). max_concurrency default 8 (product-agent pool when agent_slots omitted).",
       "poll_seconds": 2,
-      "max_concurrency": 4,
+      "max_concurrency": 8,
+      "hub_slots": 1,
+      "agent_slots": 8,
       "lock_lease_secs": 1800
     },
     "control_plane": {

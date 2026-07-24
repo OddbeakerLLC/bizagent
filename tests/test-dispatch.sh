@@ -11,10 +11,14 @@ grep -q "install-control-plane.sh" "$ROOT/scripts/install-dispatch.sh" \
   || fail "install-dispatch.sh does not delegate to install-control-plane.sh"
 grep -q "CLI_EXTRA_ARGS" "$ROOT/control-plane/lib/config.js" \
   || fail "control plane does not read CLI_EXTRA_ARGS"
-grep -q "maxConcurrency" "$ROOT/control-plane/lib/dispatcher.js" \
-  || fail "dispatcher does not enforce global concurrency"
+grep -q "maxConcurrency\|agentSlots\|agent_slots" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher does not enforce concurrency tiers"
+grep -q "hubSlots\|hub_slots\|liveHubCount" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing hub/agent slot tiers"
 grep -q "tryLock" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher missing per-agent lock"
+grep -q "buildAgentTurnPrompt" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing product-agent turn injection"
 
 if ! command -v node >/dev/null 2>&1; then
   echo "  ok: bizagent-dispatch.sh wrapper (live dispatch skipped; node not installed)"

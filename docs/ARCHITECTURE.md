@@ -84,9 +84,15 @@ The server does not replace the hub filesystem with a database:
   a rolling summary plus recent turns. The **control plane** compacts this file
   on conversation updates; the hub LLM must not rewrite it. A new session file
   starts when the operator changes topic or explicitly creates a new conversation.
-- Invalid multi-recipient outbox mail (`to: a, b`) is moved once to
-  `.bizagent/quarantine/` so it does not WARN every poll tick.
+- Invalid multi-recipient outbox mail (`to: a, b`), missing `to:`, and
+  non-slug `to:` values are moved once to `.bizagent/quarantine/` so they do
+  not WARN every poll tick. Unknown but well-formed single slugs still WARN
+  (operator may add the product).
 - `settings.dispatch.poll_seconds` is honored (default 2, clamped 1–30).
+- Product-agent launches get an **ephemeral turn prompt** (like the hub) under
+  `.bizagent/prompts/turns/` that inlines pending inbox bodies so agents need
+  not tool-list the inbox first. Standing rules still come from
+  `agents/<slug>/.dispatch.md`.
 - Console-originated hub inbox messages carry `conversation_id`. The launched
   hub sends its operator-visible response or delegation summary as a markdown
   file in `outbox/` addressed to `user` with the same `conversation_id`; the
@@ -117,11 +123,15 @@ The design is deliberately minimal:
   max lease (default 30 min), in which case the stale lock is reclaimed. This is
   what stops a long run (spanning several ticks) from being launched twice, and
   what recovers from a crash that left a lock behind.
-- **Global concurrency cap** (default 4 live runs) bounds how many agents run at
-  once under a burst of mail; agents over the cap simply wait for the next tick.
+- **Concurrency tiers** (Phase 2): hub and product agents use **separate** slot
+  pools so a long hub turn does not consume a product slot (and vice versa).
+  Defaults: `hub_slots=1`, `agent_slots` = `max_concurrency` (default **8**).
+  Agents over the product cap wait for the next tick. Per-agent locks still
+  ensure at most one live instance per slug.
 
-Lease and cap are configurable via env (`BIZAGENT_*`) or
-`settings.dispatch.{max_concurrency,lock_lease_secs}` in `registry.json`.
+Lease and caps are configurable via env (`BIZAGENT_*`) or
+`settings.dispatch.{poll_seconds,max_concurrency,hub_slots,agent_slots,lock_lease_secs}`
+in `registry.json`.
 
 Permission mode remains operator-controlled through `.cli` and environment
 variables. The control plane launches the configured CLI command with
