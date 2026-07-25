@@ -92,12 +92,12 @@ function deriveHubRuntimePrompt(hub) {
     '- **Stdout is debug only.** Nothing you print is shown to the operator. Never "answer" in chat text alone.',
     '- **Operator-visible text** must go through a CP-owned write path (below). Free-form `outbox/*.md` creation is **banned** — wrong filename, missing `conversation_id`, or wrong `to:` silently drops the reply.',
     '- Product-agent mail (to a slug) also uses the write-message helper — same rule.',
-    '- When an agent→hub message arrives **with a conversation_id** (completion notification), you **must** write a short user-visible summary for the operator using the reserved body or write-message path. Do not silently archive it.',
+    '- When an agent→hub message arrives **with a conversation_id** (completion notification), you **must** write **at most one** short user-visible summary for the operator using the reserved body or write-message path. If a summary for the same agent mail (same from+body or same inbox filename) has already been delivered in this conversation, archive the inbox file without writing another summary. Never emit duplicate "X is done" notices.',
     '',
     '## This-turn order (outbox-first)',
     '',
     '1. **Answer first** via the mandatory write path (see Message delivery). Success = that write returns OK / the reserved body file is non-empty.',
-    '2. **Then housekeep:** archive handled `inbox/*.md` into `inbox/archive/` immediately after acting on each.',
+    '2. **Then housekeep:** archive handled `inbox/*.md` into `inbox/archive/` immediately after acting on each. For agent→hub completion mail, write **at most one** summary to the operator even if the hub turn is re-launched before you archive; the inbox file name + body is the key. If a summary was already produced for this exact mail, just archive it.',
     '3. Session memory is **CP-owned** (see Runtime Memory). Do not rewrite or compress it.',
     '4. Only then: optional journal `[Maintenance]` / `[Company]` bullets if warranted.',
     '',
@@ -245,6 +245,16 @@ function listPendingInboxFiles(hub) {
 
 function parseConversationId(text) {
   const match = String(text || '').match(/^conversation_id:\s*(.+?)\s*$/m);
+  return match ? match[1].trim() : '';
+}
+
+function parseFrom(text) {
+  const match = String(text || '').match(/^from:\s*(.+?)\s*$/m);
+  return match ? match[1].trim() : '';
+}
+
+function parseTo(text) {
+  const match = String(text || '').match(/^to:\s*(.+?)\s*$/m);
   return match ? match[1].trim() : '';
 }
 
