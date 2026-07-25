@@ -200,19 +200,22 @@ function postLaunchAck(hub, conversationId, text = LAUNCH_ACK_TEXT) {
 
 /**
  * Post a CP-owned one-liner when a product agent exits cleanly with hub-bound mail.
- * Idempotent: do not post a second notice if one is already the last visible transient.
+ * Strongly idempotent: never append a second notice for the same slug in this
+ * conversation, even across re-dispatches while the agent→hub mail remains unarchived.
  */
 function postAgentCompletionNotice(hub, conversationId, slug) {
   if (!conversationId || !slug) return null;
   const conv = getConversation(hub, conversationId);
   if (!conv) return null;
+  // Scan the whole list — a prior notice for this slug means we already told the operator.
+  const already = (conv.messages || []).some(
+    (m) => m && m.role === 'status' && m.kind === AGENT_COMPLETION_KIND &&
+           typeof m.content === 'string' && m.content.includes(`Agent ${slug} finished`)
+  );
+  if (already) return conv;
   const last = conv.messages[conv.messages.length - 1];
   if (isLaunchAckMessage(last) || isAgentCompletionMessage(last)) {
-    // Replace the transient with the more specific agent completion notice.
-    // Strip both kinds then append the new one.
     stripTransientStatuses(conv);
-  } else if (isAgentCompletionMessage(last)) {
-    return conv;
   }
   const text = AGENT_COMPLETION_TEXT(slug);
   conv.messages.push({

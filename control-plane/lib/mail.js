@@ -268,6 +268,15 @@ function routeOutboxes(hub) {
             file: base
           });
         }
+        // Archive-gated dedupe for operator notices:
+        // Mark this hub inbox file dispatched immediately on route. Combined with
+        // fingerprinting in dispatcher, a fast re-nudge while the file is still
+        // unarchived will not claim+launch another hub turn for the same mail.
+        try {
+          const { markMailDispatched, dispatchRetrySecs } = require('./dispatcher');
+          const secs = dispatchRetrySecs({ lockLeaseSecs: 1800 });
+          markMailDispatched(hub, 'hub', [deliveredFile], secs);
+        } catch (_e) { /* non-fatal */ }
       }
       delivered += 1;
       logEvent(hub, {
@@ -316,9 +325,39 @@ function outboxFor(hub, fromSlug) {
   return path.join(hub, 'agents', fromSlug, 'outbox');
 }
 
+function normalizeBodyForDedupe(s) {
+  return String(s || '').replace(/\r\n/g, '\n').replace(/\s+$/g, '').trim();
+}
+
+/**
+ * Return true if an identical (from/to + normalized body) message already
+ * exists in the target outbox. Used to guarantee one outbox file per
+ * logical completion event even under re-dispatch or double-call.
+ */
+function hasIdenticalMessage(outboxDir, from, to, body) {
+  const want = normalizeBodyForDedupe(body);
+  for (const f of markdownFiles(outboxDir)) {
+    try {
+      const txt = fs.readFileSync(f, 'utf8');
+      if (frontmatterValue(txt, 'from') !== from) continue;
+      if (frontmatterValue(txt, 'to') !== to) continue;
+      const existingBody = normalizeBodyForDedupe(
+        txt.replace(/^---[\s\S]*?\r?\n---\r?\n?/, '')
+      );
+      if (existingBody === want) return f;
+    } catch (_e) {
+      /* ignore unreadable */
+    }
+  }
+  return null;
+}
+
 /**
  * Write a correctly named outbox markdown message with YAML frontmatter.
  * Does not invent conversation_id — only stamps when the caller passes one.
+ *
+ * Idempotent for identical body+from+to: returns the existing file instead of
+ * writing a duplicate (prevents duplicate agent→hub completion notifications).
  *
  * @returns {{ file: string, basename: string }}
  */
@@ -358,6 +397,13 @@ function writeOutboxMessage(hub, opts = {}) {
   const content = `${header}\n\n${body.replace(/\s+$/, '')}\n`;
   const outbox = outboxFor(hub, from);
   ensureDir(outbox);
+
+  // Dedupe identical completion / status bodies: one outbox file per event.
+  const existing = hasIdenticalMessage(outbox, from, to, body);
+  if (existing) {
+    return { file: existing, basename: path.basename(existing), outbox };
+  }
+
   const basename = `${date}-${from}-${subjectSlug(subject)}.md`;
   const file = writeContentUnique(outbox, basename, content);
   return { file, basename: path.basename(file), outbox };

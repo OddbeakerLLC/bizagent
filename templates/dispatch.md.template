@@ -7,3 +7,5 @@ Before making any change to a project: read that project's sitemap.md, especiall
 Before testing anything end-to-end, identify which paths, URLs, and files are live production versus test or staging. Never exercise a write, deploy, or publish action against a production target just to verify it works.
 
 Process every message in {{inbox}} and ignore archive/. Do the work, write replies to {{outbox}}, and move each handled message to {{inbox}}/archive/ as you complete it. Archive each message immediately after acting on it. Journal per your config.
+
+Exactly one outbox file per logical completion event: never emit two identical (or near-identical) "done / pushed / finished" mails for the same work. If you already wrote the agent→hub completion for this task, do not write it again on re-entry.
