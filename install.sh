@@ -310,18 +310,11 @@ detect_and_select_cli() {
 write_cli_config() {
   cat > "$INSTALL_DIR/.cli" <<EOF
 # bizagent CLI config — written by installer, read by AGENT.md setup
-CLI_CMD="$SELECTED_CLI"
-CLI_PROMPT_FLAG="$SELECTED_PROMPT_FLAG"
-CLI_EXTRA_ARGS="$SELECTED_YOLO_FLAG"
+CLI_CMD=$SELECTED_CLI
+CLI_PROMPT_FLAG=$SELECTED_PROMPT_FLAG
+CLI_EXTRA_ARGS=$SELECTED_YOLO_FLAG
 EOF
   ok "CLI config written (.cli)"
-  if [[ -z "$SELECTED_YOLO_FLAG" ]]; then
-    warn "No unattended-mode flag is known for $SELECTED_CLI."
-    warn "BizAgent runs agents without human supervision. Without this flag,"
-    warn "every invocation will block waiting for permission prompts."
-    warn "Set CLI_EXTRA_ARGS in $INSTALL_DIR/.cli to the correct flag before"
-    warn "running any agent unattended."
-  fi
 }
 
 # --- clone + handoff ---
@@ -403,16 +396,6 @@ PY
 )
   port="${port:-8787}"
 
-  # --- Inject first-run inbox seed ---
-  local today
-  today="$(date -u +%Y-%m-%d)"
-  mkdir -p "$INSTALL_DIR/inbox"
-  local seed_file="$INSTALL_DIR/inbox/${today}-install-first-run.md"
-  if [[ ! -f "$seed_file" ]]; then
-    printf "\---\nfrom: installer\nto: hub\ndate: %s\nsubject: first-run setup\n---\n\nA new bizagent installation just completed. Read AGENT.md and follow its first-run setup instructions.\n" "$today" > "$seed_file"
-    ok "first-run message queued"
-  fi
-
   step "Starting BizAgent"
   bash "$INSTALL_DIR/scripts/control-plane.sh" start "$INSTALL_DIR"
 
@@ -463,7 +446,7 @@ main() {
   step "Setting up bizagent"
   choose_dir
   clone_repo
-  [[ "$ALREADY_CLONED" != "1" ]] && write_cli_config
+  write_cli_config
 
   handoff
 }

@@ -77,3 +77,21 @@ for ib in "${INBOXES[@]}"; do
 done
 
 echo "nightly: $archived stale message(s) archived"
+
+# --- 3. prune old archive files (makeover: settings.tuning.archive) -----
+# Deletes aged *.md under */archive/ dirs. Default retention 15 days.
+# Controlled by registry.json settings.tuning.archive.prune_on_nightly (default true).
+PRUNE_ON="$(python3 -c '
+import json
+try:
+    arch = json.load(open("registry.json")).get("settings", {}).get("tuning", {}).get("archive", {})
+    print("0" if arch.get("prune_on_nightly") is False else "1")
+except Exception:
+    print("1")
+' 2>/dev/null || echo 1)"
+if [ "$PRUNE_ON" = "1" ] && [ -x "$HUB/scripts/prune-archives.sh" ]; then
+  echo "nightly: pruning archives..."
+  bash "$HUB/scripts/prune-archives.sh" "$HUB" || echo "nightly: archive prune failed (continuing)"
+else
+  echo "nightly: archive prune skipped"
+fi

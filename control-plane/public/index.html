@@ -38,6 +38,15 @@
         <button id="saveDisplayName" type="button">Save</button>
         <span id="nameStatus" class="auth-status" hidden></span>
       </div>
+
+      <!-- Observability tab (Phase 0) -->
+      <div id="observabilityTab" class="tab-content" hidden>
+        <h2>Observability</h2>
+        <div id="observabilityContent">
+          <p>Loading recent events and metrics...</p>
+        </div>
+        <button onclick="refreshObservability()">Refresh</button>
+      </div>
       <div id="messages" class="messages" aria-live="polite"></div>
       <form id="composer" class="fixed-composer">
         <textarea id="messageInput" rows="2" placeholder="Message the hub"></textarea>

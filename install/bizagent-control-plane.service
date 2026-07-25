@@ -5,9 +5,10 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=__HUB_SETTING__
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:%h/.grok/bin:/usr/local/bin:/usr/bin:/bin
 Environment=BIZAGENT_HOST=__HOST__
 Environment=BIZAGENT_PORT=__PORT__
+EnvironmentFile=-__HUB_EXEC__/.bizagent/env
 ExecStart=__NODE__ "__HUB_EXEC__/scripts/bizagent-control-plane.js" serve --hub "__HUB_EXEC__"
 Restart=on-failure
 RestartSec=3

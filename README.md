@@ -34,7 +34,8 @@ agent looks after one or more **project repositories**.
 Each agent keeps a **journal** and a **sitemap** for every repo it owns. Agents
 talk by dropping markdown messages in each other's mailboxes. Work happens in
 real time — the moment the operator raises an issue, or the moment one agent
-sends another a message — plus a light nightly maintenance pass for housekeeping.
+sends another a message — plus a light nightly maintenance pass for housekeeping
+(journals, sitemaps, archive pruning).
 
 You ask the hub for the big picture; it digests every journal and reports back.
 
@@ -173,30 +174,71 @@ local-model-backed agent and the nightly pass runs fully local too.
 `scripts/bizagent-control-plane.js serve` runs a local Node.js server. It:
 
 - hosts the web UI with login-protected access
-- polls inboxes and routes queued outbox mail in near real time
+- polls inboxes every few seconds and routes queued outbox mail in near real time
 - launches the hub when new mail arrives; launches product agents for their own mail
 - enforces one live instance per agent (per-agent lock file prevents double-dispatch)
-- caps simultaneous agent runs (default 4) to bound burst behavior
+- caps simultaneous agent runs (default 8) to bound burst behavior; separate pools for hub turns vs. agent fan-out
 - relays `user/inbox/*.md` replies into the matching web conversation
 - uses dispatch fingerprinting so the same inbox file doesn't re-trigger on every tick
-- logs activity to `logs/control-plane.log`
+- writes structured events to `logs/structured.log` (and legacy logs for compatibility)
 
 The server uses the existing file layout as its source of truth — no database.
-Mailboxes at `inbox/`, `outbox/`, `agents/<slug>/...`; the hub runtime prompt at
-`.bizagent/prompts/hub.md`; hub session memory at `.bizagent/hub-session.md`;
+Mailboxes at `inbox/`, `outbox/`, `agents/<slug>/...`; the always-on hub runtime prompt at
+`.bizagent/prompts/hub.md`; compact hub session memory at `.bizagent/hub-session.md`;
 login config at `.bizagent/auth.json`.
 
-The installer (`install.sh`) handles initial setup. To control it manually:
+### Warm hub path (preferred) and cold fallback
+
+A long-lived **hub daemon** (`scripts/hub-daemon.js` + `hub-daemon.sh`) stays running with your keys loaded from `.bizagent/env`. The control plane prefers sending turns over the Unix socket (`.bizagent/hub.sock`) for lower latency. If the daemon is down, the control plane falls back to a fresh CLI spawn (cold path). Both paths produce the same observable behavior.
+
+### Console replies and the write-message path
+
+For console-initiated hub turns the control plane creates a reserved reply body file (`.bizagent/pending-replies/<conversation_id>.body.md`). The hub process must write **only the body** there; the control plane then wraps front-matter and routes it. All operator/user mail must go through `scripts/write-message.sh` (or the equivalent `node scripts/bizagent-control-plane.js write-message`). Stdout is debug-only. On exit with no visible reply the safety net promotes the last assistant blob from the dispatch log or surfaces a clear hard error in the UI.
+
+### Secrets and environment
+
+Keys and secrets live in `.bizagent/env` (never committed). The control-plane systemd unit and CLI wrappers source it so child processes inherit `XAI_API_KEY`, `ANTHROPIC_API_KEY`, etc. See `.bizagent/env.example`.
+
+### Operator commands
 
 ```sh
 scripts/control-plane.sh start
 scripts/control-plane.sh status
+scripts/control-plane.sh restart
 scripts/control-plane.sh stop
+
+scripts/hub-daemon.sh start
+scripts/hub-daemon.sh status
+scripts/hub-daemon.sh ping
+scripts/hub-daemon.sh stop
+
+# Safe preview then apply archive pruning (default 15 days)
+scripts/prune-archives.sh --dry-run
+scripts/prune-archives.sh
 ```
 
 Multiple BizAgent hubs can run on one machine. Set
 `settings.control_plane.port` in each hub's `registry.json`, or pass
 `--port` and `--name` to `scripts/install-control-plane.sh`.
+
+### Tuning (registry.json)
+
+```json
+"settings": {
+  "dispatch": {
+    "poll_seconds": 2,
+    "max_concurrency": 8,
+    "hub_slots": 1,
+    "agent_slots": 8,
+    "lock_lease_secs": 1800
+  },
+  "tuning": {
+    "archive": { "retention_days": 15, "prune_on_nightly": true }
+  }
+}
+```
+
+`poll_seconds` (1–30) controls how often the control plane wakes. Separate hub/agent slot pools keep operator turns responsive even under heavy fan-out. Archive pruning removes old `*/archive/` mail automatically on the nightly (or on demand).
 
 ---
 
@@ -227,26 +269,29 @@ bizagent/
 ├── AGENT.md                 the agent's instructions: interview -> build -> operate
 ├── README.md                this file
 ├── registry.example.json    the shape of the generated registry.json
-├── install.sh               one-liner installer: deps, clone, .cli config, control-plane start
+├── install.sh               one-liner installer
 ├── install/
 │   ├── install.sh             control-plane installer (npm, service, start, browser open)
 │   └── bizagent-control-plane.service  systemd unit template
 ├── scripts/
-│   ├── onboard.sh             scaffold .agent/ + sitemap.md into a project repo
-│   ├── bizagent-control-plane.js  Node control-plane CLI
-│   ├── install-control-plane.sh  wire the control plane to systemd
-│   ├── control-plane.sh       start/stop/status wrapper
-│   ├── router.sh              compatibility wrapper: route once
-│   ├── bizagent-dispatch.sh   compatibility wrapper: dispatch once
-│   ├── bizagent-watch.sh      compatibility wrapper: run server
-│   └── nightly.sh             route + archive the mechanical nightly work
-├── tests/                   shell tests for the scripts
-├── templates/
-│   ├── agent.md.template    per-product agent config
-│   ├── NIGHTLY.md           thin file the nightly cron points at
-│   └── WEEKLY.md            thin file the weekly cron points at
+│   ├── bizagent-control-plane.js  Node control-plane CLI + write-message
+│   ├── control-plane.sh       start/stop/status/restart wrapper
+│   ├── hub-daemon.js          warm hub turn worker (socket protocol)
+│   ├── hub-daemon.sh          daemon start/stop/status/ping
+│   ├── install-control-plane.sh  wire the control plane + daemon to systemd
+│   ├── prune-archives.sh      archive retention (15-day default, registry-driven)
+│   ├── write-message.sh       canonical outbox helper (conversation stamping)
+│   ├── nightly.sh             route + prune + journal/sitemap housekeeping
+│   └── ...                    (router, run-agent, onboard, publish-check, etc.)
+├── control-plane/
+│   ├── server.js
+│   └── lib/                 (dispatcher, mail, hub-memory, hub-turn-safety,
+│                            conversations, config, cli-config, profile, ...)
+├── templates/               agent.md, dispatch, NIGHTLY, WEEKLY
+├── tests/                   shell test suite
 └── docs/
-    └── ARCHITECTURE.md       how and why the system is built this way
+    ├── ARCHITECTURE.md
+    └── LATENCY-OPTIMIZATION-PLAN.md
 ```
 
 Cloning gives you the template. Running the PTL interview adds your `registry.json`

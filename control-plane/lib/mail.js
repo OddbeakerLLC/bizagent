@@ -7,7 +7,7 @@ const {
   stampConversationId,
   userInbox,
 } = require('./conversations');
-const { appendLog } = require('./log');
+const { logEvent, appendLog } = require('./log');
 
 function frontmatterValue(text, key) {
   const match = text.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, 'm'));
@@ -103,7 +103,11 @@ function maybeStampUserConversationId(hub, text, base) {
   if (!stampId) return text;
   const stamped = stampConversationId(text, stampId);
   if (stamped !== text) {
-    appendLog(hub, `stamp conversation_id=${stampId} file=${base}`);
+    logEvent(hub, {
+      event: 'conversation_id_stamp',
+      conversation_id: stampId,
+      file: base
+    });
   }
   return stamped;
 }
@@ -131,11 +135,21 @@ function quarantineOutboxFile(hub, file, reason) {
       fs.copyFileSync(file, dest);
       fs.unlinkSync(file);
     } catch (copyErr) {
-      appendLog(hub, `WARN quarantine failed for ${base}: ${copyErr.message}`);
+      logEvent(hub, {
+    event: 'quarantine_failed',
+    file: base,
+    reason: 'copy_error',
+    error: copyErr.message
+  });
       return null;
     }
   }
-  appendLog(hub, `quarantine ${base} reason=${reason} dest=${path.relative(hub, dest)}`);
+  logEvent(hub, {
+    event: 'quarantine',
+    file: base,
+    reason: reason,
+    dest: path.relative(hub, dest)
+  });
   return dest;
 }
 
@@ -158,6 +172,7 @@ function routeOutboxes(hub) {
   let delivered = 0;
   let warnings = 0;
   let quarantined = 0;
+  const startTime = Date.now();
   const tRoute = new Date().toISOString();
   for (const outbox of outboxes(hub)) {
     for (const file of markdownFiles(outbox)) {
@@ -189,7 +204,11 @@ function routeOutboxes(hub) {
 
       if (to === 'user' && !canRouteToUser(hub, outbox)) {
         warnings += 1;
-        appendLog(hub, `WARN user recipient is only allowed from hub outbox in ${base}`);
+        logEvent(hub, {
+          event: 'warn',
+          type: 'user_recipient_from_non_hub',
+          file: base
+        });
         continue;
       }
       const dest = safeInboxFor(hub, to);
@@ -200,7 +219,12 @@ function routeOutboxes(hub) {
         // Unknown single recipient: leave in place + WARN (operator may fix `to:`
         // or add the product). Multi-to / missing / invalid already quarantined.
         warnings += 1;
-        appendLog(hub, `WARN unknown recipient ${to} in ${base}`);
+        logEvent(hub, {
+          event: 'warn',
+          type: 'unknown_recipient',
+          to: to,
+          file: base
+        });
         continue;
       }
       let deliveredFile;
@@ -217,8 +241,17 @@ function routeOutboxes(hub) {
         deliveredFile = writeFileUnique(dest, base, file);
       }
       delivered += 1;
-      appendLog(hub, `route file=${base} to=${to} t=${tRoute}`);
-      appendLog(hub, `routed ${base} -> ${to}`);
+      logEvent(hub, {
+        event: 'route',
+        file: base,
+        to: to,
+        duration_ms: Math.round((Date.now() - startTime) * 100) / 100
+      });
+      logEvent(hub, {
+        event: 'routed',
+        file: base,
+        to: to
+      });
     }
   }
   return { delivered, warnings, quarantined };

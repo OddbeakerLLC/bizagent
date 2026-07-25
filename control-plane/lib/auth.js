@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { appDir, ensureDir, readJson } = require('./config');
-const { appendLog } = require('./log');
+const { logEvent } = require('./log');
 
 function authPath(hub) {
   return path.join(appDir(hub), 'auth.json');
@@ -32,7 +32,10 @@ function initAuth(hub, username, password) {
   };
   fs.writeFileSync(authPath(hub), `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
   fs.writeFileSync(sessionPath(hub), '{}\n', { mode: 0o600 });
-  appendLog(hub, `auth initialized for ${username}`);
+  logEvent(hub, {
+    event: 'auth_init',
+    username: username
+  });
 }
 
 function hasAuth(hub) {
@@ -61,7 +64,11 @@ function createSession(hub, username) {
   const id = crypto.randomBytes(32).toString('hex');
   sessions[id] = { username, created_at: new Date().toISOString() };
   saveSessions(hub, sessions);
-  appendLog(hub, `login ${username}`);
+  logEvent(hub, {
+    event: 'login',
+    username: username,
+    session_id: sessionId
+  });
   return id;
 }
 
@@ -70,7 +77,11 @@ function destroySession(hub, sessionId) {
   const username = sessions[sessionId] && sessions[sessionId].username;
   delete sessions[sessionId];
   saveSessions(hub, sessions);
-  appendLog(hub, `logout ${username || 'unknown'}`);
+  logEvent(hub, {
+    event: 'logout',
+    username: username || 'unknown',
+    session_id: sessionId
+  });
 }
 
 function getSession(hub, sessionId) {

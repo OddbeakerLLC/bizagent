@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { appDir, ensureDir, readJson } = require('./config');
 const { compactHubSession, resetHubSession } = require('./hub-memory');
+const { logEvent } = require('./log');
 
 const MAX_STORED_MESSAGES = 48;
 const KEEP_RECENT_MESSAGES = 24;
@@ -192,6 +193,7 @@ function supersedeLaunchAcks(hub, conversationId) {
 }
 
 function writeHubInboxMessage(hub, content, conversationId) {
+  const start = Date.now();
   const now = new Date();
   const date = now.toISOString().slice(0, 10);
   const stamp = now.toISOString().replace(/[-:TZ.]/g, '').slice(0, 17);
@@ -204,7 +206,16 @@ function writeHubInboxMessage(hub, content, conversationId) {
     conversationId ? `conversation_id: ${conversationId}` : '',
     '---',
   ].filter((line) => line !== '').join('\n');
-  return writeFileUnique(path.join(hub, 'inbox'), `${date}-operator-console-message-${stamp}`, `${header}\n\n${content}\n`);
+
+  const result = writeFileUnique(path.join(hub, 'inbox'), `${date}-operator-console-message-${stamp}`, `${header}\n\n${content}\n`);
+
+  logEvent(hub, {
+    event: 'write_hub_inbox',
+    conversation_id: conversationId,
+    duration_ms: Math.round((Date.now() - start) * 100) / 100
+  });
+
+  return result;
 }
 
 function frontmatterValue(text, key) {

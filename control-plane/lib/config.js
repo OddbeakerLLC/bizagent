@@ -8,6 +8,43 @@ function hubPath(input) {
   );
 }
 
+/**
+ * Load KEY=value pairs from hub/.bizagent/env into process.env.
+ * Does not override vars already set in the environment.
+ * Safe for secrets: never logs values. Returns how many keys were applied.
+ */
+function loadHubEnv(hub) {
+  const envFile = path.join(hubPath(hub), ".bizagent", "env");
+  let applied = 0;
+  try {
+    if (!fs.existsSync(envFile)) return { applied, path: envFile, found: false };
+    const text = fs.readFileSync(envFile, "utf8");
+    for (const rawLine of text.split("\n")) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+      const eq = line.indexOf("=");
+      if (eq <= 0) continue;
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      // Strip optional surrounding quotes
+      if (
+        (val.startsWith('"') && val.endsWith('"')) ||
+        (val.startsWith("'") && val.endsWith("'"))
+      ) {
+        val = val.slice(1, -1);
+      }
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+      if (process.env[key] === undefined || process.env[key] === "") {
+        process.env[key] = val;
+        applied += 1;
+      }
+    }
+    return { applied, path: envFile, found: true };
+  } catch (_err) {
+    return { applied: 0, path: envFile, found: false, error: _err.message };
+  }
+}
+
 function readJson(file, fallback) {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -165,6 +202,8 @@ function deriveRegistrySettings(registry) {
 
 function loadRuntimeConfig(hubInput) {
   const hub = hubPath(hubInput);
+  // Load .bizagent/env into process.env so CLI children inherit API keys.
+  loadHubEnv(hub);
   // Read the mtime before the content so a concurrent edit can only make us
   // reload again on the next refresh, never miss a change (see refreshRegistry).
   const registryMtime = registryMtimeMs(hub);
@@ -268,6 +307,7 @@ module.exports = {
   ensureDir,
   hubPath,
   loadCliJson,
+  loadHubEnv,
   loadRegistry,
   loadRuntimeConfig,
   readJson,
