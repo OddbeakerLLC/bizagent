@@ -1,7 +1,8 @@
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
-const { agentsFromRegistry, appDir } = require('./config');
+const { agentsFromRegistry, appDir, loadHubEnv } = require('./config');
 const { compileAgentCommand, getCliSettings } = require('./cli-config');
 const {
   buildAgentTurnPrompt,
@@ -10,7 +11,7 @@ const {
   ensureHubRuntimePrompt,
 } = require('./hub-memory');
 const { pendingMail } = require('./mail');
-const { appendLog } = require('./log');
+const { logEvent, logLatency, logError, appendLog } = require('./log');
 const { postLaunchAck, writeFileUnique } = require('./conversations');
 const {
   drainPendingHubTurns,
@@ -20,6 +21,69 @@ const {
   recordPendingHubTurn,
   reservedReplyBodyPath,
 } = require('./hub-turn-safety');
+
+function hubDaemonSock(hub) {
+  return path.join(hub, '.bizagent', 'hub.sock');
+}
+
+/**
+ * Ask the warm hub-daemon to process pending hub mail.
+ * Resolves { ok, via:'warm', ... } or { ok:false, error } on connect/timeout/busy.
+ */
+function requestWarmHubTurn(hub, opts = {}) {
+  const sockPath = hubDaemonSock(hub);
+  const connectMs = Math.max(100, Number(opts.connectTimeoutMs || 500));
+  const turnMs = Math.max(5000, Number(opts.turnTimeoutMs || 600000));
+  return new Promise((resolve) => {
+    if (!fs.existsSync(sockPath)) {
+      resolve({ ok: false, error: 'no_socket' });
+      return;
+    }
+    let settled = false;
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      try { socket.destroy(); } catch (_e) { /* ignore */ }
+      resolve(result);
+    };
+    const socket = net.createConnection(sockPath);
+    let buf = '';
+    const connectTimer = setTimeout(() => done({ ok: false, error: 'connect_timeout' }), connectMs);
+    const turnTimer = setTimeout(() => done({ ok: false, error: 'turn_timeout' }), turnMs);
+
+    socket.setEncoding('utf8');
+    socket.on('connect', () => {
+      clearTimeout(connectTimer);
+      const req = {
+        type: 'turn',
+        requestId: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      };
+      socket.write(`${JSON.stringify(req)}\n`);
+    });
+    socket.on('data', (chunk) => {
+      buf += chunk;
+      const nl = buf.indexOf('\n');
+      if (nl < 0) return;
+      const line = buf.slice(0, nl).trim();
+      clearTimeout(turnTimer);
+      try {
+        const msg = JSON.parse(line);
+        done({
+          ...msg,
+          via: 'warm',
+          ok: !!msg.ok || msg.action === 'reserved-body' || msg.action === 'ok-existing',
+        });
+      } catch (err) {
+        done({ ok: false, error: `bad_response:${err.message}` });
+      }
+    });
+    socket.on('error', (err) => {
+      clearTimeout(connectTimer);
+      clearTimeout(turnTimer);
+      done({ ok: false, error: err.message || 'socket_error' });
+    });
+  });
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -294,11 +358,19 @@ function launchAgent(config, slug, model = '', cliName = '') {
   const agentStderr = path.join(hub, 'logs', `dispatch-${slug}.stderr`);
   // Ensure standing .dispatch.md exists; launch uses ephemeral turn with mail inject.
   ensureDispatchPrompt(hub, slug);
-  appendLog(hub, `dispatch_start slug=${slug} t=${nowIso()}`);
+  logEvent(hub, {
+    event: 'dispatch_start',
+    slug: slug,
+    t: nowIso()
+  });
 
   if (dryRun) {
     fs.rmSync(lock, { recursive: true, force: true });
-    appendLog(hub, `DRY_RUN launch ${slug} using agent turn prompt + pending mail inject`);
+    logEvent(hub, {
+      event: 'dispatch_dry_run',
+      slug: slug,
+      type: 'agent'
+    });
     return;
   }
 
@@ -306,15 +378,26 @@ function launchAgent(config, slug, model = '', cliName = '') {
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
   const cliSettings = getCliSettings(hub, cliJson, config, cliName, model);
   const cmdPreview = compileAgentCommand(cliSettings, promptFile);
-  appendLog(hub, `cli_spawn slug=${slug} t=${nowIso()} turn=${path.basename(promptFile)} cmd=${cmdPreview}`);
+  logEvent(hub, {
+    event: 'cli_spawn',
+    slug: slug,
+    turn: path.basename(promptFile),
+    cmd: cmdPreview,
+    model: model || 'default'
+  });
 
   // Timing + exit log live in the shell wrapper: detached+unref children do not
   // reliably deliver Node 'exit' events to a long-running control plane.
   // Delete ephemeral turn prompt on exit (same pattern as hub).
+  // Ensure API keys from .bizagent/env are in this process (and thus children).
+  loadHubEnv(hub);
+
   const script = [
     'HUB="$1"; slug="$2"; cli="$3"; pflag="$4"; extra="$5"; pfile="$6"; agentlog="$7"; stderrlog="$8"',
     'lockdir="$HUB/agents/$slug/.lock"',
     'cplog="$HUB/logs/control-plane.log"',
+    // Source hub env so CLI always sees XAI_API_KEY even if parent missed it.
+    'if [ -f "$HUB/.bizagent/env" ]; then set -a; . "$HUB/.bizagent/env" 2>/dev/null || true; set +a; fi',
     'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
     'date +%s > "$lockdir/start" 2>/dev/null',
     'trap \'rm -rf "$lockdir"; rm -f "$pfile"\' EXIT',
@@ -333,6 +416,7 @@ function launchAgent(config, slug, model = '', cliName = '') {
   const child = spawn('bash', ['-c', script, '_', hub, slug, cliSettings.cli, cliSettings.promptFlag, cliSettings.extraArgs, promptFile, agentLog, agentStderr], {
     detached: true,
     stdio: 'ignore',
+    env: process.env,
   });
 
   child.on('exit', (code) => {
@@ -343,7 +427,18 @@ function launchAgent(config, slug, model = '', cliName = '') {
   });
 
   child.unref();
-  appendLog(hub, `launched ${slug} using turn prompt ${path.basename(promptFile)}`);
+  logEvent(hub, {
+    event: 'cli_launched',
+    slug: slug,
+    turn: path.basename(promptFile)
+  });
+}
+
+function preferWarmDaemon(config) {
+  const tuning = (config.registry && config.registry.settings && config.registry.settings.tuning) || {};
+  const hubTune = tuning.hub || {};
+  if (hubTune.prefer_warm_daemon === false) return false;
+  return true;
 }
 
 function launchHub(config) {
@@ -352,7 +447,7 @@ function launchHub(config) {
   const lock = lockDir(hub, 'hub');
   const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
   const agentStderr = path.join(hub, 'logs', 'dispatch-hub.stderr');
-  appendLog(hub, `dispatch_start slug=hub t=${nowIso()}`);
+  logEvent(hub, { event: 'dispatch_start', slug: 'hub', t: nowIso() });
 
   // Always refresh base hub.md for tools that still open it; launch uses turn file.
   ensureHubRuntimePrompt(hub);
@@ -369,20 +464,125 @@ function launchHub(config) {
     // One ack per spawn (postLaunchAck is idempotent if ack still visible).
     try {
       postLaunchAck(hub, conversationId);
-      appendLog(hub, `launch_ack conversation_id=${conversationId} t=${startedAt}`);
+      logEvent(hub, { event: 'launch_ack', conversation_id: conversationId, t: startedAt });
     } catch (err) {
-      appendLog(hub, `WARN launch_ack failed: ${err.message}`);
+      logEvent(hub, { event: 'warn', type: 'launch_ack_failed', message: err.message });
     }
   }
 
   if (dryRun) {
     fs.rmSync(lock, { recursive: true, force: true });
-    appendLog(hub, 'DRY_RUN launch hub using turn prompt + runtime-cwd');
+    logEvent(hub, { event: 'dispatch_dry_run', slug: 'hub', type: 'hub' });
     // No CLI → no safety-net pending (would false-fail with empty log).
     // Still build turn prompt so reserved path + delivery instructions are exercised.
     try { buildHubTurnPrompt(hub); } catch (_err) { /* optional in dry-run */ }
     return;
   }
+
+  // Prefer warm hub-daemon when available (Makeover Phase 1). Cold spawn is fallback.
+  if (preferWarmDaemon(config)) {
+    const tuning = (config.registry && config.registry.settings && config.registry.settings.tuning) || {};
+    const hubTune = tuning.hub || {};
+    // Fire-and-forget async: lock is held by tryLock; daemon or we release.
+    requestWarmHubTurn(hub, {
+      connectTimeoutMs: hubTune.warm_connect_timeout_ms || 500,
+      turnTimeoutMs: hubTune.warm_turn_timeout_ms || 600000,
+    }).then((result) => {
+      // Only fall back to cold spawn when the daemon is unreachable / timed out.
+      // If the daemon ran the turn (success or failure), do not double-launch.
+      const unreachable = !result.via || [
+        'no_socket',
+        'connect_timeout',
+        'socket_error',
+        'turn_timeout',
+        'busy',
+      ].includes(result.error);
+      if (!unreachable) {
+        logEvent(hub, {
+          event: 'hub_turn_completed',
+          via: 'warm_daemon',
+          ok: !!result.ok,
+          action: result.action || '',
+          exit_code: result.exitCode,
+          duration_ms: result.duration_ms,
+          conversation_id: conversationId || result.conversationId || '',
+          error: result.error || undefined,
+        });
+        // Daemon owns CLI lifecycle; drop CP lock when turn finishes.
+        try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_e) { /* ignore */ }
+        return;
+      }
+      logEvent(hub, {
+        event: 'hub_warm_fallback',
+        reason: result.error || 'warm_failed',
+        conversation_id: conversationId || '',
+      });
+      launchHubCold(config, {
+        conversationId,
+        startedAt,
+        logOffset,
+        stderrOffset,
+        agentLog,
+        agentStderr,
+        runtimeCwd,
+        lock,
+        hubModel,
+        hubCliName,
+        cliJson,
+      });
+    }).catch((err) => {
+      logEvent(hub, {
+        event: 'hub_warm_fallback',
+        reason: err.message || 'warm_exception',
+        conversation_id: conversationId || '',
+      });
+      launchHubCold(config, {
+        conversationId,
+        startedAt,
+        logOffset,
+        stderrOffset,
+        agentLog,
+        agentStderr,
+        runtimeCwd,
+        lock,
+        hubModel,
+        hubCliName,
+        cliJson,
+      });
+    });
+    return;
+  }
+
+  launchHubCold(config, {
+    conversationId,
+    startedAt,
+    logOffset,
+    stderrOffset,
+    agentLog,
+    agentStderr,
+    runtimeCwd,
+    lock,
+    hubModel,
+    hubCliName,
+    cliJson,
+  });
+}
+
+function launchHubCold(config, ctx) {
+  const {
+    conversationId,
+    startedAt,
+    logOffset,
+    stderrOffset,
+    agentLog,
+    agentStderr,
+    runtimeCwd,
+    lock,
+    hubModel,
+    hubCliName,
+    cliJson,
+  } = ctx;
+  const { hub } = config;
 
   // Build turn prompt first (creates reserved body file when conversation_id present).
   const promptFile = buildHubTurnPrompt(hub);
@@ -403,10 +603,22 @@ function launchHub(config) {
   }
 
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+  // Ensure API keys from .bizagent/env are in this process (and thus children).
+  const envLoad = loadHubEnv(hub);
   // Prefer settings.hub_agent.cliName (via config.hubCliName); empty falls back to .cli / default.
   const cliSettings = getCliSettings(hub, cliJson, config, hubCliName || '', hubModel || '');
   const cmdPreview = compileAgentCommand(cliSettings, promptFile);
-  appendLog(hub, `cli_spawn slug=hub t=${nowIso()} cwd=${path.relative(hub, runtimeCwd) || runtimeCwd} turn=${path.basename(promptFile)} cmd=${cmdPreview}`);
+  logEvent(hub, {
+    event: 'cli_spawn',
+    slug: 'hub',
+    turn: path.basename(promptFile),
+    cmd: cmdPreview,
+    model: hubModel || 'default',
+    cwd: path.relative(hub, runtimeCwd) || runtimeCwd,
+    env_file_found: !!envLoad.found,
+    env_keys_applied: envLoad.applied || 0,
+    has_xai_key: !!(process.env.XAI_API_KEY && process.env.XAI_API_KEY.length > 0),
+  });
 
   // Safety module path for EXIT trap (absolute so cwd isolation does not matter).
   const safetyModule = path.join(__dirname, 'hub-turn-safety.js');
@@ -426,6 +638,8 @@ function launchHub(config) {
     'lockdir="$HUB/.bizagent/hub.lock"',
     'cplog="$HUB/logs/control-plane.log"',
     'mkdir -p "$HUB/.bizagent" "$HUB/logs"',
+    // Source hub env so CLI always sees XAI_API_KEY even if parent missed it.
+    'if [ -f "$HUB/.bizagent/env" ]; then set -a; . "$HUB/.bizagent/env" 2>/dev/null || true; set +a; fi',
     'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
     'date +%s > "$lockdir/start" 2>/dev/null',
     'code=0',
@@ -457,6 +671,7 @@ function launchHub(config) {
   ], {
     detached: true,
     stdio: 'ignore',
+    env: process.env,
   });
 
   child.on('exit', (code) => {
@@ -465,13 +680,14 @@ function launchHub(config) {
       recordAgentError(hub, 'hub', code, stderrTail, conversationId);
     }
     // Backup if shell EXIT hook did not clear the pending turn (tick also drains).
+    let action = '';
     if (conversationId) {
       const stillPending = readPendingHubTurns(hub).some(
         (t) => t.conversationId === conversationId && t.startedAt === startedAt,
       );
       if (stillPending) {
         try {
-          onHubCliExit(hub, {
+          const result = onHubCliExit(hub, {
             conversationId,
             logByteOffset: logOffset,
             stderrByteOffset: stderrOffset,
@@ -481,15 +697,30 @@ function launchHub(config) {
             replyBodyFile,
             exitCode: code,
           });
+          action = (result && result.action) || '';
         } catch (_err) {
           /* tick drain will retry */
         }
       }
     }
+    logEvent(hub, {
+      event: 'hub_turn_completed',
+      via: 'cold',
+      ok: code === 0,
+      exit_code: code,
+      action,
+      conversation_id: conversationId || '',
+    });
   });
 
   child.unref();
-  appendLog(hub, `launched hub using turn prompt ${path.basename(promptFile)} cwd=${path.basename(runtimeCwd)}`);
+  logEvent(hub, {
+    event: 'cli_launched',
+    slug: 'hub',
+    via: 'cold',
+    turn: path.basename(promptFile),
+    cwd: path.basename(runtimeCwd),
+  });
 }
 
 function dispatchPendingAgents(config) {
@@ -565,16 +796,20 @@ module.exports = {
   drainHubTurnSafety,
   ensureDispatchPrompt,
   getRecentHubInboxMessage,
+  hubDaemonSock,
   isAgentActive,
   launchAgent,
   launchHub,
+  launchHubCold,
   liveAgentCount,
   liveHubCount,
   liveRunCount,
   markMailDispatched,
   pendingUndispatchedMail,
+  preferWarmDaemon,
   promptFileFor,
   readStderrTail,
   recordAgentError,
+  requestWarmHubTurn,
   tryLock,
 };

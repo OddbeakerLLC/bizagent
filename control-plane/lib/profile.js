@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { appDir, ensureDir, readJson } = require('./config');
+const { logEvent } = require('./log');
 
 const MAX_DISPLAY_NAME = 80;
 
@@ -41,6 +42,12 @@ function setProfile(hub, patch = {}) {
   };
   ensureDir(appDir(hub));
   fs.writeFileSync(profilePath(hub), `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+
+  logEvent(hub, {
+    event: 'profile_updated',
+    display_name: nextName
+  });
+
   return data;
 }
 

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { appDir, ensureDir } = require('./config');
+const { logEvent, logLatency } = require('./log');
 
 const MAX_RECENT_TURNS = 12;
 const MAX_SUMMARY_BULLETS = 16;
@@ -59,6 +60,14 @@ function deriveHubRuntimePrompt(hub) {
     'Hub-and-spoke: this repo is the hub; each product has one agent owning one or more project repos.',
     '`registry.json` is the source of truth. Use each product\'s `agent_name` when speaking to the operator;',
     'use slugs only in message file headers (`from:`, `to:`).',
+    '',
+    '## What is a "product"? (teach this when operators are confused)',
+    '',
+    'A **product** is anything that requires you to **gather** information or parts, **build** something,',
+    'and ultimately **distribute** that result to others — not only software.',
+    'Examples: a resume to an employer, a report to a manager, an app to the App Store, a campaign, a paper.',
+    'If it matches gather → build → distribute, it can be managed as a BizAgent product (own agent, journal, sitemap).',
+    'BizAgent is a product-development operating system — not "smart Google search" and not only a coding assistant.',
     '',
     '## System state (always true on runtime launches)',
     '',
@@ -133,10 +142,15 @@ function deriveHubRuntimePrompt(hub) {
 }
 
 function ensureHubRuntimePrompt(hub) {
+  const start = Date.now();
   ensureDir(hubPromptDir(hub));
   const file = hubRuntimePromptFile(hub);
   fs.writeFileSync(file, `${deriveHubRuntimePrompt(hub)}\n`);
   if (!fs.existsSync(hubSessionFile(hub))) resetHubSession(hub, { name: 'Main' });
+
+  logLatency(hub, 'ensure_hub_runtime_prompt', (Date.now() - start) / 1000, {
+    prompt_file: file
+  });
   return file;
 }
 
@@ -238,6 +252,7 @@ function parseConversationId(text) {
  * Written under .bizagent/prompts/turns/; caller deletes after CLI exit.
  */
 function buildHubTurnPrompt(hub) {
+  const start = Date.now();
   ensureHubRuntimePrompt(hub);
   ensureDir(hubTurnsDir(hub));
   const hubAbs = path.resolve(hub);
@@ -284,6 +299,13 @@ function buildHubTurnPrompt(hub) {
 
   const turnId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const turnFile = path.join(hubTurnsDir(hub), `hub-${turnId}.md`);
+
+  logLatency(hub, 'build_hub_turn_prompt', (Date.now() - start) / 1000, {
+    turn_id: turnId,
+    pending_mail_count: pending.length,
+    has_conversation_id: !!convId,
+    has_reserved_body: !!reservedBodyAbs
+  });
 
   const deliveryBlock = convId
     ? [

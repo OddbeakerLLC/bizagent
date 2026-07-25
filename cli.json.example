@@ -1,5 +1,5 @@
 {
-  "_comment": "CLI configuration keyed by CLI name (e.g., claude, codex, agy, grok). promptFlag is the flag that receives a prompt *file path*. Grok: use --prompt-file (not -p, which is prompt text). Claude/agy: -p. Codex: --prompt.",
+  "_comment": "CLI configuration. Standard CLI definitions (claude, codex, agy, grok) keyed by CLI name. Copy to cli.json and customize.",
   "claude": {
     "executable": "claude",
     "promptFlag": "-p",

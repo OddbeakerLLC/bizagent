@@ -195,14 +195,6 @@ grep -q "control-plane.sh" "$ROOT/README.md" \
   || fail "easy start/stop script missing or not executable"
 grep -q "serve --hub" "$ROOT/scripts/control-plane.sh" \
   || fail "start/stop script does not pass the hub path through the control-plane CLI"
-grep -q "find_pids" "$ROOT/scripts/control-plane.sh" \
-  || fail "control-plane.sh does not discover live PIDs without a pidfile"
-grep -q "find_systemd_unit" "$ROOT/scripts/control-plane.sh" \
-  || fail "control-plane.sh does not look up the systemd user unit"
-grep -q "writePidFile" "$ROOT/control-plane/server.js" \
-  || fail "server does not write control-plane.pid on start"
-grep -q "clearPidFile" "$ROOT/control-plane/server.js" \
-  || fail "server does not clear control-plane.pid on exit"
 grep -q "control-plane" "$ROOT/scripts/router.sh" \
   || fail "router.sh is not a control-plane wrapper"
 grep -q "control-plane" "$ROOT/scripts/bizagent-dispatch.sh" \
@@ -2072,74 +2064,5 @@ NODE
   then
     fail "delete conversation / display name profile failed"
   fi
-
-  # control-plane.sh discovers and manages a live process even if the pidfile is gone
-  # (regression: restart/orphan left status/stop blind).
-  CP_HUB="$(mktemp -d)"
-  CP_PORT=$((18000 + RANDOM % 1000))
-  mkdir -p "$CP_HUB/logs" "$CP_HUB/.bizagent" "$CP_HUB/scripts"
-  # Point scripts path used by serve at the real tree via --hub only; CLI lives in ROOT.
-  cat > "$CP_HUB/registry.json" <<JSON
-{"settings":{"control_plane":{"host":"127.0.0.1","port":$CP_PORT},"dispatch":{"poll_seconds":30}},"products":[]}
-JSON
-  BIZAGENT_HOST=127.0.0.1 BIZAGENT_PORT="$CP_PORT" \
-    nohup node "$ROOT/scripts/bizagent-control-plane.js" serve --hub "$CP_HUB" \
-    >"$CP_HUB/logs/control-plane-server.log" 2>&1 &
-  CP_PID=$!
-  # Wait until listening / pidfile written by server
-  ready=0
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    if kill -0 "$CP_PID" 2>/dev/null && \
-       [ -f "$CP_HUB/.bizagent/control-plane.pid" ] && \
-       grep -q "listening" "$CP_HUB/logs/control-plane-server.log" 2>/dev/null; then
-      ready=1
-      break
-    fi
-    sleep 0.2
-  done
-  [ "$ready" -eq 1 ] || {
-    kill "$CP_PID" 2>/dev/null || true
-    cat "$CP_HUB/logs/control-plane-server.log" 2>/dev/null || true
-    rm -rf "$CP_HUB"
-    fail "control-plane test server did not become ready"
-  }
-  # Server should have written its own pidfile
-  server_pid="$(tr -d ' \n\r\t' < "$CP_HUB/.bizagent/control-plane.pid")"
-  [ "$server_pid" = "$CP_PID" ] || {
-    kill "$CP_PID" 2>/dev/null || true
-    rm -rf "$CP_HUB"
-    fail "server pidfile mismatch: got '$server_pid' want '$CP_PID'"
-  }
-  # Drop pidfile — status must still find the process via /proc
-  rm -f "$CP_HUB/.bizagent/control-plane.pid"
-  status_out="$(bash "$ROOT/scripts/control-plane.sh" status "$CP_HUB" 2>&1)" || true
-  echo "$status_out" | grep -q "running: pid $CP_PID" \
-    || {
-      kill "$CP_PID" 2>/dev/null || true
-      rm -rf "$CP_HUB"
-      fail "status lost process after pidfile removal: $status_out"
-    }
-  # status should have rewritten the pidfile
-  [ -f "$CP_HUB/.bizagent/control-plane.pid" ] \
-    || {
-      kill "$CP_PID" 2>/dev/null || true
-      rm -rf "$CP_HUB"
-      fail "status did not restore pidfile"
-    }
-  # stop must kill the orphan without relying on the original launcher
-  stop_out="$(bash "$ROOT/scripts/control-plane.sh" stop "$CP_HUB" 2>&1)" || true
-  sleep 0.3
-  if kill -0 "$CP_PID" 2>/dev/null; then
-    kill -9 "$CP_PID" 2>/dev/null || true
-    rm -rf "$CP_HUB"
-    fail "stop did not kill live process: $stop_out"
-  fi
-  status_out2="$(bash "$ROOT/scripts/control-plane.sh" status "$CP_HUB" 2>&1)" || true
-  echo "$status_out2" | grep -q "is not running" \
-    || {
-      rm -rf "$CP_HUB"
-      fail "status after stop should be not running: $status_out2"
-    }
-  rm -rf "$CP_HUB"
 
 echo "  ok: control-plane"

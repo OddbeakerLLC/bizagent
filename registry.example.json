@@ -10,7 +10,7 @@
     "archive_after_days": 30,
     "autonomy": "maintenance-only",
     "dispatch": {
-      "_comment": "Node control-plane dispatch tunables. poll_seconds honored (default 2; clamp 1–30). hub_slots and agent_slots are separate pools so hub turns do not starve product fanout (defaults: hub 1, agents = max_concurrency). max_concurrency default 8 (product-agent pool when agent_slots omitted).",
+      "_comment": "Node control-plane dispatch tunables. poll_seconds honored (default 2; clamp 1\u201330). hub_slots and agent_slots are separate pools so hub turns do not starve product fanout (defaults: hub 1, agents = max_concurrency). max_concurrency default 8 (product-agent pool when agent_slots omitted).",
       "poll_seconds": 2,
       "max_concurrency": 8,
       "hub_slots": 1,
@@ -30,6 +30,23 @@
     "models": {
       "_comment": "Default model for product agent launches. Per-product model field overrides this.",
       "agent_default": ""
+    },
+    "tuning": {
+      "_comment": "Operational tunables. archive.retention_days default 15.",
+      "archive": {
+        "retention_days": 15,
+        "prune_on_nightly": true,
+        "keep_min_files_per_dir": 5
+      },
+      "logging": {
+        "level": "info",
+        "structured_enabled": true
+      },
+      "hub": {
+        "prefer_warm_daemon": true,
+        "warm_connect_timeout_ms": 500,
+        "warm_turn_timeout_ms": 600000
+      }
     }
   },
   "knowledge_stack": {
@@ -37,7 +54,12 @@
     "refresh_day": "sunday",
     "refresh_time": "01:00"
   },
-  "cross_product_edges": [["widgets", "platform"]],
+  "cross_product_edges": [
+    [
+      "widgets",
+      "platform"
+    ]
+  ],
   "products": [
     {
       "slug": "widgets",
@@ -46,8 +68,16 @@
       "model": "",
       "cliName": "claude",
       "projects": [
-        { "name": "widgets-web", "path": "../widgets-web", "remote": "" },
-        { "name": "widgets-api", "path": "../widgets-api", "remote": "" }
+        {
+          "name": "widgets-web",
+          "path": "../widgets-web",
+          "remote": ""
+        },
+        {
+          "name": "widgets-api",
+          "path": "../widgets-api",
+          "remote": ""
+        }
       ]
     },
     {
@@ -57,7 +87,11 @@
       "model": "",
       "cliName": "claude",
       "projects": [
-        { "name": "platform-core", "path": "../platform-core", "remote": "" }
+        {
+          "name": "platform-core",
+          "path": "../platform-core",
+          "remote": ""
+        }
       ]
     },
     {
@@ -67,7 +101,11 @@
       "model": "",
       "cliName": "agy",
       "projects": [
-        { "name": "cli-tools", "path": "../cli-tools", "remote": "" }
+        {
+          "name": "cli-tools",
+          "path": "../cli-tools",
+          "remote": ""
+        }
       ]
     }
   ]

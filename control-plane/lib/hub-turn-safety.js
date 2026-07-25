@@ -21,7 +21,7 @@ const {
   STATUS_ERROR_KIND,
   supersedeLaunchAcks,
 } = require('./conversations');
-const { appendLog } = require('./log');
+const { logEvent, logError, appendLog } = require('./log');
 const { routeOutboxes, writeOutboxMessage } = require('./mail');
 
 const DEFAULT_MAX_BLOB_CHARS = 4000;
@@ -323,10 +323,12 @@ function finalizeViaOutbox(hub, conversationId, body, subject, actionTag) {
   promoteBlobToOutbox(hub, conversationId, body, subject);
   routeOutboxes(hub);
   readUserInboxMessages(hub);
-  appendLog(
-    hub,
-    `hub_safety ${actionTag} conversation_id=${conversationId} chars=${body.length}`,
-  );
+  logEvent(hub, {
+    event: 'hub_safety',
+    action: actionTag,
+    conversation_id: conversationId,
+    chars: body.length
+  });
   return { action: actionTag, chars: body.length };
 }
 
@@ -347,15 +349,49 @@ function stderrSnippet(turn, maxChars = 400) {
 }
 
 function hardFailMessage(turn) {
-  const parts = [
-    'Hub produced no user-visible reply (no reserved body, no outbox mail, and no recoverable dispatch output).',
-  ];
-  if (turn && turn.exitCode != null && turn.exitCode !== '' && Number(turn.exitCode) !== 0) {
-    parts.push(`CLI exit code: ${turn.exitCode}.`);
-  }
+  // Prefer the real underlying failure; avoid opaque meta-errors when we know the cause.
   const err = turn ? stderrSnippet(turn) : '';
+  const exitCode = turn && turn.exitCode != null && turn.exitCode !== ''
+    ? Number(turn.exitCode)
+    : null;
+
+  const exitBit = (exitCode != null && exitCode !== 0) ? `CLI exit code: ${exitCode}.` : '';
+
+  if (err && /CLI auth failure|Not signed in|XAI_API_KEY|grok login/i.test(err)) {
+    return [
+      'Hub CLI authentication failed.',
+      exitBit,
+      err,
+      'Fix: put XAI_API_KEY (or the relevant CLI key) in `.bizagent/env`, then `scripts/control-plane.sh restart` and `scripts/hub-daemon.sh restart`.',
+      'See `logs/dispatch-hub.stderr`.',
+    ].filter(Boolean).join(' ');
+  }
+  if (err && /unknown model id|Couldn't set model/i.test(err)) {
+    return [
+      'Hub CLI rejected the configured model.',
+      exitBit,
+      err,
+      'Fix: set `settings.hub_agent.model` in registry.json to a model from `grok models` (or your CLI), then restart the control plane.',
+    ].filter(Boolean).join(' ');
+  }
+  if (err && /usage balance exhausted|402 Payment Required/i.test(err)) {
+    return [
+      'Hub CLI API quota/balance exhausted.',
+      exitBit,
+      err,
+      'Fix: top up the provider account or switch models in registry.json.',
+    ].filter(Boolean).join(' ');
+  }
+
+  const parts = [
+    'Hub produced no user-visible reply (no reserved body file and no outbox mail to user).',
+  ];
+  if (exitCode != null && exitCode !== 0) {
+    parts.push(`CLI exit code: ${exitCode}.`);
+  }
   if (err) parts.push(err);
-  parts.push('Stdout is not delivered to the console — only outbox mail (or this status). Check `logs/dispatch-hub.log`.');
+  else parts.push('No actionable stderr captured.');
+  parts.push('Check `logs/dispatch-hub.stderr` and `logs/structured.log` (event hub_turn_completed / hub_daemon_turn_end).');
   return parts.join(' ');
 }
 
@@ -457,7 +493,11 @@ function ensureHubUserReply(hub, turn) {
   );
   clearPendingHubTurn(hub, turn);
   clearReservedReplyBody(hub, conversationId);
-  appendLog(hub, `hub_safety fail conversation_id=${conversationId}`);
+  logEvent(hub, {
+    event: 'hub_safety_fail',
+    conversation_id: conversationId,
+    reason: 'no_reply_or_outbox'
+  });
   return { action: 'failed' };
 }
 
@@ -503,7 +543,17 @@ function drainPendingHubTurns(hub, isHubActive) {
  * Optional exitCode on the turn object improves hard-fail text.
  */
 function onHubCliExit(hub, turn) {
-  return ensureHubUserReply(hub, turn || {});
+  const start = Date.now();
+  const result = ensureHubUserReply(hub, turn || {});
+
+  logEvent(hub, {
+    event: 'hub_safety_on_exit',
+    duration_ms: Math.round((Date.now() - start) * 100) / 100,
+    conversation_id: turn?.conversationId,
+    action: result.action || 'unknown'
+  });
+
+  return result;
 }
 
 module.exports = {

@@ -296,6 +296,29 @@ button {
   border-color: #fed7aa;
   border-style: solid;
 }
+
+/* Observability tab */
+#observabilityTab {
+  padding: 20px;
+}
+
+.observability-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+}
+
+.observability-table th,
+.observability-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.observability-table th {
+  background: #f8fafc;
+  font-weight: 600;
+}
 .fixed-composer {
   position: fixed;
   left: 248px;

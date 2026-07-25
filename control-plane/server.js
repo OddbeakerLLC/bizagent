@@ -3,6 +3,7 @@ const http = require("http");
 const path = require("path");
 const {
   agentsFromRegistry,
+  loadHubEnv,
   loadRuntimeConfig,
   refreshRuntimeConfig,
 } = require("./lib/config");
@@ -35,7 +36,7 @@ const {
 const { ensureHubRuntimePrompt } = require("./lib/hub-memory");
 const { agentMailStatus, routeOutboxes } = require("./lib/mail");
 const { getProfile, setProfile } = require("./lib/profile");
-const { appendLog } = require("./lib/log");
+const { logEvent, logHubTurn, logError, appendLog } = require("./lib/log");
 
 const PUBLIC_DIR = path.join(__dirname, "public");
 
@@ -223,7 +224,31 @@ async function handleApi(config, req, res) {
   }
 
   if (url.pathname === "/api/state" && req.method === "GET") {
+    // Silent poll — no log (fires every ~2s from the UI).
     return send(res, 200, currentState(config));
+  }
+
+  if (url.pathname === "/api/observability" && req.method === "GET") {
+    const hub = config.hub;
+    const structuredLogPath = path.join(hub, "logs", "structured.log");
+    let recentEvents = [];
+
+    if (fs.existsSync(structuredLogPath)) {
+      try {
+        const lines = fs.readFileSync(structuredLogPath, "utf8").trim().split("\n").slice(-50);
+        recentEvents = lines.map(line => {
+          try { return JSON.parse(line); } catch (_) { return { raw: line }; }
+        });
+      } catch (e) {}
+    }
+
+    return send(res, 200, {
+      recent_events: recentEvents,
+      summary: {
+        total_events: recentEvents.length,
+        last_tick: recentEvents.find(e => e.event === "control_plane_tick")
+      }
+    });
   }
 
   if (url.pathname === "/api/conversations" && req.method === "GET") {
@@ -289,6 +314,7 @@ async function handleApi(config, req, res) {
     /^\/api\/conversations\/([^/]+)\/messages$/,
   );
   if (messageMatch && req.method === "POST") {
+    const start = Date.now();
     const body = await parseBody(req);
     const content = body.content || "";
     const id = shouldStartNewConversation(content)
@@ -297,6 +323,14 @@ async function handleApi(config, req, res) {
     writeHubInboxMessage(config.hub, content, id);
     const conv = appendMessage(config.hub, id, "user", content);
     setActiveConversation(config.hub, id);
+
+    logEvent(config.hub, {
+      event: 'user_message_received',
+      conversation_id: id,
+      content_length: content.length,
+      duration_ms: Math.round((Date.now() - start) * 100) / 100
+    });
+
     return send(res, 200, conv);
   }
 
@@ -304,12 +338,32 @@ async function handleApi(config, req, res) {
 }
 
 function runTick(config) {
+  const start = Date.now();
   refreshRuntimeConfig(config);
-  routeOutboxes(config.hub);
+  const routed = routeOutboxes(config.hub);
   syncUserInbox(config);
   // Backup: if hub CLI exited without the shell safety hook, finish the turn.
   drainHubTurnSafety(config);
-  dispatchPendingAgents(config);
+  const dispatched = dispatchPendingAgents(config) || {};
+  const launched = Number(dispatched.launched || 0);
+
+  const hadWork =
+    (routed.delivered || 0) > 0 ||
+    (routed.quarantined || 0) > 0 ||
+    (routed.warnings || 0) > 0 ||
+    launched > 0;
+
+  if (hadWork) {
+    logEvent(config.hub, {
+      event: 'control_plane_tick',
+      duration_ms: Math.round((Date.now() - start) * 100) / 100,
+      routed: routed.delivered || 0,
+      quarantined: routed.quarantined || 0,
+      warnings: routed.warnings || 0,
+      launched,
+      poll_seconds: config.pollSeconds,
+    });
+  }
 }
 
 function createServer(config) {
@@ -379,7 +433,15 @@ function start(hubInput) {
     const logLine = openUrl !== bindUrl
       ? `bizagent-control-plane listening on ${config.host}:${config.port} poll=${config.pollSeconds}s (open ${openUrl})`
       : `bizagent-control-plane listening on ${bindUrl} poll=${config.pollSeconds}s`;
-    appendLog(config.hub, logLine);
+    
+    logEvent(config.hub, {
+      event: 'control_plane_start',
+      status: 'ok',
+      host: config.host,
+      port: config.port,
+      poll_seconds: config.pollSeconds,
+      bind_url: bindUrl
+    });
     console.log(logLine);
   });
   return server;
