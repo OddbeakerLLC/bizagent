@@ -3,6 +3,7 @@ const path = require('path');
 const { agentsFromRegistry, appDir, ensureDir, loadRegistry } = require('./config');
 const {
   getStampConversationId,
+  postAgentCompletionNotice,
   recordUserInboxDelivery,
   stampConversationId,
   userInbox,
@@ -178,6 +179,7 @@ function routeOutboxes(hub) {
     for (const file of markdownFiles(outbox)) {
       const text = fs.readFileSync(file, 'utf8');
       const to = frontmatterValue(text, 'to');
+      const from = frontmatterValue(text, 'from');
       const base = path.basename(file);
 
       if (!to) {
@@ -228,17 +230,44 @@ function routeOutboxes(hub) {
         continue;
       }
       let deliveredFile;
-      if (to === 'user') {
+      // Stamp conversation_id for:
+      // - hub→user mail (existing behavior, for console visibility)
+      // - agent→hub mail (completion notifications): associate with the active/originating
+      //   console conversation so the hub turn that processes it must emit a user-visible
+      //   summary via the reserved-body / write-message / safety-net path.
+      const isAgentToHub = (to === 'hub') && from && from !== 'hub' && from !== 'user';
+      const shouldStamp = (to === 'user') || isAgentToHub;
+      let stampedForAgentToHub = false;
+      if (shouldStamp) {
         const stamped = maybeStampUserConversationId(hub, text, base);
         if (stamped !== text) {
           deliveredFile = writeContentUnique(dest, base, stamped);
           fs.unlinkSync(file);
+          if (isAgentToHub) stampedForAgentToHub = true;
         } else {
           deliveredFile = writeFileUnique(dest, base, file);
         }
-        recordUserInboxDelivery(hub, deliveredFile);
       } else {
         deliveredFile = writeFileUnique(dest, base, file);
+      }
+      if (to === 'user') {
+        recordUserInboxDelivery(hub, deliveredFile);
+      }
+      // CP-owned visible notice + ensure a summary turn will be taken for agent→hub mail.
+      if (isAgentToHub && deliveredFile) {
+        const stampedCid = frontmatterValue(
+          fs.existsSync(deliveredFile) ? fs.readFileSync(deliveredFile, 'utf8') : text,
+          'conversation_id'
+        );
+        if (stampedCid) {
+          try { postAgentCompletionNotice(hub, stampedCid, from); } catch (_e) { /* non-fatal */ }
+          logEvent(hub, {
+            event: 'agent_completion_stamped',
+            from,
+            conversation_id: stampedCid,
+            file: base
+          });
+        }
       }
       delivered += 1;
       logEvent(hub, {
