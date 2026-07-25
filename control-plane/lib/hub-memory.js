@@ -92,6 +92,7 @@ function deriveHubRuntimePrompt(hub) {
     '- **Stdout is debug only.** Nothing you print is shown to the operator. Never "answer" in chat text alone.',
     '- **Operator-visible text** must go through a CP-owned write path (below). Free-form `outbox/*.md` creation is **banned** — wrong filename, missing `conversation_id`, or wrong `to:` silently drops the reply.',
     '- Product-agent mail (to a slug) also uses the write-message helper — same rule.',
+    '- When an agent→hub message arrives **with a conversation_id** (completion notification), you **must** write a short user-visible summary for the operator using the reserved body or write-message path. Do not silently archive it.',
     '',
     '## This-turn order (outbox-first)',
     '',

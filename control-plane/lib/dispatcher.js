@@ -21,6 +21,7 @@ const {
   recordPendingHubTurn,
   reservedReplyBodyPath,
 } = require('./hub-turn-safety');
+const { postAgentCompletionNotice } = require('./conversations');
 
 function hubDaemonSock(hub) {
   return path.join(hub, '.bizagent', 'hub.sock');
@@ -423,6 +424,23 @@ function launchAgent(config, slug, model = '', cliName = '') {
     if (code !== 0 && code !== null) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, slug, code, stderrTail, null);
+    }
+    // Agent finished. If it mailed the hub, the next control-plane tick (or warm daemon)
+    // will see the (now stamped) agent→hub mail in the hub inbox and launch a fresh hub
+    // turn carrying that conversation_id. We also nudge immediately here when the hub slot
+    // is free so we do not wait for the next poll interval.
+    try {
+      // Route first so the just-written agent→hub mail is visible to dispatch.
+      const { routeOutboxes } = require('./mail');
+      routeOutboxes(hub);
+      const hubRunning = liveHubCount(hub, config.lockLeaseSecs || 1800);
+      if (hubRunning === 0) {
+        // Reuse the same config object shape dispatchPendingAgents expects.
+        // This will claim the hub slot and call launchHub if mail is present.
+        dispatchPendingAgents(config);
+      }
+    } catch (_e) {
+      // Non-fatal: the regular tick (route + dispatchPendingAgents) will pick it up.
     }
   });
 

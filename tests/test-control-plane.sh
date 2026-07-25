@@ -655,6 +655,96 @@ NODE
     fail "conversation_id stamp-on-route failed"
   fi
 
+  # Agent→hub mail is stamped with active/originating conversation_id + posts CP agent-completion notice.
+  # This is the key regression fix: product mail must carry a conversation_id so the hub turn that
+  # processes the completion is required to emit a visible summary (reserved body / write-message).
+  # Use a private temp dir so we do not pollute the shared $TMP2 used by the launch-ack safety block.
+  AGENT_STAMP_TMP="$(mktemp -d)"
+  if ! node - "$ROOT" "$AGENT_STAMP_TMP" <<'NODE'
+const root = process.argv[2];
+const hub = process.argv[3];
+const fs = require('fs');
+const path = require('path');
+const {
+  createConversation,
+  getConversation,
+  getStampConversationId,
+  setActiveConversation,
+} = require(`${root}/control-plane/lib/conversations`);
+const { routeOutboxes } = require(`${root}/control-plane/lib/mail`);
+const { appDir, ensureDir } = require(`${root}/control-plane/lib/config`);
+
+fs.mkdirSync(path.join(hub, 'inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'user/inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents/alpha/inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents/alpha/outbox'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  products: [ { slug: 'alpha', name: 'Alpha' } ],
+  settings: {}
+}));
+
+const conv = createConversation(hub, 'Agent Completion Test');
+setActiveConversation(hub, conv.id);
+
+// Simulate a product agent writing a completion mail to hub (no conversation_id in body).
+const date = '2026-07-25';
+fs.writeFileSync(path.join(hub, 'agents/alpha/outbox', `${date}-alpha-completion.md`), `---
+from: alpha
+to: hub
+date: ${date}
+subject: completion notification before push
+---
+
+Priority before any commit/push of the makeover branch.
+Operator: get the final hub→operator completion-notification fix in before we commit/push.
+`);
+let routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected agent->hub delivery', routed);
+  process.exit(1);
+}
+const deliveredPath = path.join(hub, 'inbox', `${date}-alpha-completion.md`);
+if (!fs.existsSync(deliveredPath)) {
+  console.error('agent->hub mail not delivered to hub inbox');
+  process.exit(2);
+}
+const deliveredText = fs.readFileSync(deliveredPath, 'utf8');
+const stampedCid = (deliveredText.match(/^conversation_id:\s*(.+?)\s*$/m) || [])[1];
+if (stampedCid !== conv.id) {
+  console.error('agent->hub mail was not stamped with active conversation_id', deliveredText);
+  process.exit(3);
+}
+
+// The router should also have posted the CP-owned one-liner into the conversation.
+const c = getConversation(hub, conv.id);
+const hasNotice = c && c.messages && c.messages.some((m) =>
+  m.role === 'status' && /Agent alpha finished — summarizing/i.test(m.content || '')
+);
+if (!hasNotice) {
+  console.error('missing agent-completion notice in conversation', c && c.messages);
+  process.exit(4);
+}
+
+// Ensure getStampConversationId still works (originating wins over active) for later agent mail too.
+const origin2 = createConversation(hub, 'Origin2');
+const viewed2 = createConversation(hub, 'Viewed2');
+setActiveConversation(hub, viewed2.id);
+const pfile = path.join(appDir(hub), 'pending-hub-turns.json');
+ensureDir(appDir(hub));
+fs.writeFileSync(pfile, JSON.stringify({ turns: [{ conversationId: origin2.id, startedAt: new Date().toISOString() }] }, null, 2));
+if (getStampConversationId(hub) !== origin2.id) {
+  console.error('stamp should prefer originating for subsequent agent mail too');
+  process.exit(5);
+}
+fs.unlinkSync(pfile);
+NODE
+  then
+    rm -rf "$AGENT_STAMP_TMP"
+    fail "agent->hub mail stamping + completion notice failed"
+  fi
+  rm -rf "$AGENT_STAMP_TMP"
+
   # CP launch ack + outbox safety net (reserved body / promote / hard fail / write-message)
   if ! node - "$ROOT" "$TMP2" <<'NODE'
 const root = process.argv[2];

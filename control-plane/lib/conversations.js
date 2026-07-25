@@ -123,19 +123,35 @@ const LAUNCH_ACK_TEXT = 'Working. Stand by...';
 const LAUNCH_ACK_KIND = 'launch-ack';
 const STATUS_ERROR_KIND = 'error';
 
+/** CP-owned notice posted when a product agent exits cleanly and mailed hub (with stamped conv). */
+const AGENT_COMPLETION_KIND = 'agent-completion';
+const AGENT_COMPLETION_TEXT = (slug) => `Agent ${slug} finished — summarizing…`;
+
 function isLaunchAckMessage(msg) {
   return msg && msg.role === 'status' && msg.kind === LAUNCH_ACK_KIND;
 }
 
+function isAgentCompletionMessage(msg) {
+  return msg && msg.role === 'status' && msg.kind === AGENT_COMPLETION_KIND;
+}
+
 /**
- * Remove CP launch-ack status lines from a conversation (in memory).
+ * Remove transient status lines (launch-ack and agent-completion notices) from a conversation.
  * Called when a real hub reply or hard failure is posted.
  */
-function stripLaunchAcks(conv) {
+function stripTransientStatuses(conv) {
   if (!conv || !Array.isArray(conv.messages)) return 0;
   const before = conv.messages.length;
-  conv.messages = conv.messages.filter((msg) => !isLaunchAckMessage(msg));
+  conv.messages = conv.messages.filter((msg) => {
+    if (msg.role === 'status' && (msg.kind === LAUNCH_ACK_KIND || msg.kind === AGENT_COMPLETION_KIND)) return false;
+    return true;
+  });
   return before - conv.messages.length;
+}
+
+/** Back-compat wrapper — strips launch acks (and now also completion notices). */
+function stripLaunchAcks(conv) {
+  return stripTransientStatuses(conv);
 }
 
 function saveConversation(hub, conv) {
@@ -147,14 +163,14 @@ function saveConversation(hub, conv) {
 }
 
 /**
- * Append a message. Optional meta: { kind } (e.g. launch-ack, error).
- * Real hub replies and error statuses supersede any launch-ack lines.
+ * Append a message. Optional meta: { kind } (e.g. launch-ack, error, agent-completion).
+ * Real hub replies and error statuses supersede transient status lines (launch-ack + agent-completion).
  */
 function appendMessage(hub, id, role, content, meta = {}) {
   const conv = getConversation(hub, id);
   if (!conv) throw new Error('conversation not found');
   if (role === 'hub' || (role === 'status' && meta.kind === STATUS_ERROR_KIND)) {
-    stripLaunchAcks(conv);
+    stripTransientStatuses(conv);
   }
   const msg = { role, content, created_at: new Date().toISOString() };
   if (meta.kind) msg.kind = meta.kind;
@@ -176,6 +192,32 @@ function postLaunchAck(hub, conversationId, text = LAUNCH_ACK_TEXT) {
   conv.messages.push({
     role: 'status',
     kind: LAUNCH_ACK_KIND,
+    content: text,
+    created_at: new Date().toISOString(),
+  });
+  return saveConversation(hub, conv);
+}
+
+/**
+ * Post a CP-owned one-liner when a product agent exits cleanly with hub-bound mail.
+ * Idempotent: do not post a second notice if one is already the last visible transient.
+ */
+function postAgentCompletionNotice(hub, conversationId, slug) {
+  if (!conversationId || !slug) return null;
+  const conv = getConversation(hub, conversationId);
+  if (!conv) return null;
+  const last = conv.messages[conv.messages.length - 1];
+  if (isLaunchAckMessage(last) || isAgentCompletionMessage(last)) {
+    // Replace the transient with the more specific agent completion notice.
+    // Strip both kinds then append the new one.
+    stripTransientStatuses(conv);
+  } else if (isAgentCompletionMessage(last)) {
+    return conv;
+  }
+  const text = AGENT_COMPLETION_TEXT(slug);
+  conv.messages.push({
+    role: 'status',
+    kind: AGENT_COMPLETION_KIND,
     content: text,
     created_at: new Date().toISOString(),
   });
@@ -391,6 +433,8 @@ function deleteConversation(hub, id) {
 
 module.exports = {
   ACTIVE_CONVERSATION_MAX_AGE_MS,
+  AGENT_COMPLETION_KIND,
+  AGENT_COMPLETION_TEXT,
   appendMessage,
   assertValidConversationId,
   conversationNameFromContent,
@@ -401,10 +445,12 @@ module.exports = {
   getConversation,
   getOriginatingConversationId,
   getStampConversationId,
+  isAgentCompletionMessage,
   isLaunchAckMessage,
   LAUNCH_ACK_KIND,
   LAUNCH_ACK_TEXT,
   listConversations,
+  postAgentCompletionNotice,
   postLaunchAck,
   readUserInboxMessages,
   recordUserInboxDelivery,
@@ -414,6 +460,7 @@ module.exports = {
   stampConversationId,
   STATUS_ERROR_KIND,
   stripLaunchAcks,
+  stripTransientStatuses,
   supersedeLaunchAcks,
   userInbox,
   writeFileUnique,
