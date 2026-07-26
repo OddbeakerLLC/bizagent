@@ -74,6 +74,33 @@ function writeFileUnique(dir, basename, source) {
   throw new Error(`could not allocate unique delivery filename for ${basename}`);
 }
 
+function normalizeBodyForDedupe(s) {
+  return String(s || '').replace(/\r\n/g, '\n').replace(/\s+$/g, '').trim();
+}
+
+/**
+ * Return true if an identical (from/to + normalized body) message already
+ * exists in the target outbox. Used to guarantee one outbox file per
+ * logical completion event even under re-dispatch or double-call.
+ */
+function hasIdenticalMessage(outboxDir, from, to, body) {
+  const want = normalizeBodyForDedupe(body);
+  for (const f of markdownFiles(outboxDir)) {
+    try {
+      const txt = fs.readFileSync(f, 'utf8');
+      if (frontmatterValue(txt, 'from') !== from) continue;
+      if (frontmatterValue(txt, 'to') !== to) continue;
+      const existingBody = normalizeBodyForDedupe(
+        txt.replace(/^---[\s\S]*?\r?\n---\r?\n?/, '')
+      );
+      if (existingBody === want) return f;
+    } catch (_e) {
+      /* ignore unreadable */
+    }
+  }
+  return null;
+}
+
 /** Write string content uniquely (used when stamping conversation_id on route). */
 function writeContentUnique(dir, basename, content) {
   ensureDir(dir);
@@ -179,7 +206,6 @@ function routeOutboxes(hub) {
     for (const file of markdownFiles(outbox)) {
       const text = fs.readFileSync(file, 'utf8');
       const to = frontmatterValue(text, 'to');
-      const from = frontmatterValue(text, 'from');
       const base = path.basename(file);
 
       if (!to) {
@@ -325,39 +351,9 @@ function outboxFor(hub, fromSlug) {
   return path.join(hub, 'agents', fromSlug, 'outbox');
 }
 
-function normalizeBodyForDedupe(s) {
-  return String(s || '').replace(/\r\n/g, '\n').replace(/\s+$/g, '').trim();
-}
-
-/**
- * Return true if an identical (from/to + normalized body) message already
- * exists in the target outbox. Used to guarantee one outbox file per
- * logical completion event even under re-dispatch or double-call.
- */
-function hasIdenticalMessage(outboxDir, from, to, body) {
-  const want = normalizeBodyForDedupe(body);
-  for (const f of markdownFiles(outboxDir)) {
-    try {
-      const txt = fs.readFileSync(f, 'utf8');
-      if (frontmatterValue(txt, 'from') !== from) continue;
-      if (frontmatterValue(txt, 'to') !== to) continue;
-      const existingBody = normalizeBodyForDedupe(
-        txt.replace(/^---[\s\S]*?\r?\n---\r?\n?/, '')
-      );
-      if (existingBody === want) return f;
-    } catch (_e) {
-      /* ignore unreadable */
-    }
-  }
-  return null;
-}
-
 /**
  * Write a correctly named outbox markdown message with YAML frontmatter.
  * Does not invent conversation_id — only stamps when the caller passes one.
- *
- * Idempotent for identical body+from+to: returns the existing file instead of
- * writing a duplicate (prevents duplicate agent→hub completion notifications).
  *
  * @returns {{ file: string, basename: string }}
  */
