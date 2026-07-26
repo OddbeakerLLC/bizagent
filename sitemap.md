@@ -22,11 +22,12 @@ Open-source BizAgent control plane: Node server, CLI dispatch, web console, mail
 - Stdout is debug-only; safety net promotes log blob only as last resort, else hard in-UI fail
 
 ## Active Work
-- All six control-plane fixes from 2026-07-24 nightly committed on main: control-plane.sh PID discovery (`edf0ea5`), web UI chat sessions (`ce11041`), console interim status (`34b7280`), wrong-channel hardening (`b77d0b9`), write-message helper (`6a69c46`), launch-ack + safety net (`577bb31`).
+- Agent→hub completion notifications complete on main: makeover port (`49651d7`), conversation_id stamping + notice on clean exit (`782b30e`), dedup + "at most one" hardening (`5691073`).
+- Hub→console chat push fix on main: after safety-net / reserved-body / hard-fail, main CP `runTick` pushes via `pushConv` + stamp-based `pushConversationsChangedOnDisk` so WS updates without REST poll. EXIT-hook/hub-daemon child cannot broadcast — stamp path covers them. UI: WS preferred, SSE if WS down, REST poll last-resort / `?poll=1` / `BIZAGENT_UI_POLL=1`.
 - Enterprise layer design lives only in private `bizagent-enterprise`. No OSS implementation yet; recommended first PR = Phase 0 plugin seam.
 - Latency Phase 0–2 complete on main. Phase 3 (warm hub/stream) not started — needs hub approval.
 
 ## Known Issues
 - Live hub public→live drift is manual (sync control-plane/ + scripts/ + CP restart)
-- Launch-ack / safety-net / reserved-reply / profile need CP restart on live hub after public→live sync
+- Launch-ack / safety-net / reserved-reply / profile / chat-push need CP restart on live hub after public→live sync (done for push fix 2026-07-26)
 - Nested `.bizagent/runtime-cwd` scaffolding can deepen if runtime-cwd is re-entered; monitor if disk growth appears

@@ -1,0 +1,9 @@
+{
+  "name": "bizagent-public",
+  "private": true,
+  "version": "0.0.0",
+  "description": "BizAgent OSS control plane and dispatch (public)",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

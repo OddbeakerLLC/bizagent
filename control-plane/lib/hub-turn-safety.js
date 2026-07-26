@@ -329,7 +329,48 @@ function finalizeViaOutbox(hub, conversationId, body, subject, actionTag) {
     conversation_id: conversationId,
     chars: body.length
   });
-  return { action: actionTag, chars: body.length };
+  // Notify main CP process (no-op in EXIT-hook child — that process has empty WS sets).
+  notifyConversationMutated(hub, conversationId);
+  return { action: actionTag, chars: body.length, conversationId, mutated: true };
+}
+
+/**
+ * Optional hook the main control-plane process registers so conversation
+ * mutations (reserved-body, promote, hard-fail, relay) can push WS/SSE.
+ * EXIT-hook child processes never register this — their client sets are empty.
+ */
+let onConversationMutated = null;
+function setOnConversationMutated(fn) {
+  onConversationMutated = typeof fn === 'function' ? fn : null;
+}
+function notifyConversationMutated(hub, conversationId) {
+  if (!conversationId || typeof onConversationMutated !== 'function') return;
+  try { onConversationMutated(hub, conversationId); } catch (_) { /* push must not break safety */ }
+}
+
+/** Actions from ensureHubUserReply / drain that mean the console may need a push. */
+function isPushWorthySafetyAction(action) {
+  if (!action) return false;
+  return action !== 'skip'
+    && action !== 'skip-no-conversation'
+    && action !== 'expired';
+}
+
+/**
+ * Collect conversation ids that should be pushed after a safety drain.
+ * Includes ok-existing: ensureHubUserReply may have just relayed outbox mail.
+ */
+function conversationIdsFromSafetyResults(results) {
+  const ids = [];
+  if (!Array.isArray(results)) return ids;
+  for (const r of results) {
+    if (!r || !isPushWorthySafetyAction(r.action)) continue;
+    const id = r.conversationId
+      || (r.turn && r.turn.conversationId)
+      || '';
+    if (id) ids.push(id);
+  }
+  return [...new Set(ids)];
 }
 
 function stderrSnippet(turn, maxChars = 400) {
@@ -405,7 +446,7 @@ function ensureHubUserReply(hub, turn) {
   if (!getConversation(hub, conversationId)) {
     clearPendingHubTurn(hub, turn);
     clearReservedReplyBody(hub, conversationId);
-    return { action: 'skip-no-conversation' };
+    return { action: 'skip-no-conversation', conversationId };
   }
 
   // Prefer normal path: route any outbox the hub did write, then relay.
@@ -415,13 +456,16 @@ function ensureHubUserReply(hub, turn) {
   if (hubReplySince(hub, conversationId, turn.startedAt)) {
     clearPendingHubTurn(hub, turn);
     clearReservedReplyBody(hub, conversationId);
-    return { action: 'ok-existing' };
+    // Relay (here or prior EXIT hook) may have just written the hub message — push.
+    notifyConversationMutated(hub, conversationId);
+    return { action: 'ok-existing', conversationId, mutated: true };
   }
   // Idempotent: shell EXIT + Node exit + tick drain may all fire.
   if (hubFailureSince(hub, conversationId, turn.startedAt)) {
     clearPendingHubTurn(hub, turn);
     clearReservedReplyBody(hub, conversationId);
-    return { action: 'ok-failed-already' };
+    notifyConversationMutated(hub, conversationId);
+    return { action: 'ok-failed-already', conversationId, mutated: true };
   }
   if (pendingUserOutboxFor(hub, conversationId)) {
     routeOutboxes(hub);
@@ -429,7 +473,8 @@ function ensureHubUserReply(hub, turn) {
     if (hubReplySince(hub, conversationId, turn.startedAt)) {
       clearPendingHubTurn(hub, turn);
       clearReservedReplyBody(hub, conversationId);
-      return { action: 'ok-existing' };
+      notifyConversationMutated(hub, conversationId);
+      return { action: 'ok-existing', conversationId, mutated: true };
     }
   }
 
@@ -439,7 +484,8 @@ function ensureHubUserReply(hub, turn) {
     if (hubReplySince(hub, conversationId, turn.startedAt)) {
       clearPendingHubTurn(hub, turn);
       clearReservedReplyBody(hub, conversationId);
-      return { action: 'ok-existing' };
+      notifyConversationMutated(hub, conversationId);
+      return { action: 'ok-existing', conversationId, mutated: true };
     }
     const result = finalizeViaOutbox(
       hub,
@@ -462,7 +508,8 @@ function ensureHubUserReply(hub, turn) {
     if (hubReplySince(hub, conversationId, turn.startedAt)) {
       clearPendingHubTurn(hub, turn);
       clearReservedReplyBody(hub, conversationId);
-      return { action: 'ok-existing' };
+      notifyConversationMutated(hub, conversationId);
+      return { action: 'ok-existing', conversationId, mutated: true };
     }
     const result = finalizeViaOutbox(
       hub,
@@ -480,7 +527,8 @@ function ensureHubUserReply(hub, turn) {
     || hubFailureSince(hub, conversationId, turn.startedAt)) {
     clearPendingHubTurn(hub, turn);
     clearReservedReplyBody(hub, conversationId);
-    return { action: 'ok-existing' };
+    notifyConversationMutated(hub, conversationId);
+    return { action: 'ok-existing', conversationId, mutated: true };
   }
 
   supersedeLaunchAcks(hub, conversationId);
@@ -498,7 +546,8 @@ function ensureHubUserReply(hub, turn) {
     conversation_id: conversationId,
     reason: 'no_reply_or_outbox'
   });
-  return { action: 'failed' };
+  notifyConversationMutated(hub, conversationId);
+  return { action: 'failed', conversationId, mutated: true };
 }
 
 /**
@@ -560,6 +609,7 @@ module.exports = {
   DEFAULT_MAX_BLOB_CHARS,
   clearPendingHubTurn,
   clearReservedReplyBody,
+  conversationIdsFromSafetyResults,
   drainPendingHubTurns,
   ensureHubUserReply,
   extractFinalAssistantBlob,
@@ -567,9 +617,11 @@ module.exports = {
   hubReplySince,
   isNoiseLine,
   isProcessNarrationBlock,
+  isPushWorthySafetyAction,
   LAUNCH_ACK_KIND,
   MIN_BLOB_CHARS,
   MIN_RESERVED_BODY_CHARS,
+  notifyConversationMutated,
   onHubCliExit,
   pendingHubTurnsFile,
   pendingRepliesDir,
@@ -580,5 +632,6 @@ module.exports = {
   readReservedReplyBody,
   recordPendingHubTurn,
   reservedReplyBodyPath,
+  setOnConversationMutated,
   writePendingHubTurns,
 };

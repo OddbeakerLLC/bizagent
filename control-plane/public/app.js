@@ -7,6 +7,31 @@ let lastAgentsJson = '';
 let titleSet = false;
 /** Persisted console display name (never Operator/CEO). */
 let displayName = '';
+/** Event-driven connections. Prefer WebSocket feeds (subscribe model). SSE kept as fallback. */
+let stateSource = null;
+let convSource = null;
+let ws = null;
+let wsReady = false;
+let subscribedAgents = false;
+let subscribedConv = null; // conv id we are currently subscribed to over WS
+
+// UI polling gate for push test. Polling for /api/state and conversation history is OFF by default.
+// WS subscribe/push is the preferred and only driver when this flag is off (default).
+// Enable (re-enable polling): localStorage.setItem('BIZAGENT_UI_POLL','1'); location.reload()
+// Or one-shot enable: add ?poll=1 to the URL.
+// To force OFF again: localStorage.removeItem('BIZAGENT_UI_POLL'); location.reload()
+// Safe accessors for non-browser test environments.
+const __loc = (typeof location !== 'undefined' ? location : { search: '', protocol: 'http:' });
+const __search = (typeof URLSearchParams !== 'undefined' ? new URLSearchParams(__loc.search || '') : { get: () => null });
+const __storage = (typeof localStorage !== 'undefined' ? localStorage : { getItem: () => null });
+
+const UI_POLL_ENABLED =
+  __search.get('poll') === '1' ||
+  __storage.getItem('BIZAGENT_UI_POLL') === '1';
+
+// Last-resort polling (never bricks chat). Fires only when NO live push channel exists
+// (no WS and no SSE). UI_POLL_ENABLED forces polling even alongside push (for verification).
+const FORCE_POLL = UI_POLL_ENABLED;
 
 function conversationPollStamp(conv) {
   const messages = conv && Array.isArray(conv.messages) ? conv.messages : [];
@@ -456,6 +481,8 @@ async function loadConversations() {
 
 async function loadConversation(id) {
   currentConversation = id;
+  // Prefer WS subscribe for conversation feed; falls back to SSE inside subscribeConversation.
+  subscribeConversation(id);
   const conv = await api(`/api/conversations/${encodeURIComponent(id)}`);
   const messages = conv.messages || [];
   lastConversationStamp = conversationPollStamp(conv);
@@ -464,19 +491,28 @@ async function loadConversation(id) {
 
 async function refreshStatus() {
   const state = await api('/api/state');
-  if (!titleSet && state.org) {
+  applyState(state);
+}
+
+function applyState(state) {
+  if (!titleSet && state && state.org) {
     document.title = `BizAgent — ${state.org}`;
     titleSet = true;
   }
-  const json = JSON.stringify(state.agents);
+  const json = state ? JSON.stringify(state.agents) : '';
   if (json === lastAgentsJson) return;
   lastAgentsJson = json;
-  renderAgents(state.agents);
+  if (state) renderAgents(state.agents);
 }
 
 async function pollConversation() {
   if (!currentConversation) return;
   const conv = await api(`/api/conversations/${encodeURIComponent(currentConversation)}`);
+  applyConversation(currentConversation, conv);
+}
+
+function applyConversation(id, conv) {
+  if (!id || !conv || id !== currentConversation) return;
   const stamp = conversationPollStamp(conv);
   // Same length is not "unchanged": superseding launch-ack with a hub reply
   // keeps messages.length stable while content changes (stuck interim bug).
@@ -526,7 +562,13 @@ async function boot() {
     const named = await ensureDisplayName();
     setAuthenticated(true, displayName ? `Signed in as ${displayName}` : 'Signed in');
     if (!named) return;
+    // Primary: open WS first. Wait for ready (or short timeout) before subscribing.
+    // This prevents the race that opens SSE fallbacks while WS is still connecting.
+    openWebSocket();
+    await waitForWsReadyOrTimeout(1200);
     await loadConversations();
+    // Subscribe after WS has had a chance; subscribe* will close SSE if WS is live.
+    subscribeAgents();
   } catch (_err) {
     if (!sessionActive && !needsSetup) {
       setAuthenticated(false, 'Login required');
@@ -624,10 +666,13 @@ async function refreshObservability() {
   }
 }
 
-// Add observability tab to navigation (safe for test environment)
-const originalBoot = boot || function() {};
-boot = function() {
-  if (typeof originalBoot === 'function') originalBoot();
+// Add observability tab to navigation (safe for test environment).
+// Must preserve ordering: do not call originalBoot without await; it is async.
+const originalBoot = boot || (async function() {});
+boot = async function() {
+  if (typeof originalBoot === 'function') {
+    await originalBoot();
+  }
 
   // Only run DOM code in real browser
   if (typeof document === 'undefined') return;
@@ -651,6 +696,136 @@ boot = function() {
   }
 };
 
-setInterval(() => refreshStatus().catch(() => {}), 2000);
-setInterval(() => pollConversation().catch(() => {}), 2000);
+// --- Single-channel helpers ---
+function closeAllSse() {
+  try { if (stateSource) { stateSource.close(); } } catch (_) {}
+  try { if (convSource) { convSource.close(); } } catch (_) {}
+  stateSource = null;
+  convSource = null;
+}
+
+function isWsLive() {
+  return !!(ws && wsReady && (ws.readyState === 1));
+}
+
+// Wait up to ms for WS to become ready. Resolves true if ready, false on timeout.
+function waitForWsReadyOrTimeout(ms) {
+  return new Promise((resolve) => {
+    if (isWsLive()) { resolve(true); return; }
+    const t = setTimeout(() => {
+      resolve(isWsLive());
+    }, Math.max(200, Number(ms) || 1200));
+    const check = () => {
+      if (isWsLive()) { clearTimeout(t); resolve(true); }
+    };
+    // Poll readiness briefly; onopen will also set wsReady.
+    const iv = setInterval(() => {
+      if (isWsLive()) { clearInterval(iv); clearTimeout(t); resolve(true); }
+    }, 50);
+    // Safety: if WS never opens we resolve false after timeout above.
+    setTimeout(() => { clearInterval(iv); }, Math.max(300, ms + 100));
+  });
+}
+
+function subscribeOverWs() {
+  if (!isWsLive()) return;
+  try {
+    if (subscribedAgents) {
+      ws.send(JSON.stringify({ action: 'subscribe', feed: 'agents' }));
+    }
+    if (subscribedConv) {
+      ws.send(JSON.stringify({ action: 'subscribe', feed: `conversation:${subscribedConv}` }));
+    }
+  } catch (_) {}
+}
+
+// --- WebSocket feeds (preferred subscribe model). Snapshots on subscribe + deltas.
+function openWebSocket() {
+  try { if (ws && (ws.readyState === 0 || ws.readyState === 1)) return; } catch (_) {}
+  const proto = (location.protocol === 'https:') ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.host}/ws`;
+  try { ws = new WebSocket(url); } catch (_) { ws = null; return; }
+  ws.onopen = () => {
+    wsReady = true;
+    // WS is live: enforce single channel — close any SSE and stay on WS.
+    closeAllSse();
+    subscribeOverWs();
+  };
+  ws.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    const { feed, snapshot, id, conv } = msg || {};
+    if (feed === 'agents' && snapshot) applyState(snapshot);
+    else if (feed && feed.startsWith('conversation:') && id && conv) applyConversation(id, conv);
+  };
+  ws.onclose = () => {
+    wsReady = false;
+    // On reconnect attempt, fall back to SSE only if WS never recovers.
+    setTimeout(() => {
+      if (!wsReady) {
+        // Only open SSE if still no WS; subscribe* paths will prefer WS.
+        if (subscribedAgents && !stateSource) openStateStream();
+        if (subscribedConv && !convSource) openConvStream(subscribedConv);
+        openWebSocket();
+      }
+    }, 1500);
+  };
+  ws.onerror = () => {};
+}
+
+function subscribeAgents() {
+  subscribedAgents = true;
+  if (isWsLive()) {
+    closeAllSse();
+    try { ws.send(JSON.stringify({ action: 'subscribe', feed: 'agents' })); } catch (_) {}
+  } else {
+    // WS not ready yet — defer; boot waits briefly and will close SSE on WS ready.
+    openStateStream();
+  }
+}
+
+function subscribeConversation(id) {
+  if (!id || subscribedConv === id) return;
+  if (subscribedConv && isWsLive()) {
+    try { ws.send(JSON.stringify({ action: 'unsubscribe', feed: `conversation:${subscribedConv}` })); } catch (_) {}
+  }
+  subscribedConv = id;
+  if (isWsLive()) {
+    closeAllSse();
+    try { ws.send(JSON.stringify({ action: 'subscribe', feed: `conversation:${id}` })); } catch (_) {}
+  } else {
+    openConvStream(id);
+  }
+}
+
+// --- SSE fallbacks (only if WS unavailable) ---
+function openStateStream() {
+  // Never open SSE if a live WS is present.
+  if (isWsLive()) { closeAllSse(); return; }
+  try { if (stateSource) stateSource.close(); } catch (_) {}
+  stateSource = new EventSource('/api/state/stream');
+  stateSource.onmessage = (ev) => { try { applyState(JSON.parse(ev.data)); } catch (_) {} };
+  stateSource.onerror = () => {};
+}
+
+function openConvStream(id) {
+  if (!id) return;
+  if (isWsLive()) { closeAllSse(); return; }
+  try { if (convSource) convSource.close(); } catch (_) {}
+  convSource = new EventSource(`/api/conversations/${encodeURIComponent(id)}/stream`);
+  convSource.onmessage = (ev) => { try { const p = JSON.parse(ev.data); if (p && p.id && p.conv) applyConversation(p.id, p.conv); } catch (_) {} };
+  convSource.onerror = () => {};
+}
+
+// Last-resort REST poll: ONLY when no live push channel exists (WS or SSE).
+// When FORCE_POLL (UI_POLL_ENABLED or ?poll=1), polling runs regardless (operator verification).
+// Default: poll only as true last resort so a partial push path never bricks chat.
+setInterval(() => {
+  const noPush = !wsReady && !stateSource && !convSource;
+  if (FORCE_POLL || noPush) refreshStatus().catch(() => {});
+}, 2000);
+setInterval(() => {
+  const noPush = !wsReady && !convSource && currentConversation;
+  if (FORCE_POLL || noPush) pollConversation().catch(() => {});
+}, 2000);
+
 boot();

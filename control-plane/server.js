@@ -1,10 +1,64 @@
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+
+// Lazy WS (installed as dep for feed server). Fallback if missing is graceful (SSE path remains).
+let WebSocket;
+try { WebSocket = require("ws"); } catch (_) { WebSocket = null; }
+
+// --- WebSocket feeds (preferred over SSE). Subscribe model with per-session scoping. ---
+// OSS single-operator: full visibility for any valid session.
+// Enterprise hook: filter publish by user/roles; conversation visibility = ownership or explicit grant.
+const wsAgentsClients = new Set(); // Set<WebSocket>
+const wsConvClients = new Map(); // convId -> Set<WebSocket>
+const wsClientMeta = new WeakMap(); // ws -> { username, subscribed: Set<string> }
+
+function getClientMeta(ws) {
+  let m = wsClientMeta.get(ws);
+  if (!m) { m = { username: null, subscribed: new Set() }; wsClientMeta.set(ws, m); }
+  return m;
+}
+
+function addWsAgentsClient(ws) { wsAgentsClients.add(ws); }
+function removeWsAgentsClient(ws) { wsAgentsClients.delete(ws); }
+
+function addWsConvClient(id, ws) {
+  if (!wsConvClients.has(id)) wsConvClients.set(id, new Set());
+  wsConvClients.get(id).add(ws);
+}
+function removeWsConvClient(id, ws) {
+  const s = wsConvClients.get(id);
+  if (!s) return;
+  s.delete(ws);
+  if (s.size === 0) wsConvClients.delete(id);
+}
+
+function wsSend(ws, obj) {
+  try { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); } catch (_) {}
+}
+
+function wsBroadcastAgents(snapshot) {
+  for (const ws of wsAgentsClients) {
+    // OSS: any authenticated session sees full board.
+    // Enterprise: filter here by meta.username + roles/seats (documented below).
+    wsSend(ws, { feed: 'agents', snapshot });
+  }
+}
+
+function wsBroadcastConv(id, conv) {
+  const set = wsConvClients.get(id);
+  if (!set || set.size === 0) return;
+  for (const ws of set) {
+    // Conversation visibility: currently any valid session may subscribe to any existing conv (OSS sole-op).
+    // Enterprise: check conv ownership / ACL against meta.username before including this client.
+    wsSend(ws, { feed: `conversation:${id}`, id, conv });
+  }
+}
 const {
   agentsFromRegistry,
   loadHubEnv,
   loadRuntimeConfig,
+  readJson,
   refreshRuntimeConfig,
 } = require("./lib/config");
 const {
@@ -17,6 +71,7 @@ const {
   verifyLogin,
 } = require("./lib/auth");
 const {
+  activeConversationFile,
   appendMessage,
   conversationNameFromContent,
   createConversation,
@@ -33,12 +88,52 @@ const {
   drainHubTurnSafety,
   isAgentActive,
 } = require("./lib/dispatcher");
+const {
+  conversationIdsFromSafetyResults,
+  setOnConversationMutated,
+} = require("./lib/hub-turn-safety");
 const { ensureHubRuntimePrompt } = require("./lib/hub-memory");
 const { agentMailStatus, routeOutboxes } = require("./lib/mail");
 const { getProfile, setProfile } = require("./lib/profile");
 const { logEvent, logHubTurn, logError, appendLog } = require("./lib/log");
 
 const PUBLIC_DIR = path.join(__dirname, "public");
+
+// --- SSE broadcaster (event-driven UI, replaces 2s polling) ---
+const stateClients = new Set();
+const convClients = new Map(); // id -> Set(res)
+
+function addStateClient(res) {
+  stateClients.add(res);
+}
+function removeStateClient(res) {
+  stateClients.delete(res);
+}
+function broadcastState(data) {
+  const payload = `data: ${JSON.stringify(data)}\n\n`;
+  for (const c of stateClients) {
+    try { c.write(payload); } catch (_) { /* client gone */ }
+  }
+}
+
+function addConvClient(id, res) {
+  if (!convClients.has(id)) convClients.set(id, new Set());
+  convClients.get(id).add(res);
+}
+function removeConvClient(id, res) {
+  const s = convClients.get(id);
+  if (!s) return;
+  s.delete(res);
+  if (s.size === 0) convClients.delete(id);
+}
+function broadcastConv(id, conv) {
+  const s = convClients.get(id);
+  if (!s || s.size === 0) return;
+  const payload = `data: ${JSON.stringify({ id, conv })}\n\n`;
+  for (const c of s) {
+    try { c.write(payload); } catch (_) { /* client gone */ }
+  }
+}
 
 function send(res, status, body, headers = {}) {
   const payload = typeof body === "string" ? body : JSON.stringify(body);
@@ -175,7 +270,102 @@ function getAgentDetail(hub, slug) {
 }
 
 function syncUserInbox(config) {
-  return readUserInboxMessages(config.hub);
+  // Returns numeric relayed count. Also push the specific convs that were relayed
+  // (prefer updated conv id over only the active file).
+  const inbox = path.join(config.hub, 'user', 'inbox');
+  let preIds = [];
+  try {
+    preIds = fs.readdirSync(inbox)
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => {
+        try {
+          const t = fs.readFileSync(path.join(inbox, f), 'utf8');
+          const m = t.match(/^conversation_id:\s*(\S+)/m);
+          return m ? m[1] : null;
+        } catch (_) { return null; }
+      })
+      .filter(Boolean);
+  } catch (_) {}
+  const result = readUserInboxMessages(config.hub);
+  const count = typeof result === 'number' ? result : Number((result && result.relayed) || 0);
+  const relayedIds = typeof result === 'number' ? [] : ((result && result.ids) || []);
+  const ids = [...new Set([...preIds, ...relayedIds])];
+  for (const id of ids) {
+    try { pushConv(config, id); } catch (_) {}
+  }
+  // Also keep active-conv push as a belt-and-suspenders (harmless if already pushed).
+  if (count > 0) { try { pushActiveConv(config); } catch (_) {} }
+  return count;
+}
+
+// Last pushed conversation.updated_at per id — belt-and-suspenders when EXIT-hook
+// child process mutates disk without access to this process's WS/SSE client sets.
+const lastPushedConvStamp = new Map();
+
+function rememberPushedConv(id, conv) {
+  if (id && conv && conv.updated_at) lastPushedConvStamp.set(id, conv.updated_at);
+}
+
+// Broadcast helpers used after mutations to push to SSE + WS clients.
+function pushState(config) {
+  try {
+    const snap = currentState(config);
+    broadcastState(snap);
+    wsBroadcastAgents(snap);
+  } catch (_) {}
+}
+function pushActiveConv(config) {
+  try {
+    const active = readJson(activeConversationFile(config.hub), null);
+    if (active && active.id) {
+      const conv = getConversation(config.hub, active.id);
+      if (conv) {
+        broadcastConv(active.id, conv);
+        wsBroadcastConv(active.id, conv);
+        rememberPushedConv(active.id, conv);
+      }
+    }
+  } catch (_) {}
+}
+
+// Push a specific conversation (preferred when we know exactly which one mutated).
+function pushConv(config, id) {
+  if (!id) return;
+  try {
+    const conv = getConversation(config.hub, id);
+    if (conv) {
+      broadcastConv(id, conv);
+      wsBroadcastConv(id, conv);
+      rememberPushedConv(id, conv);
+    }
+  } catch (_) {}
+}
+
+/**
+ * If any subscribed (or active) conversation file advanced its updated_at since
+ * the last push, broadcast it. Covers hub-turn mutations done in a separate
+ * Node process (shell EXIT trap) that cannot see wsConvClients / SSE sets.
+ */
+function pushConversationsChangedOnDisk(config) {
+  const ids = new Set([...wsConvClients.keys(), ...convClients.keys()]);
+  try {
+    const active = readJson(activeConversationFile(config.hub), null);
+    if (active && active.id) ids.add(active.id);
+  } catch (_) {}
+  let pushed = 0;
+  for (const id of ids) {
+    try {
+      const conv = getConversation(config.hub, id);
+      if (!conv) continue;
+      const stamp = conv.updated_at || '';
+      if (lastPushedConvStamp.get(id) === stamp) continue;
+      broadcastConv(id, conv);
+      wsBroadcastConv(id, conv);
+      rememberPushedConv(id, conv);
+      pushed += 1;
+    } catch (_) {}
+  }
+  return pushed;
 }
 
 async function handleApi(config, req, res) {
@@ -183,6 +373,10 @@ async function handleApi(config, req, res) {
   // settings, CLI command/flags) without requiring a control-plane restart.
   refreshRuntimeConfig(config);
   const url = new URL(req.url, `http://${req.headers.host}`);
+
+  // Local helpers for post-mutation push (event-driven UI)
+  const didChangeState = () => { try { pushState(config); } catch (_) {} };
+  const didChangeActiveConv = () => { try { pushActiveConv(config); } catch (_) {} };
 
   if (url.pathname === "/api/setup" && req.method === "POST") {
     if (hasAuth(config.hub))
@@ -224,8 +418,22 @@ async function handleApi(config, req, res) {
   }
 
   if (url.pathname === "/api/state" && req.method === "GET") {
-    // Silent poll — no log (fires every ~2s from the UI).
+    // Silent poll — still supported for initial load / fallback.
     return send(res, 200, currentState(config));
+  }
+
+  if (url.pathname === "/api/state/stream" && req.method === "GET") {
+    // SSE push for agent state / lights. Replaces 2s poll.
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+    // send a snapshot immediately
+    try { res.write(`data: ${JSON.stringify(currentState(config))}\n\n`); } catch (_) {}
+    addStateClient(res);
+    req.on("close", () => removeStateClient(res));
+    return null; // keep open
   }
 
   if (url.pathname === "/api/observability" && req.method === "GET") {
@@ -299,6 +507,27 @@ async function handleApi(config, req, res) {
     return send(res, 200, conv);
   }
 
+  // SSE per-conversation stream (replaces 2s pollConversation)
+  const convStreamMatch = url.pathname.match(
+    /^\/api\/conversations\/([^/]+)\/stream$/,
+  );
+  if (convStreamMatch && req.method === "GET") {
+    const id = decodeURIComponent(convStreamMatch[1]);
+    const conv = getConversation(config.hub, id);
+    if (!conv) return send(res, 404, { error: "conversation not found" });
+    setActiveConversation(config.hub, id);
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+    try { res.write(`data: ${JSON.stringify({ id, conv })}\n\n`); } catch (_) {}
+    addConvClient(id, res);
+    rememberPushedConv(id, conv);
+    req.on("close", () => removeConvClient(id, res));
+    return null;
+  }
+
   if (conversationMatch && req.method === "DELETE") {
     const id = decodeURIComponent(conversationMatch[1]);
     if (!getConversation(config.hub, id)) {
@@ -307,6 +536,7 @@ async function handleApi(config, req, res) {
     if (!deleteConversation(config.hub, id)) {
       return send(res, 500, { error: "could not delete conversation" });
     }
+    didChangeState();
     return send(res, 200, { ok: true, id });
   }
 
@@ -331,6 +561,10 @@ async function handleApi(config, req, res) {
       duration_ms: Math.round((Date.now() - start) * 100) / 100
     });
 
+    didChangeState();
+    // Push the specific conversation so the sender sees its own message promptly.
+    try { broadcastConv(id, conv); } catch (_) {}
+    try { wsBroadcastConv(id, conv); } catch (_) {}
     return send(res, 200, conv);
   }
 
@@ -341,17 +575,28 @@ function runTick(config) {
   const start = Date.now();
   refreshRuntimeConfig(config);
   const routed = routeOutboxes(config.hub);
-  syncUserInbox(config);
+  const relayed = syncUserInbox(config); // numeric for hadWork (compat)
   // Backup: if hub CLI exited without the shell safety hook, finish the turn.
-  drainHubTurnSafety(config);
+  // Safety may route+relay or hard-fail AFTER syncUserInbox — push those ids next.
+  const safetyResults = drainHubTurnSafety(config) || [];
+  const safetyIds = conversationIdsFromSafetyResults(safetyResults);
+  for (const id of safetyIds) {
+    try { pushConv(config, id); } catch (_) {}
+  }
   const dispatched = dispatchPendingAgents(config) || {};
   const launched = Number(dispatched.launched || 0);
+  // Launch-ack (and any other same-tick conv mutation) — push by disk stamp.
+  // Also covers EXIT-hook child process that mutated conv JSON without broadcast.
+  const stampPushed = pushConversationsChangedOnDisk(config);
 
   const hadWork =
     (routed.delivered || 0) > 0 ||
     (routed.quarantined || 0) > 0 ||
     (routed.warnings || 0) > 0 ||
-    launched > 0;
+    relayed > 0 ||
+    launched > 0 ||
+    safetyIds.length > 0 ||
+    stampPushed > 0;
 
   if (hadWork) {
     logEvent(config.hub, {
@@ -361,13 +606,17 @@ function runTick(config) {
       quarantined: routed.quarantined || 0,
       warnings: routed.warnings || 0,
       launched,
+      safety_pushed: safetyIds.length,
+      stamp_pushed: stampPushed,
       poll_seconds: config.pollSeconds,
     });
+    // Push agent board when lights or agents changed.
+    pushState(config);
   }
 }
 
 function createServer(config) {
-  return http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
     if (req.url.startsWith("/api/")) {
       handleApi(config, req, res).catch((err) =>
         send(res, 500, { error: err.message }),
@@ -376,6 +625,92 @@ function createServer(config) {
     }
     if (!serveStatic(req, res)) send(res, 404, "not found");
   });
+
+  // Attach WebSocket feeds (preferred subscribe model) if 'ws' is available.
+  // Auth: same bizagent_session cookie as REST. OSS: full visibility for the sole session.
+  // Enterprise: per-user scoping on subscribe + publish (see comments below).
+  if (WebSocket && WebSocket.WebSocketServer) {
+    const wss = new WebSocket.WebSocketServer({ noServer: true });
+
+    server.on('upgrade', (req, socket, head) => {
+      // Only accept the feeds endpoint; other upgrades (if any) are ignored.
+      const u = new URL(req.url, `http://${req.headers.host}`);
+      if (u.pathname !== '/ws') {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      // Cookie/session auth identical to requireAuth (no body parsing here).
+      if (!hasAuth(config.hub)) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      const cookies = parseCookies(req.headers.cookie);
+      const session = getSession(config.hub, cookies.bizagent_session);
+      if (!session) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      const username = session.username || 'operator';
+
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        const meta = getClientMeta(ws);
+        meta.username = username;
+
+        ws.on('message', (data) => {
+          let msg;
+          try { msg = JSON.parse(String(data)); } catch (_) { return; }
+          const { action, feed } = msg || {};
+          if (action === 'subscribe' && typeof feed === 'string') {
+            if (feed === 'agents') {
+              meta.subscribed.add('agents');
+              addWsAgentsClient(ws);
+              // Immediate snapshot on subscribe (and reconnect)
+              try { wsSend(ws, { feed: 'agents', snapshot: currentState(config) }); } catch (_) {}
+            } else if (feed.startsWith('conversation:')) {
+              const id = feed.slice('conversation:'.length);
+              // Conversation visibility gate (OSS = any existing conv; Enterprise = ownership/ACL).
+              // We validate the conv exists for this hub; per-user scoping is a documented hook.
+              const conv = getConversation(config.hub, id);
+              if (!conv) {
+                wsSend(ws, { feed, error: 'not found' });
+                return;
+              }
+              meta.subscribed.add(feed);
+              addWsConvClient(id, ws);
+              try { wsSend(ws, { feed, id, conv }); } catch (_) {}
+              // Align stamp so the next tick only pushes on real disk changes.
+              rememberPushedConv(id, conv);
+            }
+          } else if (action === 'unsubscribe' && typeof feed === 'string') {
+            meta.subscribed.delete(feed);
+            if (feed === 'agents') removeWsAgentsClient(ws);
+            else if (feed.startsWith('conversation:')) {
+              const id = feed.slice('conversation:'.length);
+              removeWsConvClient(id, ws);
+            }
+          }
+        });
+
+        ws.on('close', () => {
+          removeWsAgentsClient(ws);
+          // Remove from all conv rooms
+          for (const [id, set] of wsConvClients.entries()) {
+            set.delete(ws);
+            if (set.size === 0) wsConvClients.delete(id);
+          }
+          wsClientMeta.delete(ws);
+        });
+
+        // Welcome / ready (client still needs to subscribe)
+        wsSend(ws, { feed: 'ready', ok: true });
+      });
+    });
+  }
+
+  return server;
 }
 
 function pidFilePath(hub) {
@@ -408,6 +743,11 @@ function start(hubInput) {
   const config = loadRuntimeConfig(hubInput);
   const server = createServer(config);
   ensureHubRuntimePrompt(config.hub);
+  // Main-process push hook: safety net / spawn exit handler mutations broadcast
+  // immediately. EXIT-trap child processes do not register this (empty client sets).
+  setOnConversationMutated((_hub, id) => {
+    try { pushConv(config, id); } catch (_) {}
+  });
   // Own the pidfile for the lifetime of this process (systemd, nohup, or bare node).
   writePidFile(config.hub);
   const clear = () => clearPidFile(config.hub);
@@ -452,7 +792,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  conversationIdsFromSafetyResults,
   createServer,
+  pushConv,
+  pushConversationsChangedOnDisk,
   runTick,
   start,
 };

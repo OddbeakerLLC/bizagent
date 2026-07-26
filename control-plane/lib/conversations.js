@@ -198,6 +198,16 @@ function postLaunchAck(hub, conversationId, text = LAUNCH_ACK_TEXT) {
   return saveConversation(hub, conv);
 }
 
+/** Drop any launch-ack status lines now that a real reply (or failure) is in. */
+function supersedeLaunchAcks(hub, conversationId) {
+  if (!conversationId) return null;
+  const conv = getConversation(hub, conversationId);
+  if (!conv) return null;
+  const removed = stripLaunchAcks(conv);
+  if (removed === 0) return conv;
+  return saveConversation(hub, conv);
+}
+
 /**
  * Post a CP-owned one-liner when a product agent exits cleanly with hub-bound mail.
  * Strongly idempotent: never append a second notice for the same slug in this
@@ -224,16 +234,6 @@ function postAgentCompletionNotice(hub, conversationId, slug) {
     content: text,
     created_at: new Date().toISOString(),
   });
-  return saveConversation(hub, conv);
-}
-
-/** Drop any launch-ack status lines now that a real reply (or failure) is in. */
-function supersedeLaunchAcks(hub, conversationId) {
-  if (!conversationId) return null;
-  const conv = getConversation(hub, conversationId);
-  if (!conv) return null;
-  const removed = stripLaunchAcks(conv);
-  if (removed === 0) return conv;
   return saveConversation(hub, conv);
 }
 
@@ -365,11 +365,49 @@ function archiveUserInboxMessage(hub, file) {
   fs.renameSync(file, path.join(archive, path.basename(file)));
 }
 
+function normalizeForSimilarity(s) {
+  return String(s || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/** Very cheap near-dupe check: normalized body similarity + short window. */
+function isNearDuplicateHubReply(messages, body, windowMs = 5 * 60 * 1000) {
+  if (!Array.isArray(messages) || messages.length === 0) return false;
+  const want = normalizeForSimilarity(body);
+  const now = Date.now();
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (!m || m.role !== 'hub') continue;
+    const ts = Date.parse(m.created_at || 0);
+    if (Number.isFinite(ts) && now - ts > windowMs) break;
+    const existing = normalizeForSimilarity(m.content);
+    if (!existing) continue;
+    // High overlap or exact after normalization
+    if (existing === want) return true;
+    const len = Math.min(existing.length, want.length);
+    if (len > 20) {
+      let same = 0;
+      for (let j = 0; j < len; j += 1) if (existing[j] === want[j]) same += 1;
+      if (same / len >= 0.92) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Relay hub→user inbox mail into conversation JSON.
+ * Returns { relayed, ids } so the main CP process can push those convs over WS/SSE.
+ * (Numeric-only return was insufficient: callers need the conversation ids.)
+ */
 function readUserInboxMessages(hub) {
   const inbox = userInbox(hub);
   ensureDir(inbox);
   ensureDir(path.join(inbox, 'archive'));
   let relayed = 0;
+  const ids = [];
   for (const name of fs.readdirSync(inbox).filter((entry) => entry.endsWith('.md')).sort()) {
     const file = path.join(inbox, name);
     const text = fs.readFileSync(file, 'utf8');
@@ -379,11 +417,19 @@ function readUserInboxMessages(hub) {
       archiveUserInboxMessage(hub, file);
       continue;
     }
-    appendMessage(hub, conversationId, 'hub', markdownBody(text));
+    const body = markdownBody(text);
+    const conv = getConversation(hub, conversationId);
+    if (conv && isNearDuplicateHubReply(conv.messages, body)) {
+      // Near-duplicate within window — drop instead of appending a second paraphrased reply.
+      archiveUserInboxMessage(hub, file);
+      continue;
+    }
+    appendMessage(hub, conversationId, 'hub', body);
     archiveUserInboxMessage(hub, file);
     relayed += 1;
+    ids.push(conversationId);
   }
-  return relayed;
+  return { relayed, ids: [...new Set(ids)] };
 }
 
 
@@ -438,6 +484,7 @@ module.exports = {
   ACTIVE_CONVERSATION_MAX_AGE_MS,
   AGENT_COMPLETION_KIND,
   AGENT_COMPLETION_TEXT,
+  activeConversationFile,
   appendMessage,
   assertValidConversationId,
   conversationNameFromContent,
@@ -450,6 +497,11 @@ module.exports = {
   getStampConversationId,
   isAgentCompletionMessage,
   isLaunchAckMessage,
+  isNearDuplicateHubReply: (conv, body) => {
+    // Export helper for tests (internal conv.messages expected)
+    const msgs = (conv && Array.isArray(conv.messages)) ? conv.messages : [];
+    return isNearDuplicateHubReply(msgs, body);
+  },
   LAUNCH_ACK_KIND,
   LAUNCH_ACK_TEXT,
   listConversations,
