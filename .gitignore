@@ -1,7 +1,6 @@
-# Detached from the public bizagent framework repo (see AGENT.md § 2,
-# "First launch"). This is now a private, local-only operational hub, so
-# registry.json / dispatch prompts / project sitemaps are tracked here —
-# never re-add them to .gitignore or this hub loses its own history.
+# PUBLIC framework repo — never commit secrets or operator-specific data.
+# Operational hubs may force-add registry.json for a *private* remote only.
+# Never push operator registry/agents/mail to the public GitHub remote.
 *.env
 .env
 *.key
@@ -13,14 +12,36 @@
 *.log
 *.lock
 logs/
-.bizagent/
 
-# Dispatcher runtime artifacts (per-agent lock dirs, generated dispatch
-# prompts, CLI choice) — mechanically regenerated from registry.json + the
-# templates, so they don't need their own git history.
+# Runtime state under .bizagent (auth, sessions, pids, sockets, conversations).
+# Keep the committed env template trackable.
+.bizagent/*
+!.bizagent/env.example
+
+# Operator-generated source of truth (created by interview / install seed).
+# Schema lives in registry.example.json only.
+registry.json
+
+# CLI choice + resolved multi-CLI map (install writes these; examples stay tracked)
+.cli
+cli.json
+
+# Dispatcher runtime artifacts
 agents/*/.lock/
 agents/*/.dispatch.md
-.cli
 
-# Operator-specific leak markers for publish-check (holds your private strings)
+# Hub operational mailboxes and knowledge (never public)
+inbox/
+outbox/
+user/
+journal/
+company/
+knowledge-stack/
+agents/
+
+# Operator/product journals and sitemaps (ops hub only)
+.agent/
+sitemap.md
+
+# Operator-specific leak markers for publish-check
 scripts/publish-check.patterns

@@ -102,6 +102,16 @@ The server does not replace the hub filesystem with a database:
   append-hub-turn` remains available for manual repair/imports.
 - Login config and salted password hash live in `.bizagent/auth.json`.
 - Sessions live in `.bizagent/sessions.json` and are deleted on logout.
+- **Enterprise plugin seams (Phase 0):** optional multi-user layer. When
+  `settings.enterprise` is absent or `enabled` is not strictly `true`, the hub
+  is pure single-operator OSS. When enabled, `control-plane/lib/enterprise-plugin.js`
+  resolves `BIZAGENT_ENTERPRISE_PATH` → `package_path` → `package` name, calls
+  `register(api)`, and **soft-fails to OSS** if the package is missing or throws.
+  The injected `api` exposes `hub`, `registry`, `appDir`, `registerRoute`,
+  `getSession`, `requireAuth`, `log`, and a `hooks` map
+  (`authProvider`, `resolveUserInbox`, `filterAgents`, `getHubSessionPath`) for
+  Phase 1+ packages. Design lives in the private `bizagent-enterprise` repo;
+  public OSS never hard-depends on that package.
 - Named conversation history lives as JSON files under `.bizagent/conversations/`.
   That UI history is bounded: older raw turns are compressed into a JSON summary
   and the hub runtime reads the markdown session file, not an unbounded transcript.
@@ -133,9 +143,13 @@ Lease and caps are configurable via env (`BIZAGENT_*`) or
 `settings.dispatch.{poll_seconds,max_concurrency,hub_slots,agent_slots,lock_lease_secs}`
 in `registry.json`.
 
-Permission mode remains operator-controlled through `.cli` and environment
-variables. The control plane launches the configured CLI command with
-`CLI_PROMPT_FLAG` and `CLI_EXTRA_ARGS`; it does not invent a permission flag.
+CLI selection is **registry + `cli.json`**:
+
+- `cli.json` — catalog of engines (executable, `promptFlag`, headless extras).
+- `registry.json` `settings.hub_agent.cliName` and product `cliName` — which
+  catalog entry to launch.
+- Legacy root `.cli` is **migration-only**: if present and hub `cliName` is
+  empty, its `CLI_CMD` supplies the hub name. Flags are never read from `.cli`.
 
 ## Messaging
 

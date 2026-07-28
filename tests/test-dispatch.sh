@@ -9,8 +9,10 @@ grep -q "bizagent-control-plane.js.*dispatch-once" "$ROOT/scripts/bizagent-dispa
   || fail "bizagent-dispatch.sh does not delegate to the Node control plane"
 grep -q "install-control-plane.sh" "$ROOT/scripts/install-dispatch.sh" \
   || fail "install-dispatch.sh does not delegate to install-control-plane.sh"
-grep -q "CLI_EXTRA_ARGS" "$ROOT/control-plane/lib/config.js" \
-  || fail "control plane does not read CLI_EXTRA_ARGS"
+grep -q "resolveHubCliName\|hub_agent" "$ROOT/control-plane/lib/config.js" \
+  || fail "control plane does not resolve hub CLI name from registry"
+grep -q "BIZAGENT_CLI_EXTRA_ARGS" "$ROOT/control-plane/lib/cli-config.js" \
+  || fail "cli-config does not honor BIZAGENT_CLI_EXTRA_ARGS env override"
 grep -q "maxConcurrency\|agentSlots\|agent_slots" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not enforce concurrency tiers"
 grep -q "hubSlots\|hub_slots\|liveHubCount" "$ROOT/control-plane/lib/dispatcher.js" \
@@ -29,7 +31,22 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/agents/alpha/inbox/archive" "$TMP/agents/alpha/outbox" "$TMP/outbox" "$TMP/inbox" "$TMP/logs" "$TMP/templates"
 cat > "$TMP/registry.json" <<'JSON'
-{"settings":{"dispatch":{"max_concurrency":1,"lock_lease_secs":60}},"products":[{"slug":"alpha","name":"Alpha","agent_name":"Agent A","projects":[]}]}
+{
+  "settings": {
+    "dispatch": { "max_concurrency": 1, "lock_lease_secs": 60 },
+    "hub_agent": { "cliName": "claude" }
+  },
+  "products": [{ "slug": "alpha", "name": "Alpha", "agent_name": "Agent A", "cliName": "claude", "projects": [] }]
+}
+JSON
+cat > "$TMP/cli.json" <<'JSON'
+{
+  "claude": {
+    "executable": "claude",
+    "promptFlag": "-p",
+    "flags": { "extra": "--dangerously-skip-permissions" }
+  }
+}
 JSON
 cp "$ROOT/templates/dispatch.md.template" "$TMP/templates/dispatch.md.template"
 cat > "$TMP/agents/alpha/inbox/2026-07-09-test.md" <<'MSG'

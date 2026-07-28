@@ -544,12 +544,20 @@ async function setup() {
   setAuthStatus('Creating login...', 'pending');
   try {
     await api('/api/setup', { method: 'POST', body: JSON.stringify({ username, password }) });
-    await api('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) });
+    // Auth exists now — always leave setup mode so a login failure is recoverable.
     setSetupMode(false);
+    await api('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) });
     setAuthenticated(true, `Signed in as ${username}`);
     await boot();
   } catch (err) {
-    setAuthStatus(err.message || 'Setup failed', 'warn');
+    const msg = err.message || 'Setup failed';
+    // If credentials were already created (e.g. prior attempt), switch to login.
+    if (/auth already initialized/i.test(msg)) {
+      setSetupMode(false);
+      setAuthStatus('Login already exists — sign in with your username and password', 'warn');
+      return;
+    }
+    setAuthStatus(msg, 'warn');
   }
 }
 

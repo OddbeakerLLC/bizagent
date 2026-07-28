@@ -377,7 +377,22 @@ function launchAgent(config, slug, model = '', cliName = '') {
 
   const promptFile = buildAgentTurnPrompt(hub, slug);
   fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
-  const cliSettings = getCliSettings(hub, cliJson, config, cliName, model);
+  let cliSettings;
+  try {
+    cliSettings = getCliSettings(hub, cliJson, config, cliName, model);
+  } catch (err) {
+    fs.rmSync(lock, { recursive: true, force: true });
+    try { fs.unlinkSync(promptFile); } catch (_e) { /* ignore */ }
+    logEvent(hub, {
+      event: 'cli_config_error',
+      slug: slug,
+      cliName: cliName || config.cli || '',
+      error: err.message,
+      status: 'error',
+    });
+    recordAgentError(hub, slug, 1, err.message, null);
+    return;
+  }
   const cmdPreview = compileAgentCommand(cliSettings, promptFile);
   logEvent(hub, {
     event: 'cli_spawn',
@@ -609,7 +624,35 @@ function launchHubCold(config, ctx) {
   // Ensure API keys from .bizagent/env are in this process (and thus children).
   const envLoad = loadHubEnv(hub);
   // Prefer settings.hub_agent.cliName (via config.hubCliName); empty falls back to .cli / default.
-  const cliSettings = getCliSettings(hub, cliJson, config, hubCliName || '', hubModel || '');
+  let cliSettings;
+  try {
+    cliSettings = getCliSettings(hub, cliJson, config, hubCliName || '', hubModel || '');
+  } catch (err) {
+    fs.rmSync(lock, { recursive: true, force: true });
+    try { fs.unlinkSync(promptFile); } catch (_e) { /* ignore */ }
+    logEvent(hub, {
+      event: 'cli_config_error',
+      slug: 'hub',
+      cliName: hubCliName || config.cli || '',
+      error: err.message,
+      status: 'error',
+    });
+    if (conversationId) {
+      try {
+        onHubCliExit(hub, {
+          conversationId,
+          logByteOffset: logOffset,
+          stderrByteOffset: stderrOffset,
+          startedAt,
+          agentLog,
+          agentStderr,
+          replyBodyFile,
+          exitCode: 1,
+        });
+      } catch (_e) { /* ignore */ }
+    }
+    return;
+  }
   const cmdPreview = compileAgentCommand(cliSettings, promptFile);
   logEvent(hub, {
     event: 'cli_spawn',

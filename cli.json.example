@@ -4,21 +4,21 @@
     "executable": "claude",
     "promptFlag": "-p",
     "flags": {
-      "extra": ""
+      "extra": "--dangerously-skip-permissions"
     }
   },
   "codex": {
     "executable": "codex",
     "promptFlag": "--prompt",
     "flags": {
-      "extra": ""
+      "extra": "--full-auto"
     }
   },
   "agy": {
     "executable": "agy",
     "promptFlag": "-p",
     "flags": {
-      "extra": ""
+      "extra": "--dangerously-skip-permissions"
     }
   },
   "grok": {
