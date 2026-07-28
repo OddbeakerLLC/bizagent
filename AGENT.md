@@ -69,7 +69,13 @@ Ask for:
 8. **Agent autonomy level** — `maintenance-only` (journals, sitemaps, routing),
    `+monitoring` (also flags failing builds / stale branches), or `+light-dev`
    (also makes small changes and proposes them). Default `maintenance-only`.
-9. **Hub git remote** — optional; blank means local-only.
+9. **Hub git remote (private ops backup)** — strongly recommended. The
+    installer removes the public framework `origin` so ops data cannot push
+    there. Ask for a **private** remote URL (GitHub private repo, bare repo on
+    this machine, or private host) and store it as `hub.remote` in
+    `registry.json`. Blank means local-only nightly commits (no off-box backup
+    of journals, Knowledge Stack, registry, or hub code tweaks). Never a
+    public framework URL.
 10. **CLI agent command** — prefer `registry.json` `settings.hub_agent.cliName`
     and the matching entry in `cli.json` (installer writes both). If
     `hub_agent.cliName` is empty but a legacy root `.cli` has `CLI_CMD`, treat
@@ -144,11 +150,16 @@ once exposed an operator's private data publicly — don't repeat it.)
    manual step; do not install the service without operator confirmation.
 8. **Run the tests:** `bash tests/run-tests.sh`. Expect all green. If anything
    fails, stop and report before continuing.
-9. **Version control.** Ensure this is a local repo (`git init` if needed) and
-   commit. Your nightly maintenance commits go to **this local operational repo**.
-   Only add a remote if it is a **private** one you control (see the first-launch
-   note above) — never the public framework remote. If a private hub remote was
-   given in the interview, add it and push.
+9. **Version control.** Ensure this is a local **operational** repo (`git init`
+   if needed). The installer already ran `scripts/detach-framework-remote.sh`
+   (public framework `origin` removed; ops `.gitignore` overrides so
+   `registry.json` / journals / KS can be tracked). Commit. Nightly
+   (`scripts/nightly.sh push`) commits and pushes this hub **and** product
+   project repos when they have remotes. If a private hub remote was given in
+   the interview, set `hub.remote`, `git remote add origin <url>`, and push.
+   If none was given, **advise** the operator to add one soon so journals and
+   Knowledge Stack are backed up off-box. Never re-add the public framework
+   remote.
 10. **Install the cron lines.** Build the nightly line and (if
     `knowledge_stack.enabled`) the weekly line, and add them to the
     operator's crontab:
@@ -288,13 +299,18 @@ into an agent's inbox, is picked up in near-real-time without a manual spawn. Se
 run.)
 
 **Nightly (time-based housekeeping only).** Triggered by cron via `NIGHTLY.md`.
-In order: pull all project repos (and hub if it has a remote); route queued
-messages; for each project run `git log --since=midnight` to detect the day's
-commits; for each project with activity, spawn its agent to refresh `sitemap.md`
-and add a journal entry; archive messages left _unactioned_ past the stale
-threshold (cleanup, not delivery); if anything happened, add a hub journal
-entry. The nightly never picks up fresh inbox mail and never blocks the
-operator.
+In order: run `scripts/nightly.sh` (pull project repos and hub if they have
+remotes; route queued messages; archive messages left _unactioned_ past the
+stale threshold; prune old archives); for each project run
+`git log --since=midnight` to detect the day's commits; for each project with
+activity, spawn its agent to refresh `sitemap.md` and add a journal entry; if
+anything happened, add a hub journal entry; finally run
+`scripts/nightly.sh push` to commit and push **product project** repos that
+have remotes **and the hub ops repo** when it has a **private** remote
+(`hub.remote` / `origin`). Never push the hub to the public framework remote.
+If the hub has no private remote, remind the operator (local-only is allowed
+but journals/KS are not backed up off-box). The nightly never picks up fresh
+inbox mail and never blocks the operator.
 
 **Big picture.** When asked, read every journal entry since the last such
 request, synthesize across all products, and answer in plain English organized

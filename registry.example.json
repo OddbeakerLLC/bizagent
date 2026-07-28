@@ -3,7 +3,8 @@
   "org": "Example Co",
   "hub": {
     "name": "BizAgent",
-    "remote": ""
+    "remote": "",
+    "_remote_comment": "Private ops git remote for THIS hub (not the public framework). Installer removes public origin. Set e.g. git@host:you/bizagent-ops.git so nightly.sh push can back up registry, journals, KS, and hub tweaks. Blank = local-only."
   },
   "settings": {
     "nightly_time": "23:00",

@@ -625,6 +625,18 @@ clone_repo() {
   ok "cloned"
 }
 
+# Sever the public framework remote so ops data can never push there. Advise a
+# private hub remote for nightly commit/push of registry, journals, KS, etc.
+detach_framework_remote() {
+  if [[ ! -x "$INSTALL_DIR/scripts/detach-framework-remote.sh" ]]; then
+    warn "detach-framework-remote.sh missing — remove public origin manually before first commit"
+    return
+  fi
+  step "Detach public framework remote"
+  bash "$INSTALL_DIR/scripts/detach-framework-remote.sh" "$INSTALL_DIR" || true
+  ok "framework remote detached (or none found); private hub remote recommended — see message above"
+}
+
 handoff() {
   local port
   port=$(python3 - "$INSTALL_DIR/registry.json" <<'PY' 2>/dev/null || echo "8787"
@@ -693,6 +705,7 @@ main() {
   step "Setting up bizagent"
   choose_dir
   clone_repo
+  detach_framework_remote
   write_cli_json
   write_registry_seed
   write_env_file
