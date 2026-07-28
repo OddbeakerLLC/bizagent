@@ -45,6 +45,8 @@ done < <(pull_project_paths)
 # pull the hub itself if it is a git checkout with a remote
 if [ -d "$HUB/.git" ] && git -C "$HUB" remote | grep -q .; then
   git -C "$HUB" pull --ff-only 2>&1 || echo "hub pull skipped (continuing)"
+elif [ -d "$HUB/.git" ]; then
+  echo "hub: no git remote — local-only (set a private origin for nightly backup; see scripts/detach-framework-remote.sh)"
 fi
 
 # --- 1. route -------------------------------------------------------------
@@ -94,4 +96,87 @@ if [ "$PRUNE_ON" = "1" ] && [ -x "$HUB/scripts/prune-archives.sh" ]; then
   bash "$HUB/scripts/prune-archives.sh" "$HUB" || echo "nightly: archive prune failed (continuing)"
 else
   echo "nightly: archive prune skipped"
+fi
+
+# --- 4. optional: commit + push (subcommand) -----------------------------
+# Usage: scripts/nightly.sh push
+# Called at the *end* of NIGHTLY.md after journals/sitemaps so product repos
+# and the hub ops repo are backed up. Never points at the public framework.
+if [ "${1:-}" = "push" ]; then
+  # Only the public framework repo — private remotes named bizagent-ops etc. are fine.
+  is_public_framework_url() {
+    local url
+    url="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$url" in
+      *github.com[/:]oddbeakerllc/bizagent.git*|*github.com[/:]oddbeakerllc/bizagent)
+        return 0 ;;
+    esac
+    return 1
+  }
+
+  commit_and_push() {
+    local dir="$1" label="$2"
+    [ -d "$dir/.git" ] || return 0
+    # Refuse to push to a public framework URL if that is the only remote.
+    local bad=0 r url
+    while read -r r; do
+      [[ -z "$r" ]] && continue
+      url="$(git -C "$dir" remote get-url "$r" 2>/dev/null || true)"
+      if is_public_framework_url "$url"; then
+        echo "push refused ($label): remote $r points at public framework ($url)"
+        bad=1
+      fi
+    done < <(git -C "$dir" remote)
+    if [ "$bad" -eq 1 ]; then
+      return 0
+    fi
+    (
+      cd "$dir" || exit 0
+      git add -A 2>/dev/null || true
+      if git status --porcelain 2>/dev/null | grep -q .; then
+        git commit -m "nightly: ${label} $(date -u +%Y-%m-%d)" 2>&1 \
+          || echo "commit skipped ($label)"
+      else
+        echo "clean: $label"
+      fi
+      if git remote 2>/dev/null | grep -q .; then
+        git push 2>&1 && echo "pushed: $label" \
+          || echo "push skipped ($label)"
+      else
+        echo "no remote: $label (local commit only, if any)"
+      fi
+    )
+  }
+
+  echo "nightly: commit + push product projects and hub..."
+  while IFS= read -r rel; do
+    [ -z "$rel" ] && continue
+    expanded="${rel/#\~/$HOME}"
+    [[ "$expanded" != /* ]] && expanded="$HUB/$expanded"
+    expanded="$(cd "$expanded" 2>/dev/null && pwd)" || continue
+    commit_and_push "$expanded" "$rel"
+  done < <(pull_project_paths)
+
+  # Ensure hub.remote from registry is wired if present and hub has no remote.
+  if [ -d "$HUB/.git" ] && ! git -C "$HUB" remote | grep -q .; then
+    hub_remote="$(python3 - <<'PY' 2>/dev/null || true
+import json
+try:
+    print((json.load(open("registry.json")).get("hub") or {}).get("remote") or "")
+except Exception:
+    pass
+PY
+)"
+    if [ -n "$hub_remote" ]; then
+      git -C "$HUB" remote add origin "$hub_remote" 2>/dev/null \
+        && echo "hub: added origin from registry hub.remote" \
+        || true
+    fi
+  fi
+  commit_and_push "$HUB" "hub"
+
+  if [ -d "$HUB/.git" ] && ! git -C "$HUB" remote | grep -q .; then
+    echo "hub: still no private remote — journals/KS stay local only"
+    echo "  tip: git remote add origin <private-url>  OR set hub.remote in registry.json"
+  fi
 fi

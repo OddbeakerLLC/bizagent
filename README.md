@@ -221,6 +221,13 @@ scripts/prune-archives.sh
 # Follow control-plane / hub runtime logs (Ctrl-C to stop; skips JSON structured.log)
 scripts/viewlog.sh
 scripts/viewlog.sh hub          # warm hub + dispatch-hub.*
+
+# Nightly mechanical half + end-of-night backup push
+scripts/nightly.sh              # pull, route, archive, prune
+scripts/nightly.sh push         # commit/push product repos + hub (private remote)
+
+# After clone: drop public framework origin; ops gitignore; print private-remote advice
+scripts/detach-framework-remote.sh
 ```
 
 Multiple BizAgent hubs can run on one machine. Set
@@ -260,7 +267,14 @@ and begins setup in the web UI. It only asks for the things that are genuinely y
 - nightly run time _(default 23:00)_
 - how long an unactioned message waits before being archived _(default 30 days)_
 - agent autonomy: maintenance-only, +monitoring, or +light-dev _(default maintenance-only)_
-- an optional git remote for the hub
+- a **private** git remote for the hub (strongly recommended)
+
+The installer **removes** the public framework GitHub remote from the clone so
+operational data (registry, journals, Knowledge Stack, agent configs) can never
+push there by accident. You should add **your own** private remote for the hub
+(GitHub private repo, bare repo on the machine, or private host) and set
+`hub.remote` in `registry.json`. Nightly runs `scripts/nightly.sh push` to
+commit/push product project repos **and** the hub ops repo when remotes exist.
 
 It does **not** ask you to design the system. The hub-and-spoke topology,
 file-based messaging, the journal and sitemap formats, and the real-time +

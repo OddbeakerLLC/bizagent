@@ -53,6 +53,8 @@ grep -qE '^registry\.json$' "$ROOT/.gitignore" \
 grep -q 'write_registry_seed' "$ROOT/install.sh" \
   || fail "install.sh missing write_registry_seed (empty products seed)"
 
+grep -q 'detach_framework_remote\|detach-framework-remote' "$ROOT/install.sh" \
+  || fail "install.sh missing detach public framework remote step"
 grep -q 'write_cli_json' "$ROOT/install.sh" \
   || fail "install.sh missing write_cli_json (seed cli.json + ensure selected CLI)"
 grep -q 'hub_agent.cliName' "$ROOT/install.sh" \

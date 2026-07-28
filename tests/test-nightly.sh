@@ -29,4 +29,21 @@ bash "$TMP/scripts/nightly.sh" >/dev/null
 [ -f "$TMP/inbox/new.md" ]         || fail "fresh message wrongly archived"
 [ ! -f "$TMP/inbox/old.md" ]       || fail "stale message left in inbox"
 
+# push subcommand exists and is safe with no git remotes
+grep -q 'push' "$SCRIPT_DIR/../scripts/nightly.sh" \
+  || fail "nightly.sh missing push subcommand for hub/project backup"
+out="$(bash "$TMP/scripts/nightly.sh" push 2>&1 || true)"
+echo "$out" | grep -qi 'commit + push\|nightly: commit' \
+  || fail "nightly.sh push did not run commit+push path: $out"
+
+# detach helper present and documents private hub remote
+[ -x "$SCRIPT_DIR/../scripts/detach-framework-remote.sh" ] \
+  || fail "detach-framework-remote.sh missing or not executable"
+grep -q 'private' "$SCRIPT_DIR/../scripts/detach-framework-remote.sh" \
+  || fail "detach script missing private remote advice"
+grep -q 'nightly.sh push' "$SCRIPT_DIR/../templates/NIGHTLY.md" \
+  || fail "NIGHTLY.md template missing nightly.sh push step"
+grep -q 'detach-framework-remote' "$SCRIPT_DIR/../install.sh" \
+  || fail "install.sh does not call detach-framework-remote"
+
 echo "  ok: nightly.sh"

@@ -189,8 +189,12 @@ Small scripts do the mechanical work:
   systemd user service. Never run automatically.
 - `router.sh`, `bizagent-dispatch.sh`, and `bizagent-watch.sh` — compatibility
   wrappers around the Node control plane.
-- `nightly.sh` — run the router, then archive messages past the stale
-  threshold (time-based housekeeping only).
+- `detach-framework-remote.sh` — remove public framework `origin` after install;
+  ops `.gitignore` overrides; advise a private hub remote for nightly backup
+- `nightly.sh` — pull repos, route mail, archive stale inbox messages, prune
+  aged `*/archive/` files; `nightly.sh push` commits/pushes product project
+  repos and the hub ops repo when private remotes exist (refuses the public
+  framework URL)
 
 Everything requiring judgment — proposing product groupings, writing journal
 prose, refreshing sitemaps, doing the actual product work — is done by the agent
