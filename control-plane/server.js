@@ -71,6 +71,11 @@ const {
   verifyLogin,
 } = require("./lib/auth");
 const {
+  applyFilterAgents,
+  loadEnterprisePlugin,
+  matchPluginRoute,
+} = require("./lib/enterprise-plugin");
+const {
   activeConversationFile,
   appendMessage,
   conversationNameFromContent,
@@ -182,38 +187,98 @@ function serveStatic(req, res) {
   return true;
 }
 
+function authProvider(config) {
+  const custom =
+    config.enterprise &&
+    config.enterprise.hooks &&
+    config.enterprise.hooks.authProvider;
+  if (custom && typeof custom === "object") return custom;
+  return null;
+}
+
 function requireAuth(config, req, res) {
-  if (!hasAuth(config.hub)) {
+  const provider = authProvider(config);
+  const has =
+    provider && typeof provider.hasAuth === "function"
+      ? provider.hasAuth(config.hub)
+      : hasAuth(config.hub);
+  if (!has) {
     send(res, 401, { error: "setup required" });
     return false;
   }
   const cookies = parseCookies(req.headers.cookie);
-  const session = getSession(config.hub, cookies.bizagent_session);
+  const sessionId = cookies.bizagent_session;
+  const session =
+    provider && typeof provider.getSession === "function"
+      ? provider.getSession(config.hub, sessionId)
+      : getSession(config.hub, sessionId);
   if (!session) {
     send(res, 401, { error: "login required" });
     return false;
   }
-  req.session = { id: cookies.bizagent_session, ...session };
+  req.session = { id: sessionId, ...session };
   return true;
+}
+
+/** Attach / reload optional Enterprise plugin (no-op when disabled). Soft-fail. */
+function attachEnterprisePlugin(config) {
+  const state = loadEnterprisePlugin(config, {
+    getSession: (req) => {
+      const cookies = parseCookies(req && req.headers && req.headers.cookie);
+      const id = cookies.bizagent_session;
+      const provider = authProvider(config);
+      if (provider && typeof provider.getSession === "function") {
+        return provider.getSession(config.hub, id);
+      }
+      return getSession(config.hub, id);
+    },
+  });
+  // Bind requireAuth for packages that call api.requireAuth(req, res).
+  if (state.api) {
+    state.api.requireAuth = (req, res) => requireAuth(config, req, res);
+    state.api.getSession = (req) => {
+      const cookies = parseCookies(req && req.headers && req.headers.cookie);
+      const id = cookies.bizagent_session;
+      const provider =
+        state.hooks && state.hooks.authProvider
+          ? state.hooks.authProvider
+          : null;
+      if (provider && typeof provider.getSession === "function") {
+        return provider.getSession(config.hub, id);
+      }
+      return getSession(config.hub, id);
+    };
+  }
+  config.enterprise = state;
+  return state;
 }
 
 function hubAgentEntry(registry) {
   const hub = registry.hub || {};
+  const rawName = hub.name || "BizAgent";
+  // Brand the hub product line: registry often has lowercase "bizagent".
+  const productName =
+    String(rawName).toLowerCase() === "bizagent" ? "BizAgent" : rawName;
+  // Match product agents: primary "Agent …", secondary product/system name.
+  // agent_name overrides when set (e.g. interview confirmed a custom hub label).
+  const agentName = hub.agent_name || "Agent PTL";
   return {
     slug: "hub",
-    name: hub.name || "hub",
-    agentName: hub.agent_name || hub.name || "PTL",
+    name: productName,
+    agentName,
   };
 }
 
-function currentState(config) {
-  const agents = agentMailStatus(config.hub, [
+function currentState(config, session) {
+  let agents = agentMailStatus(config.hub, [
     hubAgentEntry(config.registry),
     ...agentsFromRegistry(config.registry),
   ]).map(({ model: _m, ...agent }) => ({
     ...agent,
     active: isAgentActive(config.hub, agent.slug, config.lockLeaseSecs),
   }));
+  // Enterprise hook: filter roster by seat/ownership (identity when plugin off).
+  agents = applyFilterAgents(config.enterprise, agents, session || null);
   return { agents, org: config.registry.org || "" };
 }
 
@@ -309,10 +374,25 @@ function rememberPushedConv(id, conv) {
 // Broadcast helpers used after mutations to push to SSE + WS clients.
 function pushState(config) {
   try {
-    const snap = currentState(config);
+    // OSS sole-op: full board. Enterprise Phase 1+ may re-filter per WS client
+    // using hooks.filterAgents + meta.username (see upgrade handler).
+    const snap = currentState(config, null);
     broadcastState(snap);
     wsBroadcastAgents(snap);
   } catch (_) {}
+}
+
+/** Reload enterprise plugin when settings.enterprise changes on disk. */
+function maybeReloadEnterprise(config) {
+  const ent =
+    config.registry &&
+    config.registry.settings &&
+    config.registry.settings.enterprise;
+  const fp = JSON.stringify(ent || null);
+  if (fp === config._enterpriseFp) return config;
+  config._enterpriseFp = fp;
+  attachEnterprisePlugin(config);
+  return config;
 }
 function pushActiveConv(config) {
   try {
@@ -369,9 +449,10 @@ function pushConversationsChangedOnDisk(config) {
 }
 
 async function handleApi(config, req, res) {
-  // Pick up registry.json and .cli edits (new/removed agents, dispatch/model
-  // settings, CLI command/flags) without requiring a control-plane restart.
+  // Pick up registry.json and cli.json edits (agents, dispatch, hub_agent.cliName)
+  // without requiring a control-plane restart. Legacy .cli is name-only migration.
   refreshRuntimeConfig(config);
+  maybeReloadEnterprise(config);
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   // Local helpers for post-mutation push (event-driven UI)
@@ -379,18 +460,44 @@ async function handleApi(config, req, res) {
   const didChangeActiveConv = () => { try { pushActiveConv(config); } catch (_) {} };
 
   if (url.pathname === "/api/setup" && req.method === "POST") {
-    if (hasAuth(config.hub))
-      return send(res, 409, { error: "auth already initialized" });
+    const provider = authProvider(config);
+    const already =
+      provider && typeof provider.hasAuth === "function"
+        ? provider.hasAuth(config.hub)
+        : hasAuth(config.hub);
+    if (already) return send(res, 409, { error: "auth already initialized" });
     const body = await parseBody(req);
-    initAuth(config.hub, body.username, body.password);
+    if (provider && typeof provider.initAuth === "function") {
+      provider.initAuth(config.hub, body.username, body.password);
+    } else {
+      initAuth(config.hub, body.username, body.password);
+    }
     return send(res, 200, { ok: true });
   }
 
   if (url.pathname === "/api/login" && req.method === "POST") {
     const body = await parseBody(req);
-    if (!verifyLogin(config.hub, body.username, body.password))
-      return send(res, 401, { error: "invalid login" });
-    const sessionId = createSession(config.hub, body.username);
+    const provider = authProvider(config);
+    let sessionId;
+    if (provider && typeof provider.verifyLogin === "function") {
+      const principal = provider.verifyLogin(
+        config.hub,
+        body.username,
+        body.password,
+      );
+      if (!principal) return send(res, 401, { error: "invalid login" });
+      sessionId =
+        typeof provider.createSession === "function"
+          ? provider.createSession(config.hub, principal)
+          : createSession(
+              config.hub,
+              (principal && principal.username) || body.username,
+            );
+    } else {
+      if (!verifyLogin(config.hub, body.username, body.password))
+        return send(res, 401, { error: "invalid login" });
+      sessionId = createSession(config.hub, body.username);
+    }
     return send(
       res,
       200,
@@ -401,11 +508,39 @@ async function handleApi(config, req, res) {
     );
   }
 
+  // Enterprise plugin routes may opt out of auth (rare); default is auth required.
+  const pluginRoute = matchPluginRoute(
+    config.enterprise && config.enterprise.routes,
+    req.method,
+    url.pathname,
+  );
+  if (pluginRoute && pluginRoute.auth === false) {
+    try {
+      return await pluginRoute.handler(req, res, config);
+    } catch (err) {
+      return send(res, 500, { error: err.message || "plugin route error" });
+    }
+  }
+
   if (!requireAuth(config, req, res)) return null;
 
+  if (pluginRoute) {
+    try {
+      return await pluginRoute.handler(req, res, config);
+    } catch (err) {
+      return send(res, 500, { error: err.message || "plugin route error" });
+    }
+  }
+
   if (url.pathname === "/api/logout" && req.method === "POST") {
-    if (req.session && req.session.id)
-      destroySession(config.hub, req.session.id);
+    const provider = authProvider(config);
+    if (req.session && req.session.id) {
+      if (provider && typeof provider.destroySession === "function") {
+        provider.destroySession(config.hub, req.session.id);
+      } else {
+        destroySession(config.hub, req.session.id);
+      }
+    }
     return send(
       res,
       200,
@@ -419,7 +554,7 @@ async function handleApi(config, req, res) {
 
   if (url.pathname === "/api/state" && req.method === "GET") {
     // Silent poll — still supported for initial load / fallback.
-    return send(res, 200, currentState(config));
+    return send(res, 200, currentState(config, req.session));
   }
 
   if (url.pathname === "/api/state/stream" && req.method === "GET") {
@@ -574,6 +709,7 @@ async function handleApi(config, req, res) {
 function runTick(config) {
   const start = Date.now();
   refreshRuntimeConfig(config);
+  maybeReloadEnterprise(config);
   const routed = routeOutboxes(config.hub);
   const relayed = syncUserInbox(config); // numeric for hadWork (compat)
   // Backup: if hub CLI exited without the shell safety hook, finish the turn.
@@ -741,6 +877,10 @@ function clearPidFile(hub) {
 
 function start(hubInput) {
   const config = loadRuntimeConfig(hubInput);
+  attachEnterprisePlugin(config);
+  config._enterpriseFp = JSON.stringify(
+    (config.registry.settings && config.registry.settings.enterprise) || null,
+  );
   const server = createServer(config);
   ensureHubRuntimePrompt(config.hub);
   // Main-process push hook: safety net / spawn exit handler mutations broadcast
@@ -792,6 +932,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  attachEnterprisePlugin,
   conversationIdsFromSafetyResults,
   createServer,
   pushConv,

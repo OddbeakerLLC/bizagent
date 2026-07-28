@@ -45,4 +45,42 @@ grep -q "pkill -f bizagent-control-plane" "$ROOT/install.sh" \
 grep -q "rm -rf '\\\$INSTALL_DIR'" "$ROOT/install.sh" \
   || fail "installer die message does not single-quote path in suggested rm command (space-in-path safety)"
 
+# Operator registry.json must not be the public tracked source of truth.
+grep -qE '^registry\.json$' "$ROOT/.gitignore" \
+  || fail ".gitignore must ignore operator registry.json"
+! git -C "$ROOT" ls-files --error-unmatch registry.json >/dev/null 2>&1 \
+  || fail "registry.json is still tracked — remove it from the public repo index"
+grep -q 'write_registry_seed' "$ROOT/install.sh" \
+  || fail "install.sh missing write_registry_seed (empty products seed)"
+
+grep -q 'write_cli_json' "$ROOT/install.sh" \
+  || fail "install.sh missing write_cli_json (seed cli.json + ensure selected CLI)"
+grep -q 'hub_agent.cliName' "$ROOT/install.sh" \
+  || fail "install.sh does not set registry hub_agent.cliName"
+grep -q 'cli.json has entry' "$ROOT/install.sh" \
+  || fail "install.sh does not ensure hub CLI is listed in cli.json"
+# New installs must not treat .cli as the live flag source.
+! grep -q 'CLI config written (.cli)' "$ROOT/install.sh" \
+  || fail "install.sh still writes .cli as primary CLI config"
+
+# API key prompt → .bizagent/env (hub turns need provider keys; bare CLI select is not enough)
+grep -q 'prompt_api_key' "$ROOT/install.sh" \
+  || fail "install.sh missing prompt_api_key"
+grep -q 'write_env_file' "$ROOT/install.sh" \
+  || fail "install.sh missing write_env_file"
+grep -q 'api_key_var_for_cli' "$ROOT/install.sh" \
+  || fail "install.sh missing api_key_var_for_cli"
+grep -q 'XAI_API_KEY' "$ROOT/install.sh" \
+  || fail "install.sh does not map grok → XAI_API_KEY"
+grep -q 'ANTHROPIC_API_KEY' "$ROOT/install.sh" \
+  || fail "install.sh does not map claude → ANTHROPIC_API_KEY"
+grep -q 'BIZAGENT_API_KEY' "$ROOT/install.sh" \
+  || fail "install.sh missing non-interactive BIZAGENT_API_KEY support"
+grep -q 'api_key_var_for_cli' "$ROOT/install/install.sh" \
+  || fail "install/install.sh missing API key → .bizagent/env step"
+grep -q '\.bizagent/env' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not write .bizagent/env"
+grep -q 'prompts for that CLI' "$ROOT/README.md" \
+  || fail "README does not document installer API key prompt"
+
 echo "  ok: installer source override"

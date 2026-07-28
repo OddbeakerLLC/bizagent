@@ -7,6 +7,7 @@ set -euo pipefail
 BOLD=$'\033[1m'; GREEN=$'\033[32m'; BLUE=$'\033[34m'; NC=$'\033[0m'
 step() { printf "\n${BOLD}${BLUE}==>${NC} ${BOLD}%s${NC}\n" "$1"; }
 ok()   { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
+note() { printf "  %s\n" "$1"; }
 
 HUB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CP_DIR="$HUB/control-plane"
@@ -42,13 +43,127 @@ else
 fi
 ok "CLI: $CLI_CMD"
 
-# Write CLI choice to .cli so the control-plane picks it up at runtime.
-cat > "$HUB/.cli" <<EOF
-CLI_CMD=$CLI_CMD
-CLI_PROMPT_FLAG=-p
-CLI_EXTRA_ARGS=--dangerously-skip-permissions
-EOF
-ok ".cli written"
+_cli_key="$(basename "$CLI_CMD")"
+_cli_key="${_cli_key%.exe}"
+cli_prompt_flag() {
+  case "$(basename "$1")" in
+    grok) echo "--prompt-file" ;;
+    codex) echo "--prompt" ;;
+    *) echo "-p" ;;
+  esac
+}
+cli_extra_args() {
+  case "$(basename "$1")" in
+    grok) echo "--always-approve" ;;
+    claude|agy) echo "--dangerously-skip-permissions" ;;
+    codex) echo "--full-auto" ;;
+    *) echo "" ;;
+  esac
+}
+CLI_PROMPT_FLAG="$(cli_prompt_flag "$CLI_CMD")"
+CLI_EXTRA_ARGS="$(cli_extra_args "$CLI_CMD")"
+
+# cli.json = engine catalog; registry hub_agent.cliName = which engine the hub uses.
+# Legacy .cli is not written (migration-only if already present).
+if [[ ! -f "$HUB/cli.json" && -f "$HUB/cli.json.example" ]]; then
+  cp "$HUB/cli.json.example" "$HUB/cli.json"
+  ok "cli.json seeded from example"
+fi
+if [[ -f "$HUB/cli.json" ]]; then
+  python3 - "$HUB/cli.json" "$_cli_key" "$CLI_CMD" "$CLI_PROMPT_FLAG" "$CLI_EXTRA_ARGS" <<'PY' 2>/dev/null || true
+import json, sys
+path, key, exe, pflag, extra = sys.argv[1:6]
+try:
+    d = json.load(open(path))
+except Exception:
+    d = {}
+if not isinstance(d, dict):
+    d = {}
+if key not in d or not isinstance(d.get(key), dict):
+    d[key] = {
+        "executable": exe or key,
+        "promptFlag": pflag or "-p",
+        "flags": {"extra": extra or ""},
+    }
+    json.dump(d, open(path, "w"), indent=2)
+    open(path, "a").write("\n")
+PY
+  ok "cli.json has entry for '$_cli_key'"
+fi
+
+if [[ ! -f "$HUB/registry.json" && -f "$HUB/registry.example.json" ]]; then
+  python3 - "$HUB/registry.example.json" "$HUB/registry.json" "$_cli_key" <<'PY' 2>/dev/null || cp "$HUB/registry.example.json" "$HUB/registry.json"
+import json, sys
+src, dest, cli_name = sys.argv[1:4]
+d = json.load(open(src))
+d["org"] = ""
+d["products"] = []
+d["cross_product_edges"] = []
+if "hub" in d and isinstance(d["hub"], dict):
+    d["hub"]["name"] = "BizAgent"
+d.setdefault("settings", {}).setdefault("hub_agent", {})["cliName"] = cli_name
+json.dump(d, open(dest, "w"), indent=2)
+open(dest, "a").write("\n")
+PY
+  ok "registry.json seeded (hub_agent.cliName=$_cli_key)"
+else
+  python3 - "$HUB/registry.json" "$_cli_key" <<'PY' 2>/dev/null || true
+import json, sys
+path, cli_name = sys.argv[1:3]
+d = json.load(open(path))
+ha = d.setdefault("settings", {}).setdefault("hub_agent", {})
+if not (ha.get("cliName") or ha.get("cli")):
+    ha["cliName"] = cli_name
+    json.dump(d, open(path, "w"), indent=2)
+    open(path, "a").write("\n")
+PY
+  ok "registry.json hub_agent.cliName ensured"
+fi
+if [[ -f "$HUB/.cli" ]]; then
+  note "legacy .cli present — ignored for flags; hub CLI name is registry hub_agent.cliName"
+fi
+
+# --- 1b. API key → .bizagent/env (required for hub turns) ---
+api_key_var_for_cli() {
+  case "$1" in
+    claude) echo "ANTHROPIC_API_KEY" ;;
+    grok)   echo "XAI_API_KEY" ;;
+    codex)  echo "OPENAI_API_KEY" ;;
+    *)      echo "" ;;
+  esac
+}
+API_KEY_VAR="$(api_key_var_for_cli "$(basename "$CLI_CMD")")"
+mkdir -p "$HUB/.bizagent"
+if [[ -n "${BIZAGENT_API_KEY:-}" && -n "$API_KEY_VAR" ]]; then
+  printf '%s=%s\n' "$API_KEY_VAR" "$BIZAGENT_API_KEY" > "$HUB/.bizagent/env"
+  chmod 600 "$HUB/.bizagent/env"
+  ok ".bizagent/env written ($API_KEY_VAR from BIZAGENT_API_KEY)"
+elif [[ -n "$API_KEY_VAR" ]]; then
+  existing_val=""
+  if [[ -n "${!API_KEY_VAR:-}" ]]; then
+    existing_val="${!API_KEY_VAR}"
+  fi
+  if [[ -n "$existing_val" ]]; then
+    read -r -p "  $API_KEY_VAR is set in this shell. Save to .bizagent/env? [Y/n]: " save_key </dev/tty
+    save_key="${save_key:-Y}"
+    if [[ "$save_key" =~ ^[Yy] ]]; then
+      printf '%s=%s\n' "$API_KEY_VAR" "$existing_val" > "$HUB/.bizagent/env"
+      chmod 600 "$HUB/.bizagent/env"
+      ok ".bizagent/env written ($API_KEY_VAR)"
+    fi
+  else
+    printf "\nHub turns need %s in .bizagent/env.\n" "$API_KEY_VAR"
+    read -r -s -p "  $API_KEY_VAR (hidden, Enter to skip): " typed_key </dev/tty
+    printf "\n"
+    if [[ -n "$typed_key" ]]; then
+      printf '%s=%s\n' "$API_KEY_VAR" "$typed_key" > "$HUB/.bizagent/env"
+      chmod 600 "$HUB/.bizagent/env"
+      ok ".bizagent/env written ($API_KEY_VAR)"
+    else
+      printf "  ! Skipped — add .bizagent/env before expecting hub replies.\n"
+    fi
+  fi
+fi
 
 # --- 2. npm install ---
 step "Dependencies"

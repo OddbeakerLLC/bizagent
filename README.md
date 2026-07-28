@@ -80,10 +80,11 @@ The installer uses `sudo` to install missing packages, so pre-installing
 them (or granting `bizagent` passwordless `sudo` for your package manager)
 is required.
 
-> **Headless server (VPS, SSH-only)?** Set `ANTHROPIC_API_KEY` as an env var
-> or run `claude login --api-key <key>` before the installer — otherwise
-> it will hang waiting for a browser. Other CLI engines have equivalent env
-> vars (`OPENAI_API_KEY` for Codex, etc.).
+> **Headless server (VPS, SSH-only)?** Prefer non-interactive key handoff:
+> `BIZAGENT_API_KEY=... curl -fsSL ... | bash` (writes `.bizagent/env` for the
+> selected CLI). Or export the provider key (`ANTHROPIC_API_KEY` / `XAI_API_KEY` /
+> `OPENAI_API_KEY`) before install and confirm when prompted. CLI browser login
+> alone is not enough for the hub daemon.
 
 **Step 2.** Run the installer (macOS, Linux, or WSL on Windows):
 
@@ -92,8 +93,9 @@ curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.
 ```
 
 This installs `git`, `python3`, Node.js, and `cron` if missing; asks which CLI
-coding agent to use; clones bizagent; starts the control plane; and prints
-your URL. The whole process takes about two minutes.
+coding agent to use; **prompts for that CLI’s API key** and writes it to
+`.bizagent/env` (mode 600, never committed); clones bizagent; starts the control
+plane; and prints your URL. The whole process takes about two minutes.
 
 **Step 3.** Open the URL shown in your terminal (or `http://localhost:8787`
 if it doesn't appear). PTL has already read AGENT.md and begun the setup
@@ -215,6 +217,10 @@ scripts/hub-daemon.sh stop
 # Safe preview then apply archive pruning (default 15 days)
 scripts/prune-archives.sh --dry-run
 scripts/prune-archives.sh
+
+# Follow control-plane / hub runtime logs (Ctrl-C to stop; skips JSON structured.log)
+scripts/viewlog.sh
+scripts/viewlog.sh hub          # warm hub + dispatch-hub.*
 ```
 
 Multiple BizAgent hubs can run on one machine. Set
@@ -280,6 +286,7 @@ bizagent/
 │   ├── hub-daemon.sh          daemon start/stop/status/ping
 │   ├── install-control-plane.sh  wire the control plane + daemon to systemd
 │   ├── prune-archives.sh      archive retention (15-day default, registry-driven)
+│   ├── viewlog.sh             tail -F control-plane / hub / structured logs
 │   ├── write-message.sh       canonical outbox helper (conversation stamping)
 │   ├── nightly.sh             route + prune + journal/sitemap housekeeping
 │   └── ...                    (router, run-agent, onboard, publish-check, etc.)

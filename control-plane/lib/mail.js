@@ -206,6 +206,7 @@ function routeOutboxes(hub) {
     for (const file of markdownFiles(outbox)) {
       const text = fs.readFileSync(file, 'utf8');
       const to = frontmatterValue(text, 'to');
+      const from = frontmatterValue(text, 'from');
       const base = path.basename(file);
 
       if (!to) {

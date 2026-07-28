@@ -3,18 +3,23 @@ const { initAuth } = require('../control-plane/lib/auth');
 const { appendMessage } = require('../control-plane/lib/conversations');
 const { loadRuntimeConfig } = require('../control-plane/lib/config');
 const { dispatchPendingAgents, ensureDispatchPrompt } = require('../control-plane/lib/dispatcher');
+const {
+  isEnterpriseEnabled,
+  loadEnterprisePlugin,
+} = require('../control-plane/lib/enterprise-plugin');
 const { ensureHubRuntimePrompt } = require('../control-plane/lib/hub-memory');
 const { routeOutboxes, writeOutboxMessage } = require('../control-plane/lib/mail');
 const { start } = require('../control-plane/server');
 
 function usage() {
   console.error([
-    'usage: bizagent-control-plane.js {serve|route-once|dispatch-once|ensure-prompts|append-hub-turn|write-message|auth-init}',
+    'usage: bizagent-control-plane.js {serve|route-once|dispatch-once|ensure-prompts|append-hub-turn|write-message|auth-init|enterprise-init}',
     '  common: --hub PATH',
     '  auth-init: --username USER --password PASS',
     '  append-hub-turn: --conversation ID --content TEXT|--content-file PATH',
     '  write-message: --to SLUG --subject TEXT [--from SLUG] [--conversation ID]',
     '                 [--content TEXT|--content-file PATH]  (body also via stdin)',
+    '  enterprise-init: requires settings.enterprise.enabled; delegates to package',
   ].join('\n'));
   process.exit(2);
 }
@@ -111,6 +116,42 @@ async function main() {
     initAuth(config.hub, opts.username, opts.password);
     console.log('auth initialized');
     return null;
+  }
+  if (opts.command === 'enterprise-init') {
+    if (!isEnterpriseEnabled(config.registry)) {
+      console.error(
+        'enterprise-init: set settings.enterprise.enabled to true in registry.json first',
+      );
+      process.exit(1);
+    }
+    const state = loadEnterprisePlugin(config);
+    if (state.error && !state.module) {
+      console.error(`enterprise-init: ${state.error}`);
+      process.exit(1);
+    }
+    const mod = state.module;
+    if (mod && typeof mod.enterpriseInit === 'function') {
+      const result = mod.enterpriseInit(state.api || { hub: config.hub, registry: config.registry });
+      console.log(
+        typeof result === 'string'
+          ? result
+          : 'enterprise-init: completed via package enterpriseInit()',
+      );
+      return null;
+    }
+    // Phase 0 / scaffold: package may only export register(). Do not invent migration in OSS.
+    console.error(
+      'enterprise-init: package loaded but does not export enterpriseInit() yet (Phase 1).',
+    );
+    console.error(
+      '  Plugin register() is available; set package_path or install @bizagent/enterprise, then upgrade.',
+    );
+    if (state.info) {
+      console.error(
+        `  loaded: ${state.info.name || 'enterprise'}@${state.info.version || '?'} active=${state.active}`,
+      );
+    }
+    process.exit(2);
   }
   usage();
   return null;

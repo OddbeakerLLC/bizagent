@@ -99,32 +99,55 @@ function cliMtimeMs(hub) {
   }
 }
 
-// CLI-launch fields derived from cli.json and .cli file (with env-var overrides).
-// Kept in a function so a long-running process can re-derive them when either
-// file changes on disk, without a restart. See refreshCliConfig().
-function deriveCliSettings(cli, cliJson) {
-  const globalCliJson = cliJson || {};
-  return {
-    cli:
-      process.env.BIZAGENT_CLI ||
-      globalCliJson.cli ||
-      cli.CLI ||
-      cli.CLI_CMD ||
-      "claude",
-    promptFlag:
-      process.env.BIZAGENT_CLI_PROMPT_FLAG ||
-      globalCliJson.promptFlag ||
-      cli.CLI_PROMPT_FLAG ||
-      "-p",
-    extraArgs:
-      process.env.BIZAGENT_CLI_EXTRA_ARGS ||
-      globalCliJson.flags?.extra ||
-      globalCliJson.extraArgs ||
-      (cli.CLI_EXTRA_ARGS !== undefined
-        ? cli.CLI_EXTRA_ARGS
-        : cli.CLI_YOLO_FLAG) ||
-      "",
-  };
+/**
+ * Basename of a CLI command (path-safe). Local to config to avoid circular requires.
+ */
+function cliBasename(name) {
+  const base = String(name || "")
+    .split(/[/\\]/)
+    .pop() || "";
+  return base.replace(/\.exe$/i, "");
+}
+
+/**
+ * Hub default CLI **name** only (not flags).
+ * Priority: env → registry settings.hub_agent.cliName → legacy .cli CLI_CMD (migration).
+ * Flags always come from cli.json via getCliSettings — never from .cli.
+ */
+function resolveHubCliName(registry, legacyCliFile = {}) {
+  const hubAgent =
+    (registry && registry.settings && registry.settings.hub_agent) || {};
+  const fromRegistry =
+    hubAgent.cliName ||
+    (typeof hubAgent.cli === "string" ? hubAgent.cli : "") ||
+    "";
+  const fromLegacy = cliBasename(
+    legacyCliFile.CLI_CMD || legacyCliFile.CLI || "",
+  );
+  return (
+    process.env.BIZAGENT_HUB_CLI ||
+    String(fromRegistry || "").trim() ||
+    fromLegacy ||
+    ""
+  );
+}
+
+/**
+ * Apply hub CLI name onto config after registry / .cli reloads.
+ * Sets config.cli and config.hubCliName to the same catalog key.
+ */
+function applyHubCliName(config) {
+  const legacy = readCliFile(config.hub);
+  const name = resolveHubCliName(config.registry || {}, legacy);
+  config.hubCliName = name;
+  // getCliSettings falls back to config.cli when product cliName is empty.
+  config.cli = name;
+  config._hubCliFromLegacyDotCli = !!(
+    name &&
+    legacy.CLI_CMD &&
+    !((config.registry.settings || {}).hub_agent || {}).cliName
+  );
+  return config;
 }
 
 function clampInt(value, min, max, fallback) {
@@ -189,7 +212,8 @@ function deriveRegistrySettings(registry) {
       hubAgent.model ||
       models.orchestrator ||
       "",
-    // Same resolution as product agents: cliName preferred, legacy `cli` string accepted.
+    // Catalog key for the hub PTL CLI (flags live in cli.json). Empty until
+    // installer/registry sets it; resolveHubCliName may fill from legacy .cli.
     hubCliName:
       process.env.BIZAGENT_HUB_CLI ||
       hubAgent.cliName ||
@@ -211,7 +235,6 @@ function loadRuntimeConfig(hubInput) {
   const cliMtime = cliMtimeMs(hub);
   const cliJsonMtime = cliJsonMtimeMs(hub);
   const cliJson = loadCliJson(hub);
-  const cliSettings = deriveCliSettings(readCliFile(hub), cliJson);
   const port = Number(
     process.env.BIZAGENT_PORT ||
       (registry.settings &&
@@ -226,10 +249,9 @@ function loadRuntimeConfig(hubInput) {
       registry.settings.control_plane.host) ||
     "0.0.0.0";
 
-  return {
+  const config = {
     hub,
     registry,
-    ...cliSettings,
     port,
     host,
     dryRun: process.env.BIZAGENT_DRY_RUN === "1",
@@ -239,6 +261,8 @@ function loadRuntimeConfig(hubInput) {
     _cliJsonMtimeMs: cliJsonMtime,
     _cliJson: cliJson,
   };
+  applyHubCliName(config);
+  return config;
 }
 
 // Re-reads registry.json when it has changed on disk and refreshes the
@@ -252,13 +276,12 @@ function refreshRegistry(config) {
   config._registryMtimeMs = mtimeMs;
   config.registry = loadRegistry(config.hub);
   Object.assign(config, deriveRegistrySettings(config.registry));
+  applyHubCliName(config);
   return config;
 }
 
-// Re-reads .cli and cli.json when either has changed on disk and refreshes
-// the CLI-launch fields (cli, promptFlag, extraArgs) on `config` in place.
-// Cheap to call on every tick (a single stat call) so the control-plane server
-// picks up CLI command/flag/permission changes without a restart.
+// Re-reads cli.json and legacy .cli when either has changed on disk.
+// cli.json holds engine flags; .cli is migration-only for hub CLI *name*.
 function refreshCliConfig(config) {
   const cliMtime = cliMtimeMs(config.hub);
   const cliJsonMtime = cliJsonMtimeMs(config.hub);
@@ -271,14 +294,11 @@ function refreshCliConfig(config) {
   config._cliMtimeMs = cliMtime;
   config._cliJsonMtimeMs = cliJsonMtime;
   config._cliJson = loadCliJson(config.hub);
-  Object.assign(
-    config,
-    deriveCliSettings(readCliFile(config.hub), config._cliJson),
-  );
+  applyHubCliName(config);
   return config;
 }
 
-// Picks up both registry.json and .cli edits without a process restart.
+// Picks up registry.json, cli.json, and legacy .cli edits without a restart.
 function refreshRuntimeConfig(config) {
   refreshRegistry(config);
   refreshCliConfig(config);
@@ -292,7 +312,8 @@ function agentsFromRegistry(registry) {
       name: product.name || product.slug,
       agentName: product.agent_name || product.name || product.slug,
       model: product.model || "",
-      cliName: product.cliName || product.cli || "claude",
+      // Empty → getCliSettings uses hub settings.hub_agent.cliName / legacy fallback.
+      cliName: product.cliName || product.cli || "",
     }))
     .filter((agent) => agent.slug);
 }
@@ -304,15 +325,18 @@ function appDir(hub) {
 module.exports = {
   appDir,
   agentsFromRegistry,
+  applyHubCliName,
   ensureDir,
   hubPath,
   loadCliJson,
   loadHubEnv,
   loadRegistry,
   loadRuntimeConfig,
+  readCliFile,
   readJson,
   refreshCliConfig,
   refreshRegistry,
   refreshRuntimeConfig,
   registryMtimeMs,
+  resolveHubCliName,
 };

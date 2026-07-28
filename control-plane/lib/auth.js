@@ -67,7 +67,7 @@ function createSession(hub, username) {
   logEvent(hub, {
     event: 'login',
     username: username,
-    session_id: sessionId
+    session_id: id
   });
   return id;
 }

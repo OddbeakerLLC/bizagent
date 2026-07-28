@@ -38,7 +38,7 @@ grep -q "Hub CLI authentication failed" "$ROOT/control-plane/lib/hub-turn-safety
 grep -q "EnvironmentFile=.*\.bizagent/env" "$ROOT/install/bizagent-control-plane.service" \
   || fail "systemd template missing EnvironmentFile for .bizagent/env"
 
-# registry tuning schema
+# registry tuning schema — example only (registry.json is operator-local / gitignored)
 node -e '
 const r = require(process.argv[1]);
 const t = r.settings && r.settings.tuning;
@@ -47,13 +47,7 @@ if (!t || !t.archive || t.archive.retention_days == null) {
   process.exit(1);
 }
 if (Number(t.archive.retention_days) < 1) process.exit(1);
-' "$ROOT/registry.json" || fail "registry.json missing settings.tuning.archive"
-
-node -e '
-const r = require(process.argv[1]);
-const t = r.settings && r.settings.tuning;
-if (!t || !t.archive) { console.error("example missing tuning"); process.exit(1); }
-' "$ROOT/registry.example.json" || fail "registry.example.json missing settings.tuning"
+' "$ROOT/registry.example.json" || fail "registry.example.json missing settings.tuning.archive"
 
 # loadHubEnv unit behavior
 node -e '

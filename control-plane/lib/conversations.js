@@ -155,7 +155,15 @@ function stripLaunchAcks(conv) {
 }
 
 function saveConversation(hub, conv) {
-  conv.updated_at = new Date().toISOString();
+  // Always advance updated_at so console poll stamps detect ack→reply swaps
+  // even when two saves land in the same millisecond (ISO resolution is 1ms).
+  const prev = conv.updated_at;
+  let next = new Date().toISOString();
+  if (prev && next <= prev) {
+    const t = Date.parse(prev);
+    next = new Date((Number.isFinite(t) ? t : Date.now()) + 1).toISOString();
+  }
+  conv.updated_at = next;
   compactConversation(conv);
   fs.writeFileSync(safeConversationFile(hub, conv.id), `${JSON.stringify(conv, null, 2)}\n`);
   compactHubSession(hub, conv);

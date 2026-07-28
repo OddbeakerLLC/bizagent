@@ -2,7 +2,7 @@
   "_comment": "Example registry. The interview in AGENT.md generates a real registry.json from your answers. Paths are relative to this hub directory. Fill 'remote' to allow setup on a machine where the repos are not yet present.",
   "org": "Example Co",
   "hub": {
-    "name": "bizagent",
+    "name": "BizAgent",
     "remote": ""
   },
   "settings": {
@@ -21,10 +21,18 @@
       "host": "0.0.0.0",
       "port": 8787
     },
+    "enterprise": {
+      "_comment": "Optional multi-user layer (private @bizagent/enterprise). Absent or enabled:false = pure OSS single-operator. Public control plane loads the package only when enabled===true; resolve failures soft-fail to OSS.",
+      "enabled": false,
+      "package": "@bizagent/enterprise",
+      "package_path": "",
+      "seats_max": 25,
+      "enterprise_api_min": 1
+    },
     "hub_agent": {
-      "_comment": "Optional hub PTL agent settings for control-plane launches. cliName references an entry in cli.json (e.g. claude, grok); empty falls back to .cli / default.",
+      "_comment": "Hub PTL launch settings. cliName is a key in cli.json (e.g. claude, grok). Installer sets this; product agents use their own cliName. Flags always come from cli.json — never from legacy .cli.",
       "prompt": "You are the hub PTL agent. Read inbox/*.md for incoming messages, process each one, then archive it. After processing all messages, send a single PushNotification with status=proactive summarizing what arrived and what you did.",
-      "cliName": "",
+      "cliName": "claude",
       "model": ""
     },
     "models": {

@@ -17,10 +17,214 @@ SERVER="$ROOT/control-plane/server.js"
 [ -f "$ROOT/templates/dispatch.md.template" ] || fail "dispatch prompt template missing"
 [ -f "$ROOT/install/bizagent-control-plane.service" ] || fail "control-plane systemd service missing"
 
+# cli.json is required: missing active CLI name must fail (no silent invent/leak).
+# Product cliName must NOT inherit hub .cli extraArgs.
+if ! node - "$ROOT" <<'NODE'
+const path = require('path');
+const {
+  getCliSettings,
+  compileAgentCommand,
+  requireCliDef,
+} = require(path.join(process.argv[2], 'control-plane/lib/cli-config'));
+
+const catalog = {
+  grok: { executable: 'grok', promptFlag: '--prompt-file', flags: { extra: '--always-approve' } },
+  claude: { executable: 'claude', promptFlag: '-p', flags: { extra: '--dangerously-skip-permissions' } },
+};
+const hubConfig = { cli: 'grok', hubCliName: 'grok' };
+
+// Missing cli.json / empty → throw
+let threw = false;
+try {
+  getCliSettings(process.argv[2], {}, hubConfig, 'claude', '');
+} catch (e) {
+  threw = /cli\.json/i.test(e.message);
+}
+if (!threw) {
+  console.error('expected throw when cli.json empty');
+  process.exit(1);
+}
+
+// Empty name → throw (no silent default)
+threw = false;
+try {
+  getCliSettings(process.argv[2], catalog, { cli: '', hubCliName: '' }, '', '');
+} catch (e) {
+  threw = /CLI name is empty/i.test(e.message);
+}
+if (!threw) {
+  console.error('expected throw when hub and product CLI names empty');
+  process.exit(2);
+}
+
+// Unknown name → throw
+threw = false;
+try {
+  getCliSettings(process.argv[2], catalog, hubConfig, 'not-a-cli', '');
+} catch (e) {
+  threw = /no entry for CLI/i.test(e.message);
+}
+if (!threw) {
+  console.error('expected throw for unknown CLI name');
+  process.exit(3);
+}
+
+const fixed = getCliSettings(process.argv[2], catalog, hubConfig, '', '');
+if (fixed.promptFlag !== '--prompt-file') {
+  console.error('expected grok promptFlag from cli.json', fixed);
+  process.exit(4);
+}
+if (!/--always-approve/.test(fixed.extraArgs || '')) {
+  console.error('expected grok extraArgs from cli.json', fixed);
+  process.exit(5);
+}
+
+const claude = getCliSettings(process.argv[2], catalog, hubConfig, 'claude', '');
+if (claude.cli !== 'claude') {
+  console.error('claude cliName resolved wrong executable', claude);
+  process.exit(6);
+}
+if (/always-approve/.test(claude.extraArgs || '')) {
+  console.error('hub flags leaked onto claude product agent', claude);
+  process.exit(7);
+}
+if (!/dangerously-skip-permissions/.test(claude.extraArgs || '')) {
+  console.error('claude missing headless permission flag from cli.json', claude);
+  process.exit(8);
+}
+requireCliDef(catalog, 'grok');
+NODE
+then
+  fail "cli.json required-entry / isolation checks failed"
+fi
+# Enterprise Phase 0 plugin seams (optional multi-user layer; soft-fail when absent)
+[ -f "$ROOT/control-plane/lib/enterprise-plugin.js" ] \
+  || fail "enterprise-plugin.js missing"
+grep -q "loadEnterprisePlugin" "$ROOT/control-plane/lib/enterprise-plugin.js" \
+  || fail "enterprise loader missing loadEnterprisePlugin"
+grep -q "registerRoute" "$ROOT/control-plane/lib/enterprise-plugin.js" \
+  || fail "enterprise plugin API missing registerRoute"
+grep -q "filterAgents" "$ROOT/control-plane/lib/enterprise-plugin.js" \
+  || fail "enterprise hooks missing filterAgents placeholder"
+grep -q "attachEnterprisePlugin" "$ROOT/control-plane/server.js" \
+  || fail "server does not attach enterprise plugin"
+grep -q "enterprise-init" "$ROOT/scripts/bizagent-control-plane.js" \
+  || fail "CLI missing enterprise-init"
+grep -q '"enterprise"' "$ROOT/registry.example.json" \
+  || fail "registry.example.json missing settings.enterprise gate"
+if ! node - "$ROOT" <<'NODE'
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const root = process.argv[2];
+const {
+  loadEnterprisePlugin,
+  isEnterpriseEnabled,
+  applyFilterAgents,
+} = require(path.join(root, 'control-plane/lib/enterprise-plugin'));
+
+// Absent settings → pure OSS no-op
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'biz-ent-'));
+const off = loadEnterprisePlugin({ hub, registry: { settings: {} } });
+if (off.active || off.enabled) {
+  console.error('expected inactive when enterprise settings absent', off);
+  process.exit(1);
+}
+if (isEnterpriseEnabled({ settings: {} })) process.exit(2);
+
+// Enabled but missing package → soft-fail, not throw
+const miss = loadEnterprisePlugin({
+  hub,
+  registry: {
+    settings: {
+      enterprise: { enabled: true, package: '@bizagent/enterprise-not-installed-xyz' },
+    },
+  },
+});
+if (miss.active) {
+  console.error('missing package should not be active', miss);
+  process.exit(3);
+}
+if (!miss.error) {
+  console.error('missing package should record error', miss);
+  process.exit(4);
+}
+
+// Path package: scaffold-like register()
+const pkgDir = path.join(hub, 'fake-ent');
+fs.mkdirSync(pkgDir);
+fs.writeFileSync(path.join(pkgDir, 'index.js'), `
+module.exports = {
+  ENTERPRISE_API: 1,
+  register(api) {
+    api.hooks.filterAgents = (agents) => agents.filter((a) => a.slug === 'hub');
+    api.registerRoute('GET', '/api/enterprise/me', (req, res) => {
+      res.end('ok');
+    });
+    return { name: 'fake-ent', version: '0.0.0', enterprise_api: 1, active: true, phase: 0 };
+  },
+};
+`);
+const on = loadEnterprisePlugin({
+  hub,
+  registry: {
+    settings: {
+      enterprise: {
+        enabled: true,
+        package_path: pkgDir,
+        enterprise_api_min: 1,
+      },
+    },
+  },
+});
+if (!on.active || !on.routes.length) {
+  console.error('path package should activate and register routes', on);
+  process.exit(5);
+}
+const filtered = applyFilterAgents(on, [
+  { slug: 'hub' },
+  { slug: 'widgets' },
+], null);
+if (filtered.length !== 1 || filtered[0].slug !== 'hub') {
+  console.error('filterAgents hook not applied', filtered);
+  process.exit(6);
+}
+
+// Real private scaffold if present beside workspace
+const entHome = path.join(os.homedir(), 'dev', 'bizagent-enterprise');
+if (fs.existsSync(path.join(entHome, 'index.js'))) {
+  const real = loadEnterprisePlugin({
+    hub,
+    registry: {
+      settings: {
+        enterprise: {
+          enabled: true,
+          package_path: entHome,
+          enterprise_api_min: 1,
+        },
+      },
+    },
+  });
+  if (!real.active || !real.info || real.info.phase !== 0) {
+    console.error('bizagent-enterprise scaffold should load active phase 0', real);
+    process.exit(7);
+  }
+}
+
+fs.rmSync(hub, { recursive: true, force: true });
+NODE
+then
+  fail "enterprise plugin loader unit checks failed"
+fi
 grep -q "pbkdf2Sync" "$ROOT/control-plane/lib/auth.js" \
   || fail "auth does not use PBKDF2 password hashing"
 grep -q "timingSafeEqual" "$ROOT/control-plane/lib/auth.js" \
   || fail "auth does not use constant-time password comparison"
+# Regression: createSession must log the local `id` (not an undefined sessionId).
+# A prior makeover used session_id: sessionId while the local var was `id`, which
+# threw on every successful login and left setup stuck after first account create.
+grep -A8 "function createSession" "$ROOT/control-plane/lib/auth.js" | grep -q "session_id: id" \
+  || fail "createSession does not log session_id: id (login would throw)"
 grep -q "\.dispatch\.md" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not ensure agents/<slug>/.dispatch.md"
 grep -q "buildAgentTurnPrompt" "$ROOT/control-plane/lib/dispatcher.js" \
@@ -201,6 +405,18 @@ grep -q "control-plane.sh" "$ROOT/README.md" \
   || fail "README does not document easy start/stop control-plane command"
 [ -x "$ROOT/scripts/control-plane.sh" ] \
   || fail "easy start/stop script missing or not executable"
+[ -x "$ROOT/scripts/viewlog.sh" ] \
+  || fail "viewlog.sh missing or not executable"
+grep -q 'BIZAGENT_HUB\|LOG_DIR' "$ROOT/scripts/viewlog.sh" \
+  || fail "viewlog.sh does not resolve hub logs via HUB path"
+# Human viewer: default mode lists control-plane logs, not JSON structured.log.
+grep -q "control-plane.log" "$ROOT/scripts/viewlog.sh" \
+  || fail "viewlog.sh missing control-plane.log"
+# The default pick_existing block must not add structured.log (all mode may exclude it by name).
+awk '/^  default\)/,/^  hub\)/' "$ROOT/scripts/viewlog.sh" | grep -q 'structured\.log' \
+  && fail "viewlog.sh default mode still includes structured.log" || true
+awk '/^  default\)/,/^  hub\)/' "$ROOT/scripts/viewlog.sh" | grep -q 'control-plane.log' \
+  || fail "viewlog.sh default mode missing control-plane.log"
 grep -q "serve --hub" "$ROOT/scripts/control-plane.sh" \
   || fail "start/stop script does not pass the hub path through the control-plane CLI"
 grep -q "control-plane" "$ROOT/scripts/router.sh" \
@@ -223,7 +439,7 @@ grep -q "sha256" "$ROOT/scripts/install-control-plane.sh" \
   || fail "control-plane installer service name is not path-stable"
 grep -q "bizagent-control-plane" "$ROOT/README.md" \
   || fail "README does not document the control plane"
-grep -q "^.bizagent/" "$ROOT/.gitignore" \
+grep -qE '^\.bizagent(/\*|/)?$' "$ROOT/.gitignore" \
   || fail ".gitignore does not exclude control-plane runtime state"
 grep -q "^agents/\\*/.dispatch.md" "$ROOT/.gitignore" \
   || fail ".gitignore does not exclude generated agent prompts"
@@ -267,6 +483,36 @@ if command -v node >/dev/null 2>&1; then
   TMP="$(mktemp -d)"
   TMP2="$(mktemp -d)"
   trap 'rm -rf "$TMP" "$TMP2"' EXIT
+
+  # Auth session create/login path (unit): createSession must not throw.
+  if ! node - "$ROOT" "$TMP" <<'NODE'
+const path = require('path');
+const fs = require('fs');
+const root = process.argv[2];
+const hub = path.join(process.argv[3], 'auth-hub');
+fs.mkdirSync(hub, { recursive: true });
+const {
+  initAuth, verifyLogin, createSession, getSession, destroySession, hasAuth,
+} = require(path.join(root, 'control-plane/lib/auth'));
+initAuth(hub, 'operator', 's3cret-pass');
+if (!hasAuth(hub)) { console.error('hasAuth false after init'); process.exit(1); }
+if (!verifyLogin(hub, 'operator', 's3cret-pass')) { console.error('verify failed'); process.exit(2); }
+if (verifyLogin(hub, 'operator', 'wrong')) { console.error('bad password accepted'); process.exit(3); }
+let id;
+try {
+  id = createSession(hub, 'operator');
+} catch (err) {
+  console.error('createSession threw:', err.message);
+  process.exit(4);
+}
+if (!id || !getSession(hub, id)) { console.error('session missing after create'); process.exit(5); }
+destroySession(hub, id);
+if (getSession(hub, id)) { console.error('session still present after destroy'); process.exit(6); }
+NODE
+  then
+    fail "auth createSession/login unit checks failed"
+  fi
+
   mkdir -p "$TMP/agents/alpha/inbox/archive" "$TMP/agents/alpha/outbox" "$TMP/agents/beta/inbox/archive" "$TMP/agents/beta/outbox" "$TMP/outbox" "$TMP/inbox" "$TMP/logs"
   cat > "$TMP/registry.json" <<'JSON'
 {"settings":{"dispatch":{"max_concurrency":2,"lock_lease_secs":60}},"products":[{"slug":"alpha","name":"Alpha","agent_name":"Agent A","projects":[]},{"slug":"beta","name":"Beta","agent_name":"Agent B","projects":[]}]}
@@ -1560,7 +1806,7 @@ NODE
     fail "cli.json/registry.json schema validation (cliName references only, no slugs in cli.json) failed"
   fi
 
-  # hub_agent.cliName must drive hub launches (not the global .cli default alone)
+  # hub_agent.cliName drives hub launches; legacy .cli is name-only migration fallback
   if ! node - "$ROOT" <<'NODE'
 const root = process.argv[2];
 const fs = require('fs');
@@ -1577,6 +1823,7 @@ fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
   },
   products: [],
 }));
+// Legacy .cli says claude — must NOT win when registry hub_agent.cliName is set
 fs.writeFileSync(path.join(hub, '.cli'), [
   'CLI_CMD=claude',
   'CLI_PROMPT_FLAG=-p',
@@ -1584,7 +1831,7 @@ fs.writeFileSync(path.join(hub, '.cli'), [
   '',
 ].join('\n'));
 fs.writeFileSync(path.join(hub, 'cli.json'), JSON.stringify({
-  claude: { executable: 'claude', promptFlag: '-p', flags: { extra: '' } },
+  claude: { executable: 'claude', promptFlag: '-p', flags: { extra: '--dangerously-skip-permissions' } },
   grok: { executable: 'grok', promptFlag: '--prompt-file', flags: { extra: '--always-approve' } },
 }));
 
@@ -1615,22 +1862,30 @@ if (!settings.extraArgs.includes('--always-approve')) {
   process.exit(5);
 }
 
-// Empty hub_agent.cliName falls back to global default (still claude from .cli/cli.json)
+// Empty hub_agent.cliName → migrate name from legacy .cli only
 fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
   settings: { hub_agent: { model: '' }, models: {} },
   products: [],
 }));
 const fallback = loadRuntimeConfig(hub);
-if (fallback.hubCliName !== '') {
-  console.error('empty hubCliName expected, got:', fallback.hubCliName);
+if (fallback.hubCliName !== 'claude') {
+  console.error('legacy .cli name fallback expected claude, got:', fallback.hubCliName);
   process.exit(6);
+}
+if (!fallback._hubCliFromLegacyDotCli) {
+  console.error('expected _hubCliFromLegacyDotCli marker');
+  process.exit(7);
 }
 const fallbackSettings = getCliSettings(
   hub, fallback._cliJson, fallback, fallback.hubCliName || '', fallback.hubModel || '',
 );
 if (fallbackSettings.cli !== 'claude') {
   console.error('fallback executable wrong:', fallbackSettings.cli);
-  process.exit(7);
+  process.exit(8);
+}
+if (!fallbackSettings.extraArgs.includes('dangerously-skip-permissions')) {
+  console.error('claude flags should come from cli.json:', fallbackSettings.extraArgs);
+  process.exit(9);
 }
 
 fs.rmSync(hub, { recursive: true, force: true });
@@ -1729,20 +1984,31 @@ if (fs.existsSync(path.join(cwd, 'AGENT.md'))) {
   process.exit(8);
 }
 
-// promptFlag (not legacy-only `prompt`)
+// promptFlag from cli.json (not legacy .cli flags)
 const settings = getCliSettings(hub, {
   grok: { executable: 'grok', promptFlag: '--prompt-file', flags: { extra: '--always-approve' } },
-}, { cli: 'claude', promptFlag: '-p', extraArgs: '' }, 'grok', '');
+}, { cli: 'claude', hubCliName: 'claude' }, 'grok', '');
 if (settings.promptFlag !== '--prompt-file') {
   console.error('getCliSettings ignored promptFlag:', settings.promptFlag);
   process.exit(9);
 }
-// legacy `prompt` still works
+// legacy `prompt` key in cli.json is still honored; for grok, -p → --prompt-file
 const legacy = getCliSettings(hub, {
   grok: { executable: 'grok', prompt: '-p', flags: { extra: '' } },
-}, { cli: 'claude', promptFlag: '-p', extraArgs: '' }, 'grok', '');
-if (legacy.promptFlag !== '-p') {
-  console.error('legacy prompt key broken:', legacy.promptFlag);
+}, { cli: 'claude', hubCliName: 'claude' }, 'grok', '');
+if (legacy.promptFlag !== '--prompt-file') {
+  console.error('legacy prompt key / grok -p safety net broken:', legacy.promptFlag);
+  process.exit(10);
+}
+if (!/--always-approve/.test(legacy.extraArgs || '')) {
+  console.error('grok should force --always-approve for headless tool use:', legacy.extraArgs);
+  process.exit(10);
+}
+const legacyClaude = getCliSettings(hub, {
+  claude: { executable: 'claude', prompt: '-p', flags: { extra: '' } },
+}, { cli: 'grok', hubCliName: 'grok' }, 'claude', '');
+if (legacyClaude.promptFlag !== '-p') {
+  console.error('legacy prompt key broken for claude:', legacyClaude.promptFlag);
   process.exit(10);
 }
 

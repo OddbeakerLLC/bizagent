@@ -11,6 +11,8 @@
 #   BIZAGENT_DIR=/path/to/clone    Override the default install dir (./bizagent)
 #   BIZAGENT_SOURCE=/path/or/url    Override the source repo (local path, file:// URL, or git URL)
 #   BIZAGENT_REINSTALL=1           Wipe an existing clone and reinstall from scratch
+#   BIZAGENT_API_KEY=...           Non-interactive: write this as the selected CLI's API key
+#                                  into INSTALL_DIR/.bizagent/env (preferred over prompting)
 
 set -euo pipefail
 
@@ -125,12 +127,16 @@ KNOWN_CLIS=(
   "claude|Claude Code (Anthropic)|-p|curl|https://claude.ai/install.sh|--dangerously-skip-permissions"
   "agy|Antigravity CLI (Google)|-p|curl|https://antigravity.google/cli/install.sh|--dangerously-skip-permissions"
   "codex|Codex CLI (OpenAI)|exec|curl|https://chatgpt.com/codex/install.sh|--full-auto"
-  "grok|Grok CLI (xAI)|-p|curl|https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh|"
+  # Grok: -p/--single is prompt *text*; hub turns pass a file path → must use --prompt-file.
+  # --always-approve is required so the agent can write reserved-body / run write-message.
+  "grok|Grok CLI (xAI)|--prompt-file|curl|https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh|--always-approve"
 )
 
 SELECTED_CLI=""
 SELECTED_PROMPT_FLAG=""
 SELECTED_YOLO_FLAG=""
+SELECTED_API_KEY_VAR=""
+SELECTED_API_KEY=""
 
 ensure_npm() {
   if have npm; then return; fi
@@ -307,14 +313,250 @@ detect_and_select_cli() {
   ok "Selected: ${all_names[$idx]} ($SELECTED_CLI)"
 }
 
-write_cli_config() {
-  cat > "$INSTALL_DIR/.cli" <<EOF
-# bizagent CLI config — written by installer, read by AGENT.md setup
-CLI_CMD=$SELECTED_CLI
-CLI_PROMPT_FLAG=$SELECTED_PROMPT_FLAG
-CLI_EXTRA_ARGS=$SELECTED_YOLO_FLAG
+# Map CLI binary → primary API key env var used by hub-daemon / cold spawn.
+# Empty means "login-based or unknown"; we still create .bizagent/env.example guidance.
+api_key_var_for_cli() {
+  case "$1" in
+    claude) echo "ANTHROPIC_API_KEY" ;;
+    grok)   echo "XAI_API_KEY" ;;
+    codex)  echo "OPENAI_API_KEY" ;;
+    *)      echo "" ;;
+  esac
+}
+
+prompt_api_key() {
+  SELECTED_API_KEY_VAR="$(api_key_var_for_cli "$SELECTED_CLI")"
+  SELECTED_API_KEY=""
+
+  # Non-interactive / CI: BIZAGENT_API_KEY wins when set.
+  if [[ -n "${BIZAGENT_API_KEY:-}" ]]; then
+    if [[ -z "$SELECTED_API_KEY_VAR" ]]; then
+      warn "BIZAGENT_API_KEY is set but $SELECTED_CLI has no known key variable; writing XAI_API_KEY as fallback."
+      SELECTED_API_KEY_VAR="XAI_API_KEY"
+    fi
+    SELECTED_API_KEY="$BIZAGENT_API_KEY"
+    ok "Using BIZAGENT_API_KEY for $SELECTED_API_KEY_VAR (will write .bizagent/env)"
+    return
+  fi
+
+  if [[ -z "$SELECTED_API_KEY_VAR" ]]; then
+    note "No standard API-key variable for $SELECTED_CLI — ensure that CLI is already logged in."
+    note "You can still put keys in $INSTALL_DIR/.bizagent/env later (see .bizagent/env.example)."
+    return
+  fi
+
+  # Already present in the installer shell (e.g. headless export before curl|bash).
+  local existing="${!SELECTED_API_KEY_VAR:-}"
+  if [[ -n "$existing" ]]; then
+    local save
+    read -r -p "  $SELECTED_API_KEY_VAR is set in this shell. Save it to .bizagent/env for the hub? [Y/n]: " save </dev/tty
+    save="${save:-Y}"
+    if [[ "$save" =~ ^[Yy] ]]; then
+      SELECTED_API_KEY="$existing"
+      ok "Will write $SELECTED_API_KEY_VAR to .bizagent/env"
+    else
+      note "Leaving .bizagent/env without $SELECTED_API_KEY_VAR (hub must inherit the key another way)."
+    fi
+    return
+  fi
+
+  printf "\n${BOLD}API key for %s${NC}\n" "$SELECTED_CLI"
+  note "Hub turns need $SELECTED_API_KEY_VAR in .bizagent/env (sourced by control-plane + hub-daemon)."
+  note "Paste the key (input hidden). Leave blank to skip — chat will fail until you add it."
+  local key
+  # -r: raw; -s: silent. Read from /dev/tty so curl|bash still works.
+  read -r -s -p "  $SELECTED_API_KEY_VAR: " key </dev/tty
+  printf "\n"
+  if [[ -n "$key" ]]; then
+    SELECTED_API_KEY="$key"
+    ok "$SELECTED_API_KEY_VAR will be written to .bizagent/env (mode 600)"
+  else
+    warn "No key entered. Create .bizagent/env before expecting hub replies:"
+    note "  echo '$SELECTED_API_KEY_VAR=...' > $INSTALL_DIR/.bizagent/env && chmod 600 $INSTALL_DIR/.bizagent/env"
+    note "  then: scripts/hub-daemon.sh restart && scripts/control-plane.sh restart"
+  fi
+}
+
+# Seed cli.json (per-engine catalog). Runtime refuses to launch a CLI name that
+# is not listed here. Flags never come from legacy .cli.
+write_cli_json() {
+  local dest="$INSTALL_DIR/cli.json"
+  local src="$INSTALL_DIR/cli.json.example"
+  local key
+  key="$(basename "$SELECTED_CLI")"
+  key="${key%.exe}"
+
+  if [[ ! -f "$dest" ]]; then
+    if [[ -f "$src" ]]; then
+      cp "$src" "$dest"
+      ok "cli.json seeded from example"
+    else
+      cat > "$dest" <<EOF
+{
+  "claude": {
+    "executable": "claude",
+    "promptFlag": "-p",
+    "flags": { "extra": "--dangerously-skip-permissions" }
+  },
+  "grok": {
+    "executable": "grok",
+    "promptFlag": "--prompt-file",
+    "flags": { "extra": "--always-approve" }
+  },
+  "codex": {
+    "executable": "codex",
+    "promptFlag": "--prompt",
+    "flags": { "extra": "--full-auto" }
+  },
+  "agy": {
+    "executable": "agy",
+    "promptFlag": "-p",
+    "flags": { "extra": "--dangerously-skip-permissions" }
+  }
+}
 EOF
-  ok "CLI config written (.cli)"
+      ok "cli.json written (built-in catalog)"
+    fi
+  fi
+
+  if ! python3 - "$dest" "$key" "$SELECTED_CLI" "$SELECTED_PROMPT_FLAG" "$SELECTED_YOLO_FLAG" <<'PY'
+import json, sys
+path, key, exe, pflag, extra = sys.argv[1:6]
+try:
+    d = json.load(open(path))
+except Exception:
+    d = {}
+if not isinstance(d, dict):
+    d = {}
+def has(k):
+    return k in d and isinstance(d.get(k), dict)
+if not has(key):
+    d[key] = {
+        "executable": exe or key,
+        "promptFlag": pflag or "-p",
+        "flags": {"extra": extra or ""},
+    }
+    json.dump(d, open(path, "w"), indent=2)
+    open(path, "a").write("\n")
+    print("added")
+else:
+    print("ok")
+PY
+  then
+    warn "could not ensure cli.json has entry for $key — runtime will fail launches until fixed"
+  else
+    ok "cli.json has entry for hub CLI '$key'"
+  fi
+}
+
+# Seed operator registry.json; set settings.hub_agent.cliName to the selected CLI.
+# registry.json is gitignored; the public repo only ships registry.example.json.
+# Legacy .cli is NOT written — hub CLI name lives in registry; flags live in cli.json.
+write_registry_seed() {
+  local dest="$INSTALL_DIR/registry.json"
+  local src="$INSTALL_DIR/registry.example.json"
+  local key
+  key="$(basename "$SELECTED_CLI")"
+  key="${key%.exe}"
+
+  if [[ ! -f "$dest" ]]; then
+    if [[ ! -f "$src" ]]; then
+      warn "registry.example.json missing — control plane needs a registry.json"
+      return
+    fi
+    if ! python3 - "$src" "$dest" "$key" <<'PY'
+import json, sys
+src, dest, cli_name = sys.argv[1:4]
+d = json.load(open(src))
+d["org"] = ""
+d["products"] = []
+d["cross_product_edges"] = []
+if "hub" in d and isinstance(d["hub"], dict):
+    d["hub"]["name"] = "BizAgent"
+settings = d.setdefault("settings", {})
+hub_agent = settings.setdefault("hub_agent", {})
+hub_agent["cliName"] = cli_name
+json.dump(d, open(dest, "w"), indent=2)
+open(dest, "a").write("\n")
+PY
+    then
+      cp "$src" "$dest"
+      warn "seeded registry.json as a full example copy (python seed failed)"
+    else
+      ok "registry.json seeded (empty products, hub_agent.cliName=$key)"
+    fi
+  else
+    # Existing registry: ensure hub CLI name is set (migrate from empty / legacy .cli).
+    if ! python3 - "$dest" "$key" "$INSTALL_DIR/.cli" <<'PY'
+import json, sys, os, re
+path, cli_name, dotcli = sys.argv[1:4]
+d = json.load(open(path))
+settings = d.setdefault("settings", {})
+hub_agent = settings.setdefault("hub_agent", {})
+current = (hub_agent.get("cliName") or hub_agent.get("cli") or "").strip()
+if current:
+    print("keep")
+    raise SystemExit(0)
+# Migration: pull name from legacy .cli if present
+legacy = ""
+if os.path.isfile(dotcli):
+    for line in open(dotcli, encoding="utf-8", errors="replace"):
+        m = re.match(r'^CLI_CMD=(.*)$', line.strip())
+        if m:
+            legacy = m.group(1).strip().strip('"').strip("'")
+            break
+    if legacy:
+        legacy = os.path.basename(legacy).replace(".exe", "")
+name = legacy or cli_name
+hub_agent["cliName"] = name
+if "cli" in hub_agent and not hub_agent.get("cliName"):
+    hub_agent["cliName"] = hub_agent["cli"]
+json.dump(d, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+print(name)
+PY
+    then
+      warn "could not set hub_agent.cliName on existing registry.json"
+    else
+      ok "registry.json hub_agent.cliName ensured"
+    fi
+  fi
+
+  # Do not write .cli on new installs. If a leftover .cli exists, leave it for
+  # runtime migration fallback but prefer registry hub_agent.cliName.
+  if [[ -f "$INSTALL_DIR/.cli" ]]; then
+    note "legacy .cli present — hub CLI name is in registry.json; .cli is migration-only"
+  fi
+}
+
+# Persist selected API key (and nothing else) under .bizagent/env — never committed.
+write_env_file() {
+  mkdir -p "$INSTALL_DIR/.bizagent"
+  local env_file="$INSTALL_DIR/.bizagent/env"
+  if [[ -z "$SELECTED_API_KEY" || -z "$SELECTED_API_KEY_VAR" ]]; then
+    if [[ ! -f "$env_file" ]] && [[ -f "$INSTALL_DIR/.bizagent/env.example" ]]; then
+      note "No API key saved. See .bizagent/env.example for the format."
+    fi
+    return
+  fi
+
+  # Merge: replace existing KEY= line or append. Preserve other keys/comments.
+  if [[ -f "$env_file" ]]; then
+    local tmp
+    tmp="$(mktemp)"
+    # Drop prior lines for this key (exact key= prefix).
+    grep -v -E "^${SELECTED_API_KEY_VAR}=" "$env_file" > "$tmp" || true
+    printf '%s=%s\n' "$SELECTED_API_KEY_VAR" "$SELECTED_API_KEY" >> "$tmp"
+    mv "$tmp" "$env_file"
+  else
+    cat > "$env_file" <<EOF
+# Written by install.sh — never commit this file.
+# Sourced by control-plane.sh, hub-daemon, and systemd EnvironmentFile.
+${SELECTED_API_KEY_VAR}=${SELECTED_API_KEY}
+EOF
+  fi
+  chmod 600 "$env_file"
+  ok "API key written to .bizagent/env ($SELECTED_API_KEY_VAR)"
 }
 
 # --- clone + handoff ---
@@ -443,10 +685,17 @@ main() {
   step "Selecting AI CLI"
   detect_and_select_cli
 
+  step "API key for hub agents"
+  # INSTALL_DIR is not finalized yet; prompt still works — path hints use default until choose_dir.
+  INSTALL_DIR="${BIZAGENT_DIR:-$HOME/bizagent}"
+  prompt_api_key
+
   step "Setting up bizagent"
   choose_dir
   clone_repo
-  write_cli_config
+  write_cli_json
+  write_registry_seed
+  write_env_file
 
   handoff
 }

@@ -164,7 +164,28 @@ function runTurn() {
       });
     }
 
-    const cliSettings = getCliSettings(HUB, cliJson, config, hubCliName || '', hubModel || '');
+    let cliSettings;
+    try {
+      cliSettings = getCliSettings(HUB, cliJson, config, hubCliName || '', hubModel || '');
+    } catch (err) {
+      try { fs.unlinkSync(promptFile); } catch (_e) { /* ignore */ }
+      logEvent(HUB, {
+        event: 'cli_config_error',
+        slug: 'hub',
+        error: err.message,
+        status: 'error',
+        via: 'warm_daemon',
+      });
+      resolve({
+        ok: false,
+        exitCode: 1,
+        duration_ms: Date.now() - start,
+        action: 'cli_config_error',
+        error: err.message,
+        conversationId: conversationId || '',
+      });
+      return;
+    }
     const cmdPreview = compileAgentCommand(cliSettings, promptFile);
 
     logEvent(HUB, {
