@@ -45,3 +45,26 @@ sitemap.md
 
 # Operator-specific leak markers for publish-check
 scripts/publish-check.patterns
+
+# --- OPS_HUB_GITIGNORE (appended by detach-framework-remote.sh) ---
+# Operational hub tracks registry + agent standing docs + knowledge.
+# Override framework rules that ignore them for the *public* repo.
+!registry.json
+!cli.json
+!journal/
+!journal/**
+!company/
+!company/**
+!knowledge-stack/
+!knowledge-stack/**
+!agents/
+!agents/**
+# Still never commit live mail or lock noise under agents/
+agents/*/.lock/
+agents/*/.dispatch.md
+agents/*/inbox/
+agents/*/outbox/
+
+# Dependencies
+node_modules/
+package-lock.json

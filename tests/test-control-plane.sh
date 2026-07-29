@@ -904,6 +904,148 @@ if (viewedAfter.messages.some((m) => m.content === 'origin reply')) {
 }
 // Clear fixture so later dry-run launch tests on the same hub see no pending turns.
 fs.unlinkSync(pendingFile);
+
+// Stale active conversation (older than 30s presence) must still stamp —
+// agents often finish after the short UI presence window.
+const stale = createConversation(hub, 'Stale Active');
+const activeFile = path.join(appDir(hub), 'active-conversation.json');
+fs.writeFileSync(activeFile, JSON.stringify({
+  id: stale.id,
+  updated_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+}, null, 2));
+const {
+  STAMP_ACTIVE_MAX_AGE_MS,
+  getActiveConversationId: getActiveNow,
+  getStampConversationId: getStampNow,
+  recordPendingAgentWork,
+  getPendingAgentWorkConversationId,
+} = require(`${root}/control-plane/lib/conversations`);
+if (getActiveNow(hub) !== null) {
+  console.error('presence window should treat 10min-old active as stale');
+  process.exit(27);
+}
+if (getStampNow(hub) !== stale.id) {
+  console.error('stamp window should still use stale active', getStampNow(hub), stale.id, STAMP_ACTIVE_MAX_AGE_MS);
+  process.exit(28);
+}
+fs.writeFileSync(path.join(hub, 'outbox', '2026-07-24-hub-user-stale.md'), `---
+from: hub
+to: user
+date: 2026-07-24
+subject: stale active stamp
+---
+
+stale-active reply
+`);
+routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected stale-active deliver', routed);
+  process.exit(29);
+}
+const stalePath = path.join(userInbox(hub), '2026-07-24-hub-user-stale.md');
+const staleText = fs.readFileSync(stalePath, 'utf8');
+if (frontmatterValue(staleText, 'conversation_id') !== stale.id) {
+  console.error('stale active did not stamp hub→user', staleText);
+  process.exit(30);
+}
+relayed = readUserInboxMessages(hub);
+if ((relayed.relayed ?? relayed) !== 1) {
+  console.error('expected stale-active relay', relayed);
+  process.exit(31);
+}
+
+// hub→agent records pending work; agent→hub stamps even with no active/originating
+fs.writeFileSync(activeFile, JSON.stringify({
+  id: stale.id,
+  updated_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+}, null, 2));
+// Wipe active so only pending-agent-work can provide the id for agent→hub
+fs.unlinkSync(activeFile);
+const agentSlug = 'shell-tools';
+fs.mkdirSync(path.join(hub, 'agents', agentSlug, 'inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents', agentSlug, 'outbox'), { recursive: true });
+// Restore a known conversation and record pending work as hub→agent route would
+const workConv = createConversation(hub, 'Agent Work');
+if (!recordPendingAgentWork(hub, agentSlug, workConv.id)) {
+  console.error('recordPendingAgentWork failed');
+  process.exit(32);
+}
+if (getPendingAgentWorkConversationId(hub, agentSlug) !== workConv.id) {
+  console.error('pending agent work lookup failed');
+  process.exit(33);
+}
+if (getStampNow(hub) !== null && getStampNow(hub) !== workConv.id) {
+  // no active/originating — stamp without fromSlug should be null
+}
+if (getStampNow(hub, agentSlug) !== workConv.id) {
+  console.error('stamp with fromSlug should use pending work', getStampNow(hub, agentSlug));
+  process.exit(34);
+}
+// Simulate agent outbox → hub
+fs.writeFileSync(path.join(hub, 'agents', agentSlug, 'outbox', '2026-07-24-shell-tools-done.md'), `---
+from: shell-tools
+to: hub
+date: 2026-07-24
+subject: work done
+---
+
+agent finished the task
+`);
+routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected agent→hub deliver', routed);
+  process.exit(35);
+}
+const agentHubPath = path.join(hub, 'inbox', '2026-07-24-shell-tools-done.md');
+if (!fs.existsSync(agentHubPath)) {
+  console.error('missing stamped agent→hub file');
+  process.exit(36);
+}
+const agentHubText = fs.readFileSync(agentHubPath, 'utf8');
+if (frontmatterValue(agentHubText, 'conversation_id') !== workConv.id) {
+  console.error('agent→hub missing pending-work conversation_id', agentHubText);
+  process.exit(37);
+}
+
+// hub→agent route records pending work from stamp id
+const dispatchConv = createConversation(hub, 'Dispatch Chat');
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 2, lock_lease_secs: 60 } },
+  products: [{ slug: 'shell-tools', name: 'Shell Tools', agent_name: 'Agent ST', projects: [] }],
+}));
+fs.writeFileSync(activeFile, JSON.stringify({
+  id: dispatchConv.id,
+  updated_at: new Date().toISOString(),
+}, null, 2));
+fs.writeFileSync(path.join(hub, 'outbox', '2026-07-24-hub-shell-tools-task.md'), `---
+from: hub
+to: shell-tools
+date: 2026-07-24
+subject: do task
+---
+
+please do the thing
+`);
+routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected hub→agent deliver', routed);
+  process.exit(38);
+}
+if (getPendingAgentWorkConversationId(hub, agentSlug) !== dispatchConv.id) {
+  console.error('hub→agent did not record pending work', getPendingAgentWorkConversationId(hub, agentSlug));
+  process.exit(39);
+}
+
+// Clean fixtures so the next TMP2 test (launch ack) starts from a quiet hub.
+for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
+  if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
+}
+try { fs.unlinkSync(activeFile); } catch (_e) { /* ignore */ }
+try { fs.unlinkSync(path.join(appDir(hub), 'pending-agent-work.json')); } catch (_e) { /* ignore */ }
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 2, lock_lease_secs: 60 } },
+  products: [],
+}));
 NODE
   then
     fail "conversation_id stamp-on-route failed"

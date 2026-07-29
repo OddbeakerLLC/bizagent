@@ -1,0 +1,38 @@
+{
+  "_comment": "CLI configuration. Standard CLI definitions (claude, codex, agy, grok) keyed by CLI name. Copy to cli.json and customize.",
+  "claude": {
+    "executable": "claude",
+    "promptFlag": "-p",
+    "flags": {
+      "extra": "--dangerously-skip-permissions"
+    }
+  },
+  "codex": {
+    "executable": "codex",
+    "promptFlag": "--prompt",
+    "flags": {
+      "extra": "--full-auto"
+    }
+  },
+  "agy": {
+    "executable": "agy",
+    "promptFlag": "-p",
+    "flags": {
+      "extra": "--dangerously-skip-permissions"
+    }
+  },
+  "grok": {
+    "executable": "grok",
+    "promptFlag": "--prompt-file",
+    "flags": {
+      "extra": "--always-approve"
+    }
+  },
+  "venice": {
+    "executable": "venice-code",
+    "promptFlag": "-f",
+    "flags": {
+      "extra": "-y"
+    }
+  }
+}
