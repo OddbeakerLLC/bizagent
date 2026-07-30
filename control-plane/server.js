@@ -427,11 +427,18 @@ function pushConv(config, id) {
  * Node process (shell EXIT trap) that cannot see wsConvClients / SSE sets.
  */
 function pushConversationsChangedOnDisk(config) {
-  const ids = new Set([...wsConvClients.keys(), ...convClients.keys()]);
+  const liveIds = [...wsConvClients.keys(), ...convClients.keys()];
+  const ids = new Set(liveIds);
   try {
     const active = readJson(activeConversationFile(config.hub), null);
     if (active && active.id) ids.add(active.id);
   } catch (_) {}
+  // Keep last-viewed stamp fresh while a browser is subscribed (SSE/WS).
+  // Without this, ACTIVE 30s presence expires and delayed agent completions
+  // lose conversation_id (UI no longer polls every 2s).
+  for (const id of new Set(liveIds)) {
+    try { setActiveConversation(config.hub, id); } catch (_) {}
+  }
   let pushed = 0;
   for (const id of ids) {
     try {

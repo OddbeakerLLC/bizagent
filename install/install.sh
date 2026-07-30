@@ -227,7 +227,8 @@ fi
 sleep 1
 
 if [[ "$_is_headless" -eq 1 ]]; then
-  _ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | head -3)
+  _ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+
+ | grep -v '^127\.' | head -3)
   if [[ -n "$_ips" ]]; then
     printf "\n${BOLD}Open one of these URLs in your browser to set up BizAgent:${NC}\n\n"
     while IFS= read -r ip; do
@@ -246,3 +247,33 @@ else
     open "http://localhost:$PORT"
   fi
 fi
+
+# --- 8. CLI setup completion instructions ---
+printf "\n${BOLD}${GREEN}=== CLI Setup Complete ===${NC}\n\n"
+printf "Next steps:\n\n"
+printf "1. Add your API key to ~/bizagent/.bizagent/env:\n"
+if [[ -n "$API_KEY_VAR" ]]; then
+  printf "   echo '%s=your_api_key_here' >> ~/bizagent/.bizagent/env\n" "$API_KEY_VAR"
+else
+  printf "   echo 'ANTHROPIC_API_KEY=your_api_key_here' >> ~/bizagent/.bizagent/env\n"
+  printf "   (or XAI_API_KEY, OPENAI_API_KEY, VENICE_API_KEY depending on your CLI)\n"
+fi
+printf "\n"
+printf "2. Set the default model for %s in your shell profile:\n" "$CLI_CMD"
+case "$_cli_key" in
+  claude)
+    printf "   # Claude uses ANTHROPIC_API_KEY; no additional model flag needed\n" ;;
+  grok)
+    printf "   # Grok uses XAI_API_KEY; no additional model flag needed\n" ;;
+  codex)
+    printf "   # Codex uses OPENAI_API_KEY; no additional model flag needed\n" ;;
+  agy)
+    printf "   # Agy uses ANTHROPIC_API_KEY; no additional model flag needed\n" ;;
+  venice)
+    printf "   export VENICE_AI_MODEL=kimi-k2-7-code  # or your preferred model\n" ;;
+  *)
+    printf "   # Check your CLI's documentation for model configuration\n" ;;
+esac
+printf "\n"
+printf "3. Launch the browser to begin onboarding and adding projects:\n"
+printf "   http://localhost:%s\n\n" "$PORT"

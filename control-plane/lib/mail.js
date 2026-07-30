@@ -4,6 +4,7 @@ const { agentsFromRegistry, appDir, ensureDir, loadRegistry } = require('./confi
 const {
   getStampConversationId,
   postAgentCompletionNotice,
+  recordPendingAgentWork,
   recordUserInboxDelivery,
   stampConversationId,
   userInbox,
@@ -120,21 +121,21 @@ function writeContentUnique(dir, basename, content) {
 }
 
 /**
- * For to:user mail missing conversation_id: stamp the originating console
- * conversation (in-flight hub turn) when present, else the open console chat.
- * Never overwrites an existing conversation_id. Prefer originating over the
- * currently-viewed tab so replies cannot cross sessions after a switch.
- * Returns possibly-modified content.
+ * For mail missing conversation_id: stamp originating hub turn, last-viewed
+ * console chat (long TTL), or pending hub→agent work for fromSlug.
+ * Never overwrites an existing conversation_id.
+ * @param {string} [fromSlug] - product agent slug for agent→hub completions
  */
-function maybeStampUserConversationId(hub, text, base) {
-  const stampId = getStampConversationId(hub);
+function maybeStampUserConversationId(hub, text, base, fromSlug) {
+  const stampId = getStampConversationId(hub, fromSlug);
   if (!stampId) return text;
   const stamped = stampConversationId(text, stampId);
   if (stamped !== text) {
     logEvent(hub, {
       event: 'conversation_id_stamp',
       conversation_id: stampId,
-      file: base
+      file: base,
+      from: fromSlug || ''
     });
   }
   return stamped;
@@ -258,29 +259,44 @@ function routeOutboxes(hub) {
       }
       let deliveredFile;
       // Stamp conversation_id for:
-      // - hub→user mail (existing behavior, for console visibility)
-      // - agent→hub mail (completion notifications): associate with the active/originating
-      //   console conversation so the hub turn that processes it must emit a user-visible
-      //   summary via the reserved-body / write-message / safety-net path.
+      // - hub→user mail (console visibility)
+      // - agent→hub mail (completion notifications): associate with originating /
+      //   last-viewed / pending hub→agent work so the hub turn emits a user-visible
+      //   summary via reserved-body / write-message / safety-net.
       const isAgentToHub = (to === 'hub') && from && from !== 'hub' && from !== 'user';
+      const isHubToAgent = (from === 'hub') && to && to !== 'user' && to !== 'hub';
       const shouldStamp = (to === 'user') || isAgentToHub;
-      let stampedForAgentToHub = false;
       if (shouldStamp) {
-        const stamped = maybeStampUserConversationId(hub, text, base);
+        const stamped = maybeStampUserConversationId(hub, text, base, isAgentToHub ? from : undefined);
         if (stamped !== text) {
           deliveredFile = writeContentUnique(dest, base, stamped);
           fs.unlinkSync(file);
-          if (isAgentToHub) stampedForAgentToHub = true;
         } else {
           deliveredFile = writeFileUnique(dest, base, file);
         }
       } else {
         deliveredFile = writeFileUnique(dest, base, file);
       }
+      // Thread conversation_id: hub→agent dispatch remembers which console chat asked.
+      if (isHubToAgent && deliveredFile) {
+        const stampId = getStampConversationId(hub);
+        if (stampId) {
+          try {
+            recordPendingAgentWork(hub, to, stampId);
+            logEvent(hub, {
+              event: 'pending_agent_work',
+              to,
+              conversation_id: stampId,
+              file: base
+            });
+          } catch (_e) { /* non-fatal */ }
+        }
+      }
       if (to === 'user') {
         recordUserInboxDelivery(hub, deliveredFile);
       }
-      // CP-owned visible notice + ensure a summary turn will be taken for agent→hub mail.
+      // CP-owned visible notice for agent→hub completions (does not launch hub;
+      // dispatchPendingAgents claims+launches on the same tick).
       if (isAgentToHub && deliveredFile) {
         const stampedCid = frontmatterValue(
           fs.existsSync(deliveredFile) ? fs.readFileSync(deliveredFile, 'utf8') : text,
@@ -295,15 +311,6 @@ function routeOutboxes(hub) {
             file: base
           });
         }
-        // Archive-gated dedupe for operator notices:
-        // Mark this hub inbox file dispatched immediately on route. Combined with
-        // fingerprinting in dispatcher, a fast re-nudge while the file is still
-        // unarchived will not claim+launch another hub turn for the same mail.
-        try {
-          const { markMailDispatched, dispatchRetrySecs } = require('./dispatcher');
-          const secs = dispatchRetrySecs({ lockLeaseSecs: 1800 });
-          markMailDispatched(hub, 'hub', [deliveredFile], secs);
-        } catch (_e) { /* non-fatal */ }
       }
       delivered += 1;
       logEvent(hub, {

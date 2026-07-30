@@ -276,16 +276,30 @@ function frontmatterValue(text, key) {
   return match ? match[1].trim() : '';
 }
 
-/** How long a console conversation stays "open" after last GET/POST touch. */
+/** How long the UI "is looking" marker stays fresh (short; for presence). */
 const ACTIVE_CONVERSATION_MAX_AGE_MS = 30_000;
+
+/**
+ * How long the last-viewed console conversation may still receive stamped
+ * hub→user / agent→hub mail. SSE/WS replaced 2s polling, so the short
+ * presence window alone drops conversation_id before agents finish work.
+ */
+const STAMP_ACTIVE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/** Pending hub→agent work retains a conversation_id for this long. */
+const PENDING_AGENT_WORK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 function activeConversationFile(hub) {
   return path.join(appDir(hub), 'active-conversation.json');
 }
 
+function pendingAgentWorkFile(hub) {
+  return path.join(appDir(hub), 'pending-agent-work.json');
+}
+
 /**
  * Mark a conversation as the open console chat. Called when the web UI
- * loads or posts to a conversation (poll every ~2s keeps it fresh).
+ * loads, posts, or opens a stream/WS subscription for a conversation.
  */
 function setActiveConversation(hub, id) {
   if (!id || !getConversation(hub, id)) return false;
@@ -299,7 +313,7 @@ function setActiveConversation(hub, id) {
 
 /**
  * Return the open console conversation id, or null if none / stale / invalid.
- * @param {number} [maxAgeMs] - override staleness window (default 30s)
+ * @param {number} [maxAgeMs] - override staleness window (default 30s presence)
  */
 function getActiveConversationId(hub, maxAgeMs = ACTIVE_CONVERSATION_MAX_AGE_MS) {
   const data = readJson(activeConversationFile(hub), null);
@@ -308,6 +322,49 @@ function getActiveConversationId(hub, maxAgeMs = ACTIVE_CONVERSATION_MAX_AGE_MS)
   if (!Number.isFinite(age) || age < 0 || age > maxAgeMs) return null;
   if (!getConversation(hub, data.id)) return null;
   return data.id;
+}
+
+function readPendingAgentWork(hub) {
+  const data = readJson(pendingAgentWorkFile(hub), null);
+  const bySlug = data && data.bySlug && typeof data.bySlug === 'object' ? data.bySlug : {};
+  return bySlug;
+}
+
+function writePendingAgentWork(hub, bySlug) {
+  ensureDir(appDir(hub));
+  fs.writeFileSync(
+    pendingAgentWorkFile(hub),
+    `${JSON.stringify({ bySlug }, null, 2)}\n`,
+  );
+}
+
+/**
+ * Remember which console conversation dispatched work to an agent slug.
+ * Used to stamp agent→hub completions after the short UI presence window expires.
+ */
+function recordPendingAgentWork(hub, slug, conversationId) {
+  if (!slug || !conversationId || !getConversation(hub, conversationId)) return false;
+  const bySlug = readPendingAgentWork(hub);
+  bySlug[String(slug)] = {
+    conversationId: String(conversationId),
+    updatedAt: new Date().toISOString(),
+  };
+  writePendingAgentWork(hub, bySlug);
+  return true;
+}
+
+/**
+ * Lookup conversation_id for a product agent that still has outstanding work.
+ * Returns null when missing, expired, or conversation deleted.
+ */
+function getPendingAgentWorkConversationId(hub, slug) {
+  if (!slug) return null;
+  const entry = readPendingAgentWork(hub)[String(slug)];
+  if (!entry || !entry.conversationId || !entry.updatedAt) return null;
+  const age = Date.now() - Date.parse(entry.updatedAt);
+  if (!Number.isFinite(age) || age < 0 || age > PENDING_AGENT_WORK_MAX_AGE_MS) return null;
+  if (!getConversation(hub, entry.conversationId)) return null;
+  return entry.conversationId;
 }
 
 /**
@@ -461,11 +518,17 @@ function getOriginatingConversationId(hub) {
 }
 
 /**
- * Id to stamp on hub→user mail missing conversation_id.
- * Originating (in-flight) turn wins; else the open console conversation.
+ * Id to stamp on mail missing conversation_id.
+ * Order: in-flight originating hub turn → last-viewed console chat (long TTL)
+ * → optional pending hub→agent work for a product slug (agent→hub completions).
+ * @param {string} [fromSlug] - product agent slug when routing agent→hub mail
  */
-function getStampConversationId(hub) {
-  return getOriginatingConversationId(hub) || getActiveConversationId(hub);
+function getStampConversationId(hub, fromSlug) {
+  return (
+    getOriginatingConversationId(hub)
+    || getActiveConversationId(hub, STAMP_ACTIVE_MAX_AGE_MS)
+    || getPendingAgentWorkConversationId(hub, fromSlug)
+  );
 }
 
 function deleteConversation(hub, id) {
@@ -490,6 +553,8 @@ function deleteConversation(hub, id) {
 
 module.exports = {
   ACTIVE_CONVERSATION_MAX_AGE_MS,
+  STAMP_ACTIVE_MAX_AGE_MS,
+  PENDING_AGENT_WORK_MAX_AGE_MS,
   AGENT_COMPLETION_KIND,
   AGENT_COMPLETION_TEXT,
   activeConversationFile,
@@ -502,6 +567,7 @@ module.exports = {
   getActiveConversationId,
   getConversation,
   getOriginatingConversationId,
+  getPendingAgentWorkConversationId,
   getStampConversationId,
   isAgentCompletionMessage,
   isLaunchAckMessage,
@@ -513,9 +579,11 @@ module.exports = {
   LAUNCH_ACK_KIND,
   LAUNCH_ACK_TEXT,
   listConversations,
+  pendingAgentWorkFile,
   postAgentCompletionNotice,
   postLaunchAck,
   readUserInboxMessages,
+  recordPendingAgentWork,
   recordUserInboxDelivery,
   setActiveConversation,
   shouldStartNewConversation,

@@ -34,6 +34,12 @@ is_public_framework_url() {
 removed=0
 while read -r name; do
   [[ -z "$name" ]] && continue
+  # Dual-use checkouts may keep the public repo as a remote named "framework"
+  # for pushing framework fixes; only strip public URLs from origin/other names.
+  if [[ "$name" == "framework" ]]; then
+    echo "keeping remote '$name' (framework push remote)"
+    continue
+  fi
   url="$(git -C "$HUB" remote get-url "$name" 2>/dev/null || true)"
   if is_public_framework_url "$url"; then
     git -C "$HUB" remote remove "$name"
