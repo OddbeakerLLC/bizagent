@@ -148,7 +148,15 @@ function makeDetailRow(label, field, isJournal) {
 function renderAgents(agents) {
   const root = document.getElementById('agents');
   root.innerHTML = '';
-  agents.forEach((agent) => {
+  // Sort agents alphabetically by agentName, keeping PTL first
+  const sorted = [...agents].sort((a, b) => {
+    const aIsPTL = a.agentName === 'Agent PTL';
+    const bIsPTL = b.agentName === 'Agent PTL';
+    if (aIsPTL && !bIsPTL) return -1;
+    if (!aIsPTL && bIsPTL) return 1;
+    return a.agentName.localeCompare(b.agentName);
+  });
+  sorted.forEach((agent) => {
     const row = document.createElement('div');
     row.className = 'agent-row';
     row.setAttribute('role', 'button');

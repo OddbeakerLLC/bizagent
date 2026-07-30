@@ -91,10 +91,12 @@ function nowIso() {
 }
 
 /**
- * Newest hub-inbox conversation_id (console turns). Scans all pending .md,
- * newest filename first. Product-agent mail never carries conversation_id.
+ * Get conversation_id for hub dispatch.
+ * ALWAYS returns a valid conversation_id — never null.
+ * Falls back to active conversation or creates a "System" conversation.
  */
-function getRecentHubInboxMessage(hub) {
+function getHubConversationId(hub) {
+  // First: check pending hub inbox mail for explicit conversation_id
   const inboxDir = path.join(hub, 'inbox');
   try {
     const files = fs.readdirSync(inboxDir)
@@ -106,10 +108,23 @@ function getRecentHubInboxMessage(hub) {
       const match = content.match(/^conversation_id:\s*(.+?)$/m);
       if (match) return match[1].trim();
     }
-    return null;
   } catch (_err) {
-    return null;
+    /* ignore */
   }
+
+  // Second: use active conversation (longer TTL for stamping)
+  const { getActiveConversationId, createConversation } = require('./conversations');
+  const activeId = getActiveConversationId(hub, 24 * 60 * 60 * 1000); // 24h TTL
+  if (activeId) return activeId;
+
+  // Third: create a System conversation (always-warm guarantee)
+  const sysConv = createConversation(hub, 'System');
+  return sysConv.id;
+}
+
+/** @deprecated Use getHubConversationId() which always returns a valid id */
+function getRecentHubInboxMessage(hub) {
+  return getHubConversationId(hub);
 }
 
 function logByteOffset(file) {
@@ -469,8 +484,8 @@ function launchHub(config) {
   ensureHubRuntimePrompt(hub);
   const runtimeCwd = ensureHubRuntimeCwd(hub);
 
-  // Console turn id (if any) — used for launch ack + reserved reply + outbox safety net.
-  const conversationId = getRecentHubInboxMessage(hub);
+  // ALWAYS-WARM: conversation_id is guaranteed — never null
+  const conversationId = getHubConversationId(hub);
   const startedAt = nowIso();
   const logOffset = logByteOffset(agentLog);
   const stderrOffset = logByteOffset(agentStderr);
@@ -841,6 +856,7 @@ module.exports = {
   dispatchRetrySecs,
   drainHubTurnSafety,
   ensureDispatchPrompt,
+  getHubConversationId,
   getRecentHubInboxMessage,
   hubDaemonSock,
   isAgentActive,

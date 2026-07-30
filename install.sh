@@ -127,9 +127,8 @@ KNOWN_CLIS=(
   "claude|Claude Code (Anthropic)|-p|curl|https://claude.ai/install.sh|--dangerously-skip-permissions"
   "agy|Antigravity CLI (Google)|-p|curl|https://antigravity.google/cli/install.sh|--dangerously-skip-permissions"
   "codex|Codex CLI (OpenAI)|exec|curl|https://chatgpt.com/codex/install.sh|--full-auto"
-  # Grok: -p/--single is prompt *text*; hub turns pass a file path → must use --prompt-file.
-  # --always-approve is required so the agent can write reserved-body / run write-message.
   "grok|Grok CLI (xAI)|--prompt-file|curl|https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh|--always-approve"
+  "venice|Venice Code (Venice.ai)|-f|curl|https://raw.githubusercontent.com/OddbeakerLLC/venice-code/main/install.sh|-y"
 )
 
 SELECTED_CLI=""

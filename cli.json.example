@@ -27,5 +27,12 @@
     "flags": {
       "extra": "--always-approve"
     }
+  },
+  "venice": {
+    "executable": "venice-code",
+    "promptFlag": "-f",
+    "flags": {
+      "extra": "-y"
+    }
   }
 }
