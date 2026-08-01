@@ -68,6 +68,16 @@ function loadRegistry(hub) {
   });
 }
 
+/** Atomic-ish registry write (temp + rename). Preserves formatting with trailing newline. */
+function writeRegistry(hub, registry) {
+  const file = registryFile(hub);
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const body = `${JSON.stringify(registry, null, 2)}\n`;
+  fs.writeFileSync(tmp, body, "utf8");
+  fs.renameSync(tmp, file);
+  return registry;
+}
+
 function registryMtimeMs(hub) {
   try {
     return fs.statSync(registryFile(hub)).mtimeMs;
@@ -305,7 +315,73 @@ function refreshRuntimeConfig(config) {
   return config;
 }
 
-function agentsFromRegistry(registry) {
+/** Expand leading ~ to $HOME. */
+function expandUserPath(projectPath) {
+  const s = String(projectPath || "");
+  if (s === "~") return process.env.HOME || s;
+  if (s.startsWith("~/") || s.startsWith("~\\")) {
+    return path.join(process.env.HOME || "", s.slice(2));
+  }
+  return s;
+}
+
+/**
+ * Resolve a registry project path relative to the hub root.
+ * Absolute paths and ~/… are preserved after expansion.
+ */
+function resolveProjectPath(hub, projectPath) {
+  const expanded = expandUserPath(projectPath);
+  if (!expanded) return "";
+  if (path.isAbsolute(expanded)) return path.resolve(expanded);
+  if (!hub) return path.resolve(expanded);
+  return path.resolve(hub, expanded);
+}
+
+/**
+ * True when `absPath` is a git working tree (`.git` dir or worktree file).
+ * Nested monorepo subfolders without their own .git are not projects.
+ */
+function isGitWorkTree(absPath) {
+  if (!absPath) return false;
+  try {
+    const gitPath = path.join(absPath, ".git");
+    const st = fs.lstatSync(gitPath);
+    return st.isDirectory() || st.isFile();
+  } catch (_err) {
+    return false;
+  }
+}
+
+/**
+ * A UI "project" is a git-backed directory:
+ * - has a non-empty `remote` (cloneable / deferred), or
+ * - the path on disk is its own git work tree.
+ * Subdirectories of a monorepo that are not separate repos are excluded.
+ */
+function isGitBackedProject(hub, project) {
+  if (!project || typeof project !== "object") return false;
+  if (String(project.remote || "").trim()) return true;
+  return isGitWorkTree(resolveProjectPath(hub, project.path));
+}
+
+function projectSummaries(projects, hub = "") {
+  if (!Array.isArray(projects)) return [];
+  return projects
+    .map((p) => {
+      if (!p || typeof p !== "object") return null;
+      const name = String(p.name || "").trim();
+      if (!name) return null;
+      if (!isGitBackedProject(hub, p)) return null;
+      return {
+        name,
+        path: String(p.path || ""),
+        remote: String(p.remote || ""),
+      };
+    })
+    .filter(Boolean);
+}
+
+function agentsFromRegistry(registry, hub = "") {
   return (registry.products || [])
     .map((product) => ({
       slug: product.slug,
@@ -314,8 +390,77 @@ function agentsFromRegistry(registry) {
       model: product.model || "",
       // Empty → getCliSettings uses hub settings.hub_agent.cliName / legacy fallback.
       cliName: product.cliName || product.cli || "",
+      projects: projectSummaries(product.projects, hub),
     }))
     .filter((agent) => agent.slug);
+}
+
+/**
+ * Update hub or product agent CLI/model in registry.json.
+ * @param {string} hub
+ * @param {string} slug - "hub" or a product slug
+ * @param {{ cliName?: string, model?: string }} patch
+ */
+function updateAgentConfig(hub, slug, patch = {}) {
+  const cleanSlug = String(slug || "").trim();
+  if (!cleanSlug || !/^[a-zA-Z0-9._-]+$/.test(cleanSlug)) {
+    throw new Error("invalid agent slug");
+  }
+
+  const nextCli =
+    patch.cliName !== undefined && patch.cliName !== null
+      ? String(patch.cliName).trim()
+      : undefined;
+  const nextModel =
+    patch.model !== undefined && patch.model !== null
+      ? String(patch.model).trim()
+      : undefined;
+
+  if (nextCli !== undefined) {
+    if (!nextCli) throw new Error("cliName is required");
+    if (!/^[A-Za-z0-9._-]+$/.test(nextCli)) {
+      throw new Error(`Invalid CLI name: ${nextCli}`);
+    }
+  }
+  if (nextModel !== undefined) {
+    if (nextModel && !/^[A-Za-z0-9._:-]+$/.test(nextModel)) {
+      throw new Error(`Invalid model name: ${nextModel}`);
+    }
+  }
+  if (nextCli === undefined && nextModel === undefined) {
+    throw new Error("provide cliName and/or model");
+  }
+
+  const registry = loadRegistry(hub);
+
+  if (cleanSlug === "hub") {
+    registry.settings = registry.settings || {};
+    registry.settings.hub_agent = registry.settings.hub_agent || {};
+    if (nextCli !== undefined) registry.settings.hub_agent.cliName = nextCli;
+    if (nextModel !== undefined) registry.settings.hub_agent.model = nextModel;
+    writeRegistry(hub, registry);
+    return {
+      slug: "hub",
+      cliName: registry.settings.hub_agent.cliName || "",
+      model: registry.settings.hub_agent.model || "",
+    };
+  }
+
+  const products = registry.products || [];
+  const product = products.find((p) => p && p.slug === cleanSlug);
+  if (!product) throw new Error(`agent not found: ${cleanSlug}`);
+  if (nextCli !== undefined) product.cliName = nextCli;
+  if (nextModel !== undefined) product.model = nextModel;
+  // Drop legacy inline cli object if present so cliName is sole source.
+  if (Object.prototype.hasOwnProperty.call(product, "cli") && typeof product.cli !== "string") {
+    delete product.cli;
+  }
+  writeRegistry(hub, registry);
+  return {
+    slug: cleanSlug,
+    cliName: product.cliName || product.cli || "",
+    model: product.model || "",
+  };
 }
 
 function appDir(hub) {
@@ -332,11 +477,18 @@ module.exports = {
   loadHubEnv,
   loadRegistry,
   loadRuntimeConfig,
+  expandUserPath,
+  isGitBackedProject,
+  isGitWorkTree,
+  projectSummaries,
   readCliFile,
   readJson,
   refreshCliConfig,
   refreshRegistry,
   refreshRuntimeConfig,
+  resolveProjectPath,
+  updateAgentConfig,
+  writeRegistry,
   registryMtimeMs,
   resolveHubCliName,
 };

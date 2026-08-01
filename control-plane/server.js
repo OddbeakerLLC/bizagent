@@ -1,6 +1,7 @@
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const { execFileSync } = require("child_process");
 
 // Lazy WS (installed as dep for feed server). Fallback if missing is graceful (SSE path remains).
 let WebSocket;
@@ -60,6 +61,7 @@ const {
   loadRuntimeConfig,
   readJson,
   refreshRuntimeConfig,
+  updateAgentConfig,
 } = require("./lib/config");
 const {
   createSession,
@@ -259,6 +261,26 @@ function listCliNames(cliJson) {
   );
 }
 
+/** True when `executable` is an absolute path that exists, or is on PATH. */
+function isCliInstalled(executable) {
+  const exe = String(executable || "").trim();
+  if (!exe) return false;
+  if (exe.includes("/") || exe.includes("\\")) {
+    try {
+      fs.accessSync(exe, fs.constants.X_OK);
+      return true;
+    } catch (_err) {
+      return false;
+    }
+  }
+  try {
+    execFileSync("which", [exe], { stdio: "ignore" });
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
 // Models for the selection dialog come from each CLI's `models` array in
 // cli.json (source of truth). Optional registry override:
 // settings.models.by_cli[name] replaces that CLI's list only. Never invent
@@ -272,7 +294,29 @@ function modelsFromCliEntry(entry) {
 
 function buildCliModelsPayload(config) {
   const cliJson = config._cliJson || {};
-  const clis = listCliNames(cliJson);
+  const allNames = listCliNames(cliJson);
+
+  // Only expose CLIs whose executable is actually installed. Always include a
+  // currently-configured hub/product CLI even if missing, so the dialog can
+  // still show/change it.
+  const keep = new Set();
+  for (const name of allNames) {
+    const entry = cliJson[name] || {};
+    const exe = entry.executable || name;
+    if (isCliInstalled(exe)) keep.add(name);
+  }
+  const hubAgent =
+    (config.registry &&
+      config.registry.settings &&
+      config.registry.settings.hub_agent) ||
+    {};
+  if (hubAgent.cliName) keep.add(String(hubAgent.cliName));
+  for (const product of (config.registry && config.registry.products) || []) {
+    const n = product && (product.cliName || product.cli);
+    if (n) keep.add(String(n));
+  }
+
+  const clis = allNames.filter((n) => keep.has(n));
 
   const registry = config.registry || {};
   const modelsConfig = (registry.settings && registry.settings.models) || {};
@@ -305,6 +349,7 @@ function buildCliModelsPayload(config) {
 
 function hubAgentEntry(registry) {
   const hub = registry.hub || {};
+  const hubAgent = (registry.settings && registry.settings.hub_agent) || {};
   const rawName = hub.name || "BizAgent";
   // Brand the hub product line: registry often has lowercase "bizagent".
   const productName =
@@ -316,17 +361,33 @@ function hubAgentEntry(registry) {
     slug: "hub",
     name: productName,
     agentName,
+    model: hubAgent.model || "",
+    cliName: hubAgent.cliName || hubAgent.cli || "",
+    projects: [],
   };
 }
 
 function currentState(config, session) {
+  const hubCli = config.hubCliName || "";
+  const hubModel = config.hubModel || "";
+  const agentDefault = config.agentDefaultModel || "";
+
   let agents = agentMailStatus(config.hub, [
     hubAgentEntry(config.registry),
-    ...agentsFromRegistry(config.registry),
-  ]).map(({ model: _m, ...agent }) => ({
-    ...agent,
-    active: isAgentActive(config.hub, agent.slug, config.lockLeaseSecs),
-  }));
+    ...agentsFromRegistry(config.registry, config.hub),
+  ]).map((agent) => {
+    const isHub = agent.slug === "hub";
+    // Display effective launch values (empty product fields inherit hub/default).
+    const cliName = agent.cliName || hubCli || "";
+    const model = agent.model || (isHub ? hubModel : agentDefault || hubModel) || "";
+    return {
+      ...agent,
+      cliName,
+      model,
+      projects: Array.isArray(agent.projects) ? agent.projects : [],
+      active: isAgentActive(config.hub, agent.slug, config.lockLeaseSecs),
+    };
+  });
   // Enterprise hook: filter roster by seat/ownership (identity when plugin off).
   agents = applyFilterAgents(config.enterprise, agents, session || null);
   return { agents, org: config.registry.org || "" };
@@ -673,15 +734,40 @@ async function handleApi(config, req, res) {
     }
   }
 
-  // List available CLIs from cli.json
+  // List available (installed) CLIs from cli.json
   if (url.pathname === "/api/clis" && req.method === "GET") {
-    const clis = listCliNames(config._cliJson || {});
-    return send(res, 200, { clis });
+    const payload = buildCliModelsPayload(config);
+    return send(res, 200, { clis: payload.clis });
   }
 
   // CLI names + per-CLI models for the selection dialog (from cli.json)
   if (url.pathname === "/api/cli-models" && req.method === "GET") {
     return send(res, 200, buildCliModelsPayload(config));
+  }
+
+  // Update agent CLI/model in registry.json
+  const agentConfigMatch = url.pathname.match(
+    /^\/api\/agent\/([^/]+)\/config$/,
+  );
+  if (agentConfigMatch && req.method === "PUT") {
+    const slug = decodeURIComponent(agentConfigMatch[1]);
+    try {
+      const body = await parseBody(req);
+      const result = updateAgentConfig(config.hub, slug, {
+        cliName: body.cliName,
+        model: body.model,
+      });
+      // Force in-process registry reload even if mtime granularity is coarse.
+      config._registryMtimeMs = 0;
+      refreshRuntimeConfig(config);
+      didChangeState();
+      return send(res, 200, { ok: true, ...result });
+    } catch (err) {
+      const msg = err.message || "failed to update agent config";
+      const status =
+        /not found|invalid|required|provide/i.test(msg) ? 400 : 500;
+      return send(res, status, { error: msg });
+    }
   }
 
   const agentDetailMatch = url.pathname.match(/^\/api\/agent-detail\/([^/]+)$/);
