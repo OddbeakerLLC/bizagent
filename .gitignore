@@ -22,9 +22,8 @@ logs/
 # Schema lives in registry.example.json only.
 registry.json
 
-# CLI choice + resolved multi-CLI map (install writes these; examples stay tracked)
+# Legacy per-hub CLI name file only (migration). Engine catalog is tracked cli.json.
 .cli
-cli.json
 
 # Dispatcher runtime artifacts
 agents/*/.lock/

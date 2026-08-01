@@ -376,21 +376,18 @@ prompt_api_key() {
   fi
 }
 
-# Seed cli.json (per-engine catalog). Runtime refuses to launch a CLI name that
-# is not listed here. Flags never come from legacy .cli.
+# Ensure cli.json (public engine catalog) exists and lists the selected hub CLI.
+# The clone ships cli.json; runtime refuses any cliName not listed there.
+# Flags never come from legacy .cli.
 write_cli_json() {
   local dest="$INSTALL_DIR/cli.json"
-  local src="$INSTALL_DIR/cli.json.example"
   local key
   key="$(basename "$SELECTED_CLI")"
   key="${key%.exe}"
 
   if [[ ! -f "$dest" ]]; then
-    if [[ -f "$src" ]]; then
-      cp "$src" "$dest"
-      ok "cli.json seeded from example"
-    else
-      cat > "$dest" <<EOF
+    # Fallback if the clone is missing the shipped catalog (corrupt/partial install).
+    cat > "$dest" <<EOF
 {
   "claude": {
     "executable": "claude",
@@ -414,8 +411,9 @@ write_cli_json() {
   }
 }
 EOF
-      ok "cli.json written (built-in catalog)"
-    fi
+    ok "cli.json written (built-in catalog fallback)"
+  else
+    ok "cli.json present (public catalog)"
   fi
 
   if ! python3 - "$dest" "$key" "$SELECTED_CLI" "$SELECTED_PROMPT_FLAG" "$SELECTED_YOLO_FLAG" <<'PY'

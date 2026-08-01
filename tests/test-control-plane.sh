@@ -466,8 +466,8 @@ grep -q "modelsFromCliEntry\|buildCliModelsPayload" "$SERVER" \
 if grep -q "DEFAULT_CLI_MODELS\|claude-sonnet-4-20250514\|gpt-4o" "$SERVER"; then
   fail "server must not hardcode stale model names (use cli.json models)"
 fi
-grep -q '"models"' "$ROOT/cli.json.example" \
-  || fail "cli.json.example should seed per-CLI models arrays"
+grep -q '"models"' "$ROOT/cli.json" \
+  || fail "cli.json should define per-CLI models arrays"
 grep -q "titleSet" "$ROOT/control-plane/public/app.js" \
   || fail "UI does not track whether page title has been set"
 grep -q "relativeTime" "$ROOT/control-plane/public/app.js" \
@@ -1756,16 +1756,16 @@ NODE
 const root = process.argv[2];
 const fs = require('fs');
 const path = require('path');
-const cliExamplePath = path.join(root, 'cli.json.example');
+const cliCatalogPath = path.join(root, 'cli.json');
 const registryExamplePath = path.join(root, 'registry.example.json');
 
-// Load examples
-const cliExample = JSON.parse(fs.readFileSync(cliExamplePath, 'utf8'));
+// Load public catalog + registry example
+const cliCatalog = JSON.parse(fs.readFileSync(cliCatalogPath, 'utf8'));
 const registryExample = JSON.parse(fs.readFileSync(registryExamplePath, 'utf8'));
 
 // cli.json keys must be CLI names, not slugs. Known slugs from registry: widgets, platform, tooling.
 const knownSlugs = (registryExample.products || []).map(p => p.slug);
-const cliKeys = Object.keys(cliExample).filter(k => !k.startsWith('_'));
+const cliKeys = Object.keys(cliCatalog).filter(k => !k.startsWith('_'));
 for (const slug of knownSlugs) {
   if (cliKeys.includes(slug)) {
     console.error('cli.json has agent slug key (should only be CLI names):', slug);
@@ -1783,15 +1783,15 @@ for (const key of cliKeys) {
 }
 // Each CLI entry should define promptFlag (path-based), not only legacy prompt
 for (const key of cliKeys) {
-  const def = cliExample[key] || {};
+  const def = cliCatalog[key] || {};
   if (!def.promptFlag && !def.prompt) {
     console.error('cli.json entry missing promptFlag:', key);
     process.exit(8);
   }
 }
 // Grok must use --prompt-file (path), not -p (prompt text)
-if (cliExample.grok && cliExample.grok.promptFlag !== '--prompt-file') {
-  console.error('grok promptFlag must be --prompt-file, got:', cliExample.grok.promptFlag);
+if (cliCatalog.grok && cliCatalog.grok.promptFlag !== '--prompt-file') {
+  console.error('grok promptFlag must be --prompt-file, got:', cliCatalog.grok.promptFlag);
   process.exit(9);
 }
 

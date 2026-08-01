@@ -1,9 +1,10 @@
 {
-  "_comment": "Operational registry for Oddbeaker LLC. Paths are relative to this hub directory.",
-  "org": "Oddbeaker LLC",
+  "_comment": "Example registry. The interview in AGENT.md generates a real registry.json from your answers. Paths are relative to this hub directory. Fill 'remote' to allow setup on a machine where the repos are not yet present.",
+  "org": "Example Co",
   "hub": {
     "name": "BizAgent",
-    "remote": "ssh://tmanso@sm00.oddbeaker.com/repo/git/bizagent-run.git"
+    "remote": "",
+    "_remote_comment": "Private ops git remote for THIS hub (not the public framework). Installer removes public origin. Set e.g. git@host:you/bizagent-ops.git so nightly.sh push can back up registry, journals, KS, and hub tweaks. Blank = local-only."
   },
   "settings": {
     "nightly_time": "23:00",
@@ -21,15 +22,23 @@
       "host": "0.0.0.0",
       "port": 8787
     },
+    "enterprise": {
+      "_comment": "Optional multi-user layer (private @bizagent/enterprise). Absent or enabled:false = pure OSS single-operator. Public control plane loads the package only when enabled===true; resolve failures soft-fail to OSS.",
+      "enabled": false,
+      "package": "@bizagent/enterprise",
+      "package_path": "",
+      "seats_max": 25,
+      "enterprise_api_min": 1
+    },
     "hub_agent": {
-      "_comment": "Optional hub PTL agent settings for control-plane launches. cliName references an entry in cli.json (e.g. claude, grok); empty falls back to .cli / default.",
+      "_comment": "Hub PTL launch settings. cliName is a key in cli.json (e.g. claude, grok). Installer sets this; product agents use their own cliName. Flags always come from cli.json — never from legacy .cli.",
       "prompt": "You are the hub PTL agent. Read inbox/*.md for incoming messages, process each one, then archive it. After processing all messages, send a single PushNotification with status=proactive summarizing what arrived and what you did.",
-      "model": "kimi-k2-5",
-      "cliName": "venice"
+      "cliName": "claude",
+      "model": ""
     },
     "models": {
       "_comment": "Default model for product agent launches. Per-product model field overrides this.",
-      "agent_default": "kimi-k2-5"
+      "agent_default": ""
     },
     "tuning": {
       "_comment": "Operational tunables. archive.retention_days default 15.",
@@ -56,243 +65,55 @@
   },
   "cross_product_edges": [
     [
-      "beakernet",
-      "jobe-ai"
+      "widgets",
+      "platform"
     ]
   ],
   "products": [
     {
-      "slug": "bizagent",
-      "name": "Public BizAgent",
-      "agent_name": "Agent BA",
-      "model": "kimi-k2-5",
-      "cliName": "venice",
+      "slug": "widgets",
+      "name": "Widgets",
+      "agent_name": "Agent W",
+      "model": "",
+      "cliName": "claude",
       "projects": [
         {
-          "name": "bizagent",
-          "path": "../dev/bizagent",
-          "remote": "ssh://git@github.com/OddbeakerLLC/bizagent.git"
-        }
-      ]
-    },
-    {
-      "slug": "synthetic-mining",
-      "name": "Synthetic Mining",
-      "agent_name": "Agent SM",
-      "model": "kimi-k2-5",
-      "cliName": "venice",
-      "projects": [
-        {
-          "name": "CryptoBotServer",
-          "path": "../dev/CryptoBotServer",
-          "remote": "ssh://tmanso@orbitwar.space/repo/git/CryptoBotServer.git"
+          "name": "widgets-web",
+          "path": "../widgets-web",
+          "remote": ""
         },
         {
-          "name": "synthmining.com",
-          "path": "../dev/synthmining.com",
-          "remote": "ssh://tmanso@orbitwar.space/repo/git/synthmining.com.git"
-        },
-        {
-          "name": "sm-manager",
-          "path": "../dev/sm-manager",
-          "remote": "ssh://sm00.oddbeaker.com/repo/git/sm-manager.git"
-        }
-      ]
-    },
-    {
-      "slug": "jobe-ai",
-      "name": "Jobe AI",
-      "agent_name": "Agent JA",
-      "model": "kimi-k2-5",
-      "cliName": "venice",
-      "projects": [
-        {
-          "name": "jobeai",
-          "path": "../dev/jobeai",
-          "remote": "git@github.com:OddbeakerLLC/jobeai.git"
-        },
-        {
-          "name": "jobe-brain",
-          "path": "../dev/jobe-brain",
-          "remote": "git@github.com:OddbeakerLLC/jobe-brain.git"
-        },
-        {
-          "name": "jobe-relay",
-          "path": "../dev/jobe-relay",
-          "remote": "git@github.com:OddbeakerLLC/jobe-relay.git"
-        }
-      ]
-    },
-    {
-      "slug": "beakernet",
-      "name": "BeakerNet",
-      "agent_name": "Agent B",
-      "model": "kimi-k2-5",
-      "cliName": "venice",
-      "projects": [
-        {
-          "name": "ternary",
-          "path": "../dev/ternary",
-          "remote": "ssh://sm00.oddbeaker.com/repo/git/ternary.git"
-        },
-        {
-          "name": "jobe-brain-ternary",
-          "path": "../dev/jobe-brain-ternary",
-          "remote": "ssh://sm00.oddbeaker.com/repo/git/jobe-brain-ternary.git"
-        }
-      ]
-    },
-    {
-      "slug": "shell-tools",
-      "name": "Shell Tools",
-      "agent_name": "Agent ST",
-      "model": "kimi-k2-5",
-      "cliName": "venice",
-      "projects": [
-        {
-          "name": "bash-ai",
-          "path": "../dev/bash-ai",
-          "remote": "git@github.com:OddbeakerLLC/bash-ai.git"
-        },
-        {
-          "name": "powershell-ai",
-          "path": "../dev/powershell-ai",
-          "remote": "git@github.com:OddbeakerLLC/powershell-ai.git"
-        },
-        {
-          "name": "venice-code",
-          "path": "~/dev/venice-code",
+          "name": "widgets-api",
+          "path": "../widgets-api",
           "remote": ""
         }
       ]
     },
     {
-      "slug": "orbitwar",
-      "name": "OrbitWar",
-      "agent_name": "Agent O",
-      "model": "kimi-k2-5",
-      "cliName": "venice",
-      "projects": [
-        {
-          "name": "OrbitWar",
-          "path": "../dev/OrbitWar",
-          "remote": "ssh://tmanso@orbitwar.space/repo/git/OrbitWar"
-        },
-        {
-          "name": "OrbitWar.prod",
-          "path": "../dev/OrbitWar.prod",
-          "remote": "ssh://orbitwar.space/repo/git/OrbitWar"
-        }
-      ]
-    },
-    {
-      "slug": "oddbeaker-education",
-      "name": "Oddbeaker Education",
-      "agent_name": "Agent OE",
-      "model": "kimi-k2-5",
-      "cliName": "venice",
-      "projects": [
-        {
-          "name": "star-words",
-          "path": "../dev/star-words",
-          "remote": "ssh://orbitwar.space/repo/git/star-words.git"
-        }
-      ]
-    },
-    {
-      "slug": "oddbeaker-llc",
-      "name": "Oddbeaker LLC",
-      "agent_name": "Agent OL",
-      "model": "kimi-k2-5",
-      "cliName": "venice",
-      "projects": [
-        {
-          "name": "oddbeaker.com",
-          "path": "../dev/oddbeaker.com",
-          "remote": "ssh://tmanso@orbitwar.space/repo/git/oddbeaker.com.git"
-        },
-        {
-          "name": "bscalc",
-          "path": "../dev/oddbeaker.com/bscalc",
-          "remote": ""
-        },
-        {
-          "name": "health-tracker",
-          "path": "../dev/oddbeaker.com/health-tracker",
-          "remote": ""
-        },
-        {
-          "name": "itc",
-          "path": "../dev/oddbeaker.com/itc",
-          "remote": ""
-        },
-        {
-          "name": "mehtoken",
-          "path": "../dev/oddbeaker.com/mehtoken",
-          "remote": ""
-        },
-        {
-          "name": "phonics-speed-challenge",
-          "path": "../dev/oddbeaker.com/phonics-speed-challenge",
-          "remote": ""
-        },
-        {
-          "name": "publications",
-          "path": "../dev/oddbeaker.com/publications",
-          "remote": ""
-        },
-        {
-          "name": "speedmath-challenge",
-          "path": "../dev/oddbeaker.com/speedmath-challenge",
-          "remote": ""
-        },
-        {
-          "name": "timer",
-          "path": "../dev/oddbeaker.com/timer",
-          "remote": ""
-        },
-        {
-          "name": "wordmaster",
-          "path": "../dev/oddbeaker.com/wordmaster",
-          "remote": ""
-        }
-      ]
-    },
-    {
-      "slug": "productivity",
-      "name": "Productivity",
+      "slug": "platform",
+      "name": "Platform",
       "agent_name": "Agent P",
-      "model": "kimi-k2-5",
-      "cliName": "venice",
+      "model": "",
+      "cliName": "claude",
       "projects": [
         {
-          "name": "beakerboard.net",
-          "path": "../dev/beakerboard.net",
-          "remote": "ssh://orbitwar.space/repo/git/beakerboard.net.git"
-        },
-        {
-          "name": "ygt.oddbeaker.com",
-          "path": "../dev/ygt.oddbeaker.com",
-          "remote": "ssh://tmanso@orbitwar.space/repo/git/ygt.oddbeaker.com.git"
+          "name": "platform-core",
+          "path": "../platform-core",
+          "remote": ""
         }
       ]
     },
     {
-      "slug": "new-standards",
-      "name": "New Standards",
-      "agent_name": "Agent NS",
-      "model": "kimi-k2-5",
-      "cliName": "venice",
+      "slug": "tooling",
+      "name": "Tooling",
+      "agent_name": "Agent T",
+      "model": "",
+      "cliName": "agy",
       "projects": [
         {
-          "name": "o-protocol",
-          "path": "../dev/o-protocol",
-          "remote": "ssh://tmanso@sm00.oddbeaker.com/repo/git/o-protocol.git"
-        },
-        {
-          "name": "librarian-ai",
-          "path": "../dev/librarian-ai",
-          "remote": "ssh://tmanso@orbitwar.space/repo/git/librarian-ai.git"
+          "name": "cli-tools",
+          "path": "../cli-tools",
+          "remote": ""
         }
       ]
     }

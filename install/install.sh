@@ -63,13 +63,11 @@ cli_extra_args() {
 CLI_PROMPT_FLAG="$(cli_prompt_flag "$CLI_CMD")"
 CLI_EXTRA_ARGS="$(cli_extra_args "$CLI_CMD")"
 
-# cli.json = engine catalog; registry hub_agent.cliName = which engine the hub uses.
-# Legacy .cli is not written (migration-only if already present).
-if [[ ! -f "$HUB/cli.json" && -f "$HUB/cli.json.example" ]]; then
-  cp "$HUB/cli.json.example" "$HUB/cli.json"
-  ok "cli.json seeded from example"
-fi
-if [[ -f "$HUB/cli.json" ]]; then
+# cli.json = public engine catalog (ships in the repo); registry hub_agent.cliName
+# selects which engine the hub uses. Legacy .cli is not written (migration-only).
+if [[ ! -f "$HUB/cli.json" ]]; then
+  warn "cli.json missing from hub — runtime launches will fail until the catalog is restored"
+else
   python3 - "$HUB/cli.json" "$_cli_key" "$CLI_CMD" "$CLI_PROMPT_FLAG" "$CLI_EXTRA_ARGS" <<'PY' 2>/dev/null || true
 import json, sys
 path, key, exe, pflag, extra = sys.argv[1:6]
