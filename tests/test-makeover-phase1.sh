@@ -15,7 +15,7 @@ grep -q "loadHubEnv" "$ROOT/control-plane/lib/config.js" || fail "loadHubEnv mis
 [ -f "$ROOT/scripts/hub-daemon.js" ] || fail "hub-daemon.js missing"
 [ -x "$ROOT/scripts/hub-daemon.sh" ] || fail "hub-daemon.sh missing or not executable"
 [ -f "$ROOT/.bizagent/env.example" ] || fail ".bizagent/env.example missing"
-[ -f "$ROOT/cli.json.example" ] || fail "cli.json.example missing"
+[ -f "$ROOT/cli.json" ] || fail "cli.json (public catalog) missing"
 
 # prune wired into nightly
 grep -q "prune-archives.sh" "$ROOT/scripts/nightly.sh" || fail "nightly.sh does not call prune-archives.sh"

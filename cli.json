@@ -1,5 +1,5 @@
 {
-  "_comment": "CLI configuration. Standard CLI definitions (claude, codex, agy, grok) keyed by CLI name. Copy to cli.json and customize.",
+  "_comment": "Public CLI engine catalog keyed by CLI name (claude, codex, agy, grok, venice, \u2026). Edit models/flags as needed; installer ensures the selected hub CLI has an entry.",
   "claude": {
     "executable": "claude",
     "promptFlag": "-p",

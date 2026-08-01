@@ -82,8 +82,9 @@ function requireCliDef(cliJson, requestedName) {
   const names = Object.keys(entries);
   if (names.length === 0) {
     throw new Error(
-      "cli.json is missing or empty. Copy cli.json.example → cli.json " +
-        "(the installer does this). Every hub CLI and product cliName must be listed there.",
+      "cli.json is missing or empty. Restore the public cli.json catalog " +
+        "(ships in the repo; the installer seeds a fallback if needed). " +
+        "Every hub CLI and product cliName must be listed there.",
     );
   }
   const requested = String(requestedName || "").trim();
@@ -98,7 +99,7 @@ function requireCliDef(cliJson, requestedName) {
   if (entries[base]) return { key: base, def: entries[base] };
   throw new Error(
     `cli.json has no entry for CLI "${requested}". ` +
-      `Add a "${base}" block (see cli.json.example), or fix registry product cliName / hub_agent.cliName. ` +
+      `Add a "${base}" block to cli.json, or fix registry product cliName / hub_agent.cliName. ` +
       `Configured: ${names.join(", ")}`,
   );
 }
