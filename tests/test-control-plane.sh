@@ -459,6 +459,15 @@ grep -q "CODESPAN" "$ROOT/control-plane/public/app.js" \
   || fail "UI codespan placeholder does not use a collision-safe marker"
 grep -q "agent-detail" "$SERVER" \
   || fail "server missing /api/agent-detail endpoint"
+grep -q "/api/cli-models" "$SERVER" \
+  || fail "server missing /api/cli-models endpoint"
+grep -q "modelsFromCliEntry\|buildCliModelsPayload" "$SERVER" \
+  || fail "server missing buildCliModelsPayload from cli.json models"
+if grep -q "DEFAULT_CLI_MODELS\|claude-sonnet-4-20250514\|gpt-4o" "$SERVER"; then
+  fail "server must not hardcode stale model names (use cli.json models)"
+fi
+grep -q '"models"' "$ROOT/cli.json.example" \
+  || fail "cli.json.example should seed per-CLI models arrays"
 grep -q "titleSet" "$ROOT/control-plane/public/app.js" \
   || fail "UI does not track whether page title has been set"
 grep -q "relativeTime" "$ROOT/control-plane/public/app.js" \
@@ -1764,8 +1773,8 @@ for (const slug of knownSlugs) {
   }
 }
 
-// cli.json keys should be valid CLI names
-const validCliNames = ['claude', 'codex', 'agy', 'grok'];
+// cli.json keys should be valid CLI names (catalog + known optional backends)
+const validCliNames = ['claude', 'codex', 'agy', 'grok', 'venice'];
 for (const key of cliKeys) {
   if (!validCliNames.includes(key)) {
     console.error('cli.json has unexpected CLI name:', key);

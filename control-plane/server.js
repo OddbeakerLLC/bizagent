@@ -253,6 +253,56 @@ function attachEnterprisePlugin(config) {
   return state;
 }
 
+function listCliNames(cliJson) {
+  return Object.keys(cliJson || {}).filter(
+    (k) => !k.startsWith("_") && cliJson[k] && typeof cliJson[k] === "object",
+  );
+}
+
+// Models for the selection dialog come from each CLI's `models` array in
+// cli.json (source of truth). Optional registry override:
+// settings.models.by_cli[name] replaces that CLI's list only. Never invent
+// model names and never broadcast a flat settings.models.available list
+// into every CLI dropdown.
+function modelsFromCliEntry(entry) {
+  if (!entry || typeof entry !== "object") return [];
+  if (!Array.isArray(entry.models)) return [];
+  return entry.models.map(String).filter((m) => m.length > 0);
+}
+
+function buildCliModelsPayload(config) {
+  const cliJson = config._cliJson || {};
+  const clis = listCliNames(cliJson);
+
+  const registry = config.registry || {};
+  const modelsConfig = (registry.settings && registry.settings.models) || {};
+  const byCli =
+    modelsConfig.by_cli && typeof modelsConfig.by_cli === "object"
+      ? modelsConfig.by_cli
+      : {};
+
+  const cliModels = {};
+  for (const name of clis) {
+    if (Array.isArray(byCli[name]) && byCli[name].length > 0) {
+      cliModels[name] = byCli[name].map(String);
+    } else {
+      cliModels[name] = modelsFromCliEntry(cliJson[name]);
+    }
+  }
+
+  const flat = new Set();
+  for (const list of Object.values(cliModels)) {
+    list.forEach((m) => flat.add(m));
+  }
+
+  return {
+    clis,
+    models: [...flat],
+    cliModels,
+    defaultModel: modelsConfig.agent_default || "",
+  };
+}
+
 function hubAgentEntry(registry) {
   const hub = registry.hub || {};
   const rawName = hub.name || "BizAgent";
@@ -621,6 +671,17 @@ async function handleApi(config, req, res) {
     } catch (err) {
       return send(res, 400, { error: err.message || "invalid profile" });
     }
+  }
+
+  // List available CLIs from cli.json
+  if (url.pathname === "/api/clis" && req.method === "GET") {
+    const clis = listCliNames(config._cliJson || {});
+    return send(res, 200, { clis });
+  }
+
+  // CLI names + per-CLI models for the selection dialog (from cli.json)
+  if (url.pathname === "/api/cli-models" && req.method === "GET") {
+    return send(res, 200, buildCliModelsPayload(config));
   }
 
   const agentDetailMatch = url.pathname.match(/^\/api\/agent-detail\/([^/]+)$/);
