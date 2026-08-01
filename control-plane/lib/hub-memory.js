@@ -89,10 +89,11 @@ function deriveHubRuntimePrompt(hub) {
     '',
     '## Channel rules (non-negotiable)',
     '',
-    '- **Stdout is debug only.** Nothing you print is shown to the operator. Never "answer" in chat text alone.',
-    '- **Operator-visible text** must go through a CP-owned write path (below). Free-form `outbox/*.md` creation is **banned** — wrong filename, missing `conversation_id`, or wrong `to:` silently drops the reply.',
-    '- Product-agent mail (to a slug) also uses the write-message helper — same rule.',
-    '- When an agent→hub message arrives **with a conversation_id** (completion notification), you **must** write **at most one** short user-visible summary for the operator using the reserved body or write-message path. If a summary for the same agent mail (same from+body or same inbox filename) has already been delivered in this conversation, archive the inbox file without writing another summary. Never emit duplicate "X is done" notices.',
+    '- **Stdout is debug only.** Nothing you print is shown to the operator.',
+    '- **Operator-visible text** must go through the reserved body file:\n  `RESERVED_REPLY_BODY` path is pre-created by the CP; hub writes markdown body only.',
+    '- **Never** hand-write files under `outbox/` for operator replies.',
+    '- Product-agent mail (to a slug) uses the write-message helper.',
+    '- When an agent→hub message arrives, write **at most one** short user-visible summary. Never emit duplicate "X is done" notices.',
     '',
     '## This-turn order (outbox-first)',
     '',
@@ -299,14 +300,16 @@ function buildHubTurnPrompt(hub) {
   const convId = conversationIds.length
     ? conversationIds[conversationIds.length - 1]
     : '';
-  const convLine = convId || '(none in pending mail)';
+
+  // ALWAYS-WARM: conversation_id is guaranteed by dispatcher.getHubConversationId()
+  // If somehow missing, fail fast rather than cold-launch
+  if (!convId) {
+    throw new Error('hub-turn-prompt: conversation_id is required (warm-launch guarantee violated)');
+  }
 
   // Lazy require avoids circular load (conversations → hub-memory → hub-turn-safety).
-  let reservedBodyAbs = '';
-  if (convId) {
-    const safety = require('./hub-turn-safety');
-    reservedBodyAbs = safety.prepareReservedReplyBody(hub, convId);
-  }
+  const safety = require('./hub-turn-safety');
+  const reservedBodyAbs = safety.prepareReservedReplyBody(hub, convId);
 
   const turnId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const turnFile = path.join(hubTurnsDir(hub), `hub-${turnId}.md`);
@@ -318,38 +321,31 @@ function buildHubTurnPrompt(hub) {
     has_reserved_body: !!reservedBodyAbs
   });
 
-  const deliveryBlock = convId
-    ? [
-      '### Operator reply delivery (MANDATORY — pick one)',
-      '',
-      'Stdout is **not** shown to the operator. Free-form `outbox/` files are **banned**.',
-      '',
-      `**conversation_id:** \`${convId}\``,
-      '',
-      '**Option A — reserved body file (preferred):** write **only the final markdown body** (no YAML) to:',
-      '',
-      '```text',
-      reservedBodyAbs,
-      '```',
-      '',
-      'Use your file write/edit tool. Overwrite the file with the complete operator-visible reply. The control plane adds frontmatter and routes it.',
-      '',
-      '**Option B — write-message helper:**',
-      '',
-      '```bash',
-      `scripts/write-message.sh --to user --from hub --subject "console reply" --conversation-id "${convId}" --body "Your reply here."`,
-      '```',
-      '',
-      'Success = reserved body file non-empty **or** write-message wrote hub→user outbox with this conversation_id.',
-      '',
-    ].join('\n')
-    : [
-      '### Operator reply delivery',
-      '',
-      'No console `conversation_id` on this turn (agent→hub or maintenance). Still use',
-      '`scripts/write-message.sh` for any mail you send. Stdout is not a delivery channel.',
-      '',
-    ].join('\n');
+  // ALWAYS-WARM: Single code path — reserved body file is mandatory
+  const deliveryBlock = [
+    '### Operator reply delivery (MANDATORY)',
+    '',
+    'Stdout is **not** shown to the operator. Free-form `outbox/` files are **banned**.',
+    '',
+    `**conversation_id:** \`${convId}\``,
+    '',
+    '**Reserved body file:** write **only the final markdown body** (no YAML) to:',
+    '',
+    '```text',
+    reservedBodyAbs,
+    '```',
+    '',
+    'Use your file write/edit tool. Overwrite the file with the complete operator-visible reply. The control plane adds frontmatter and routes it.',
+    '',
+    '**Alternative — write-message helper (if file write fails):**',
+    '',
+    '```bash',
+    `scripts/write-message.sh --to user --from hub --subject "console reply" --conversation-id "${convId}" --body "Your reply here."`,
+    '```',
+    '',
+    'Success = reserved body file non-empty **or** write-message wrote hub→user outbox with this conversation_id.',
+    '',
+  ].join('\n');
 
   const content = [
     '# Hub turn prompt (ephemeral)',
@@ -363,8 +359,8 @@ function buildHubTurnPrompt(hub) {
     '## This turn',
     '',
     `- Hub absolute path: \`${hubAbs}\``,
-    `- conversation_id: \`${convLine}\``,
-    reservedBodyAbs ? `- RESERVED_REPLY_BODY: \`${reservedBodyAbs}\`` : '',
+    `- conversation_id: \`${convId}\``,
+    `- RESERVED_REPLY_BODY: \`${reservedBodyAbs}\``,
     `- Session file (read-only, already compacted by CP): \`${sessionRel}\``,
     `- Pending inbox files: ${pending.length}`,
     '',
@@ -385,7 +381,7 @@ function buildHubTurnPrompt(hub) {
     clip(sessionBody, MAX_TURN_SESSION_CHARS),
     '```',
     '',
-  ].filter((line) => line !== undefined).join('\n');
+  ].join('\n');
 
   fs.writeFileSync(turnFile, content);
   return turnFile;

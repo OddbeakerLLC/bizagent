@@ -14,8 +14,6 @@ let ws = null;
 let wsReady = false;
 let subscribedAgents = false;
 let subscribedConv = null; // conv id we are currently subscribed to over WS
-/** Modal state for CLI/model changes */
-let pendingAgentConfig = null; // { slug, field, currentValue, availableOptions }
 
 // UI polling gate for push test. Polling for /api/state and conversation history is OFF by default.
 // WS subscribe/push is the preferred and only driver when this flag is off (default).
@@ -132,153 +130,24 @@ function relativeTime(ms) {
   return `${Math.round(h / 24)}d ago`;
 }
 
-// --- CLI/Model Modal ---
-let availableClis = [];
-let loadedClis = false;
-
-async function loadClis() {
-  if (loadedClis) return availableClis;
-  try {
-    const data = await api('/api/clis');
-    availableClis = (data && data.clis) || [];
-    loadedClis = true;
-    return availableClis;
-  } catch (_err) {
-    return [];
-  }
+function makeDetailRow(label, field, isJournal) {
+  const dr = document.createElement('div');
+  dr.className = isJournal ? 'detail-row detail-row--journal' : 'detail-row';
+  const lbl = document.createElement('span');
+  lbl.className = 'detail-label';
+  lbl.textContent = label;
+  const val = document.createElement('span');
+  val.className = isJournal ? 'detail-value detail-value--journal' : 'detail-value';
+  val.dataset.field = field;
+  val.textContent = '—';
+  dr.appendChild(lbl);
+  dr.appendChild(val);
+  return dr;
 }
 
-function showConfigModal(slug, field, currentValue, agentName) {
-  pendingAgentConfig = { slug, field, currentValue };
-  const modal = document.getElementById('configModal');
-  const title = document.getElementById('modalTitle');
-  const label = document.getElementById('modalLabel');
-  const select = document.getElementById('modalSelect');
-
-  title.textContent = field === 'cli' ? `Change CLI for ${agentName}` : `Change Model for ${agentName}`;
-  label.textContent = field === 'cli' ? 'Select CLI:' : 'Enter model name:';
-
-  // Populate select
-  select.innerHTML = '';
-  if (field === 'cli') {
-    availableClis.forEach(name => {
-      const opt = document.createElement('option');
-      opt.value = name;
-      opt.textContent = name;
-      if (name === currentValue) opt.selected = true;
-      select.appendChild(opt);
-    });
-  } else {
-    // For model, use a text input via datalist or just allow typing
-    // We'll use a select with common models and allow custom input
-    const commonModels = ['zai-org-glm-5', 'claude-3-5-sonnet', 'gpt-4o', 'gpt-4-turbo', 'o1', 'o3-mini'];
-    const models = currentValue && !commonModels.includes(currentValue)
-      ? [currentValue, ...commonModels]
-      : commonModels;
-    models.forEach(name => {
-      const opt = document.createElement('option');
-      opt.value = name;
-      opt.textContent = name;
-      if (name === currentValue) opt.selected = true;
-      select.appendChild(opt);
-    });
-    // Allow custom model input
-    select.style.cursor = 'text';
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.id = 'modalInput';
-    input.value = currentValue || '';
-    input.placeholder = 'Enter model name';
-    input.style.cssText = 'width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font:inherit;';
-    select.parentNode.insertBefore(input, select);
-    select.hidden = true;
-    input.addEventListener('focus', () => { select.hidden = true; });
-    // Show select as datalist alternative
-    const datalist = document.createElement('datalist');
-    datalist.id = 'modelDatalist';
-    models.forEach(m => {
-      const opt = document.createElement('option');
-      opt.value = m;
-      datalist.appendChild(opt);
-    });
-    document.body.appendChild(datalist);
-    input.setAttribute('list', 'modelDatalist');
-    pendingAgentConfig.inputElement = input;
-  }
-
-  modal.hidden = false;
-  if (field === 'cli') {
-    select.focus();
-  } else {
-    const input = document.getElementById('modalInput');
-    if (input) input.focus();
-  }
-}
-
-function hideConfigModal() {
-  const modal = document.getElementById('configModal');
-  modal.hidden = true;
-  // Clean up any dynamically added input
-  const input = document.getElementById('modalInput');
-  if (input) input.remove();
-  const datalist = document.getElementById('modelDatalist');
-  if (datalist) datalist.remove();
-  pendingAgentConfig = null;
-}
-
-async function saveConfigModal() {
-  if (!pendingAgentConfig) return;
-  const { slug, field, inputElement } = pendingAgentConfig;
-  const select = document.getElementById('modalSelect');
-  let value;
-
-  if (field === 'cli') {
-    value = select.value;
-  } else {
-    // Model: use input if present, otherwise select
-    value = inputElement ? inputElement.value.trim() : select.value.trim();
-  }
-
-  if (!value) {
-    alert('Please select or enter a value');
-    return;
-  }
-
-  try {
-    await api(`/api/agent/${encodeURIComponent(slug)}/${field}`, {
-      method: 'PUT',
-      body: JSON.stringify({ value }),
-    });
-    hideConfigModal();
-    await refreshStatus();
-  } catch (err) {
-    alert(err.message || 'Failed to save');
-  }
-}
-
-// Wait for DOM before attaching modal listeners
-if (typeof document !== 'undefined') {
-  document.addEventListener('DOMContentLoaded', () => {
-    const modalClose = document.getElementById('modalClose');
-    const modalCancel = document.getElementById('modalCancel');
-    const modalSave = document.getElementById('modalSave');
-    const configModal = document.getElementById('configModal');
-    if (modalClose) modalClose.addEventListener('click', hideConfigModal);
-    if (modalCancel) modalCancel.addEventListener('click', hideConfigModal);
-    if (modalSave) modalSave.addEventListener('click', saveConfigModal);
-    if (configModal) {
-      configModal.addEventListener('click', (e) => {
-        if (e.target.id === 'configModal') hideConfigModal();
-      });
-    }
-  });
-}
-
-function renderAgents(agents, clis) {
+function renderAgents(agents) {
   const root = document.getElementById('agents');
   root.innerHTML = '';
-  // Store available CLIs for modal
-  if (clis && clis.length) availableClis = clis;
   // Sort agents alphabetically by agentName, keeping PTL first
   const sorted = [...agents].sort((a, b) => {
     const aIsPTL = a.agentName === 'Agent PTL';
@@ -290,76 +159,69 @@ function renderAgents(agents, clis) {
   sorted.forEach((agent) => {
     const row = document.createElement('div');
     row.className = 'agent-row';
+    row.setAttribute('role', 'button');
+    row.setAttribute('aria-expanded', 'false');
+    row.tabIndex = 0;
 
     const light = document.createElement('span');
     light.className = `status-light ${agent.hasMail ? 'on' : ''}`;
 
-    // Line 1: Agent name
-    const line1 = document.createElement('div');
-    line1.className = 'agent-line1';
-    
+    const labels = document.createElement('div');
+    labels.className = 'agent-labels';
     const name = document.createElement('span');
     name.className = 'agent-name';
     name.textContent = agent.active ? `${agent.agentName} running` : agent.agentName;
-    line1.appendChild(name);
-
-    // Line 2: Product name (if different from agent name)
-    const line2 = document.createElement('div');
-    line2.className = 'agent-line2';
-    
+    labels.appendChild(name);
     if (agent.name && agent.name !== agent.agentName) {
       const product = document.createElement('span');
       product.className = 'agent-product';
       product.textContent = agent.name;
-      line2.appendChild(product);
+      labels.appendChild(product);
     }
 
-    // Line 3: CLI and model with clickable links to selection dialog
-    const line3 = document.createElement('div');
-    line3.className = 'agent-line3';
-    
-    // CLI link
-    const cliLink = document.createElement('a');
-    cliLink.className = 'agent-config-link';
-    cliLink.href = '#';
-    cliLink.textContent = agent.cli || 'default';
-    cliLink.title = 'Click to change CLI';
-    cliLink.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      showConfigModal(agent.slug, 'cli', agent.cli || '', agent.agentName);
-    });
-    line3.appendChild(cliLink);
-    
-    // Separator
-    const separator = document.createElement('span');
-    separator.className = 'agent-config-separator';
-    separator.textContent = ' • ';
-    line3.appendChild(separator);
-    
-    // Model link
-    const modelLink = document.createElement('a');
-    modelLink.className = 'agent-config-link';
-    modelLink.href = '#';
-    modelLink.textContent = agent.model || '—';
-    modelLink.title = 'Click to change model';
-    modelLink.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      showConfigModal(agent.slug, 'model', agent.model || '', agent.agentName);
-    });
-    line3.appendChild(modelLink);
-
-    const labels = document.createElement('div');
-    labels.className = 'agent-labels';
-    labels.appendChild(line1);
-    labels.appendChild(line2);
-    labels.appendChild(line3);
+    const chevron = document.createElement('span');
+    chevron.className = 'expand-chevron';
+    chevron.textContent = '▸';
+    chevron.setAttribute('aria-hidden', 'true');
 
     row.appendChild(light);
     row.appendChild(labels);
+    row.appendChild(chevron);
+
+    const detail = document.createElement('div');
+    detail.className = 'agent-detail';
+    detail.dataset.status = agent.hasMail ? 'on' : '';
+    detail.appendChild(makeDetailRow('INBOX', 'inbox', false));
+    detail.appendChild(makeDetailRow('DISPATCHED', 'lastDispatched', false));
+    detail.appendChild(makeDetailRow('JOURNAL', 'journal', true));
+
+    let loaded = false;
+    const toggle = () => {
+      const expanded = row.getAttribute('aria-expanded') === 'true';
+      row.setAttribute('aria-expanded', String(!expanded));
+      detail.classList.toggle('expanded', !expanded);
+      if (!expanded && !loaded) {
+        loaded = true;
+        detail.querySelector('[data-field="inbox"]').textContent = 'Loading…';
+        api(`/api/agent-detail/${encodeURIComponent(agent.slug)}`).then((data) => {
+          detail.querySelector('[data-field="inbox"]').textContent =
+            data.inbox > 0 ? String(data.inbox) : '—';
+          detail.querySelector('[data-field="lastDispatched"]').textContent =
+            data.lastDispatched ? relativeTime(data.lastDispatched) : '—';
+          detail.querySelector('[data-field="journal"]').textContent =
+            data.journal || '—';
+        }).catch(() => {
+          detail.querySelector('[data-field="inbox"]').textContent = '—';
+        });
+      }
+    };
+    row.addEventListener('click', toggle);
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
 
     root.appendChild(row);
+    root.appendChild(detail);
   });
 }
 
@@ -648,7 +510,7 @@ function applyState(state) {
   const json = state ? JSON.stringify(state.agents) : '';
   if (json === lastAgentsJson) return;
   lastAgentsJson = json;
-  if (state) renderAgents(state.agents, state.clis);
+  if (state) renderAgents(state.agents);
 }
 
 async function pollConversation() {
@@ -716,8 +578,6 @@ async function boot() {
     const named = await ensureDisplayName();
     setAuthenticated(true, displayName ? `Signed in as ${displayName}` : 'Signed in');
     if (!named) return;
-    // Load available CLIs for the modal
-    loadClis().catch(() => {});
     // Primary: open WS first. Wait for ready (or short timeout) before subscribing.
     // This prevents the race that opens SSE fallbacks while WS is still connecting.
     openWebSocket();

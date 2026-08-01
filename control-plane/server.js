@@ -623,6 +623,49 @@ async function handleApi(config, req, res) {
     }
   }
 
+  // List available CLIs from cli.json
+  if (url.pathname === "/api/clis" && req.method === "GET") {
+    const cliJson = config._cliJson || {};
+    const clis = Object.keys(cliJson).filter(k => !k.startsWith("_") && typeof cliJson[k] === "object");
+    return send(res, 200, { clis });
+  }
+
+  // List CLI names and available models for UI dialog
+  if (url.pathname === "/api/cli-models" && req.method === "GET") {
+    const cliJson = config._cliJson || {};
+    const clis = Object.keys(cliJson).filter(k => !k.startsWith("_") && typeof cliJson[k] === "object");
+    
+    // Get available models from registry settings, with fallback defaults
+    const registry = config.registry || {};
+    const modelsConfig = (registry.settings && registry.settings.models) || {};
+    const availableModels = modelsConfig.available || [
+      "claude-sonnet-4-20250514",
+      "claude-opus-4-1-20250414",
+      "claude-3-5-sonnet-20241022",
+      "claude-3-5-haiku-20241022",
+      "claude-3-opus-20240229",
+      "gpt-4o",
+      "gpt-4.1",
+      "gpt-4.1-mini",
+      "gpt-4.1-nano",
+      "o3",
+      "o3-mini",
+      "o4-mini",
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      "gemini-2.0-flash",
+      "zai-org-glm-5",
+      "kimi-k2-7-code"
+    ];
+    const defaultModel = modelsConfig.agent_default || "";
+    
+    return send(res, 200, { 
+      clis, 
+      models: availableModels,
+      defaultModel 
+    });
+  }
+
   const agentDetailMatch = url.pathname.match(/^\/api\/agent-detail\/([^/]+)$/);
   if (agentDetailMatch && req.method === "GET") {
     const slug = decodeURIComponent(agentDetailMatch[1]);
