@@ -27,147 +27,145 @@ PY
 }
 PORT="$(registry_port)"
 
-# --- 1. Which Claude CLI? ---
-step "AI CLI"
-DEFAULT_CLI="claude"
-printf "\nWhich Claude CLI command is installed on this machine?\n"
-printf "  [1] claude  (default)\n"
-printf "  [2] Enter a custom path\n\n"
-read -r -p "Choice [1]: " choice </dev/tty
-choice="${choice:-1}"
-if [ "$choice" = "2" ]; then
-  read -r -p "  Custom CLI path: " CLI_CMD </dev/tty
-  CLI_CMD="${CLI_CMD:-$DEFAULT_CLI}"
-else
-  CLI_CMD="$DEFAULT_CLI"
-fi
-ok "CLI: $CLI_CMD"
-
-_cli_key="$(basename "$CLI_CMD")"
-_cli_key="${_cli_key%.exe}"
-cli_prompt_flag() {
-  case "$(basename "$1")" in
-    grok) echo "--prompt-file" ;;
-    codex) echo "--prompt" ;;
-    *) echo "-p" ;;
-  esac
-}
-cli_extra_args() {
-  case "$(basename "$1")" in
-    grok) echo "--always-approve" ;;
-    claude|agy) echo "--dangerously-skip-permissions" ;;
-    codex) echo "--full-auto" ;;
+# --- 1. LLM provider (runtime is always bizagent-agent) ---
+step "Default LLM"
+PROVIDER="${BIZAGENT_PROVIDER:-grok}"
+case "$PROVIDER" in
+  grok|chatgpt|claude|gemini|venice|ollama) ;;
+  xai) PROVIDER="grok" ;;
+  openai|codex) PROVIDER="chatgpt" ;;
+  agy) PROVIDER="gemini" ;;
+  *) note "Unknown BIZAGENT_PROVIDER=$PROVIDER — using grok"; PROVIDER="grok" ;;
+esac
+# Default model per provider (overridable via BIZAGENT_MODEL)
+default_model_for() {
+  case "$1" in
+    grok) echo "grok-4.5" ;;
+    chatgpt) echo "gpt-4o" ;;
+    claude) echo "claude-sonnet-4-6" ;;
+    gemini) echo "gemini-2.5-flash" ;;
+    venice) echo "llama-3.3-70b" ;;
+    ollama) echo "llama3.2" ;;
     *) echo "" ;;
   esac
 }
-CLI_PROMPT_FLAG="$(cli_prompt_flag "$CLI_CMD")"
-CLI_EXTRA_ARGS="$(cli_extra_args "$CLI_CMD")"
+MODEL="${BIZAGENT_MODEL:-$(default_model_for "$PROVIDER")}"
+ok "provider=$PROVIDER model=$MODEL (runtime=bizagent-agent)"
 
-# cli.json = public engine catalog (ships in the repo); registry hub_agent.cliName
-# selects which engine the hub uses. Legacy .cli is not written (migration-only).
-if [[ ! -f "$HUB/cli.json" ]]; then
-  warn "cli.json missing from hub — runtime launches will fail until the catalog is restored"
-else
-  python3 - "$HUB/cli.json" "$_cli_key" "$CLI_CMD" "$CLI_PROMPT_FLAG" "$CLI_EXTRA_ARGS" <<'PY' 2>/dev/null || true
-import json, sys
-path, key, exe, pflag, extra = sys.argv[1:6]
-try:
-    d = json.load(open(path))
-except Exception:
-    d = {}
-if not isinstance(d, dict):
-    d = {}
-if key not in d or not isinstance(d.get(key), dict):
-    d[key] = {
-        "executable": exe or key,
-        "promptFlag": pflag or "-p",
-        "flags": {"extra": extra or ""},
-    }
-    json.dump(d, open(path, "w"), indent=2)
-    open(path, "a").write("\n")
-PY
-  ok "cli.json has entry for '$_cli_key'"
+if [[ ! -f "$HUB/cli.json" && -f "$HUB/cli.json.example" ]]; then
+  cp "$HUB/cli.json.example" "$HUB/cli.json"
+  ok "cli.json seeded from example"
 fi
 
 if [[ ! -f "$HUB/registry.json" && -f "$HUB/registry.example.json" ]]; then
-  python3 - "$HUB/registry.example.json" "$HUB/registry.json" "$_cli_key" <<'PY' 2>/dev/null || cp "$HUB/registry.example.json" "$HUB/registry.json"
+  python3 - "$HUB/registry.example.json" "$HUB/registry.json" "$PROVIDER" "$MODEL" <<'PY' 2>/dev/null || cp "$HUB/registry.example.json" "$HUB/registry.json"
 import json, sys
-src, dest, cli_name = sys.argv[1:4]
+src, dest, provider, model = sys.argv[1:5]
 d = json.load(open(src))
 d["org"] = ""
 d["products"] = []
 d["cross_product_edges"] = []
 if "hub" in d and isinstance(d["hub"], dict):
     d["hub"]["name"] = "BizAgent"
-d.setdefault("settings", {}).setdefault("hub_agent", {})["cliName"] = cli_name
+ha = d.setdefault("settings", {}).setdefault("hub_agent", {})
+ha["provider"] = provider
+ha["cliName"] = provider
+if model:
+    ha["model"] = model
 json.dump(d, open(dest, "w"), indent=2)
 open(dest, "a").write("\n")
 PY
-  ok "registry.json seeded (hub_agent.cliName=$_cli_key)"
+  ok "registry.json seeded (provider=$PROVIDER model=$MODEL)"
 else
-  python3 - "$HUB/registry.json" "$_cli_key" <<'PY' 2>/dev/null || true
+  python3 - "$HUB/registry.json" "$PROVIDER" "$MODEL" <<'PY' 2>/dev/null || true
 import json, sys
-path, cli_name = sys.argv[1:3]
+path, provider, model = sys.argv[1:4]
 d = json.load(open(path))
 ha = d.setdefault("settings", {}).setdefault("hub_agent", {})
-if not (ha.get("cliName") or ha.get("cli")):
-    ha["cliName"] = cli_name
-    json.dump(d, open(path, "w"), indent=2)
-    open(path, "a").write("\n")
+if not (ha.get("provider") or ha.get("cliName") or ha.get("cli")):
+    ha["provider"] = provider
+    ha["cliName"] = provider
+if not (ha.get("model") or "").strip() and model:
+    ha["model"] = model
+json.dump(d, open(path, "w"), indent=2)
+open(path, "a").write("\n")
 PY
-  ok "registry.json hub_agent.cliName ensured"
-fi
-if [[ -f "$HUB/.cli" ]]; then
-  note "legacy .cli present — ignored for flags; hub CLI name is registry hub_agent.cliName"
+  ok "registry.json hub_agent provider/model ensured"
 fi
 
 # --- 1b. API key → .bizagent/env (required for hub turns) ---
-api_key_var_for_cli() {
+api_key_var_for_provider() {
   case "$1" in
+    grok|xai) echo "XAI_API_KEY" ;;
+    chatgpt|openai|codex) echo "OPENAI_API_KEY" ;;
     claude) echo "ANTHROPIC_API_KEY" ;;
-    grok)   echo "XAI_API_KEY" ;;
-    codex)  echo "OPENAI_API_KEY" ;;
-    *)      echo "" ;;
+    gemini|agy) echo "GEMINI_API_KEY" ;;
+    venice) echo "VENICE_API_KEY" ;;
+    ollama) echo "OLLAMA_API_KEY" ;;
+    *) echo "XAI_API_KEY" ;;
   esac
 }
-API_KEY_VAR="$(api_key_var_for_cli "$(basename "$CLI_CMD")")"
+API_KEY_VAR="$(api_key_var_for_provider "$PROVIDER")"
 mkdir -p "$HUB/.bizagent"
+if [[ ! -f "$HUB/.bizagent/env.example" && -f "$HUB/cli.json.example" ]]; then
+  : # env.example may already exist from clone
+fi
 if [[ -n "${BIZAGENT_API_KEY:-}" && -n "$API_KEY_VAR" ]]; then
-  printf '%s=%s\n' "$API_KEY_VAR" "$BIZAGENT_API_KEY" > "$HUB/.bizagent/env"
+  # Merge or create
+  if [[ -f "$HUB/.bizagent/env" ]] && grep -q "^${API_KEY_VAR}=" "$HUB/.bizagent/env" 2>/dev/null; then
+    grep -v "^${API_KEY_VAR}=" "$HUB/.bizagent/env" > "$HUB/.bizagent/env.tmp" || true
+    printf '%s=%s\n' "$API_KEY_VAR" "$BIZAGENT_API_KEY" >> "$HUB/.bizagent/env.tmp"
+    mv "$HUB/.bizagent/env.tmp" "$HUB/.bizagent/env"
+  else
+    printf '%s=%s\n' "$API_KEY_VAR" "$BIZAGENT_API_KEY" >> "$HUB/.bizagent/env"
+  fi
   chmod 600 "$HUB/.bizagent/env"
-  ok ".bizagent/env written ($API_KEY_VAR from BIZAGENT_API_KEY)"
+  ok ".bizagent/env updated ($API_KEY_VAR from BIZAGENT_API_KEY)"
 elif [[ -n "$API_KEY_VAR" ]]; then
-  existing_val=""
-  if [[ -n "${!API_KEY_VAR:-}" ]]; then
-    existing_val="${!API_KEY_VAR}"
+  existing_val="${!API_KEY_VAR:-}"
+  if [[ -z "$existing_val" && -f "$HUB/.bizagent/env" ]]; then
+    # shellcheck disable=SC1091
+    set -a; source "$HUB/.bizagent/env" 2>/dev/null || true; set +a
+    existing_val="${!API_KEY_VAR:-}"
   fi
   if [[ -n "$existing_val" ]]; then
-    read -r -p "  $API_KEY_VAR is set in this shell. Save to .bizagent/env? [Y/n]: " save_key </dev/tty
-    save_key="${save_key:-Y}"
-    if [[ "$save_key" =~ ^[Yy] ]]; then
-      printf '%s=%s\n' "$API_KEY_VAR" "$existing_val" > "$HUB/.bizagent/env"
-      chmod 600 "$HUB/.bizagent/env"
-      ok ".bizagent/env written ($API_KEY_VAR)"
+    if [[ ! -f "$HUB/.bizagent/env" ]] || ! grep -q "^${API_KEY_VAR}=" "$HUB/.bizagent/env" 2>/dev/null; then
+      read -r -p "  $API_KEY_VAR is available. Save to .bizagent/env? [Y/n]: " save_key </dev/tty
+      save_key="${save_key:-Y}"
+      if [[ "$save_key" =~ ^[Yy] ]]; then
+        printf '%s=%s\n' "$API_KEY_VAR" "$existing_val" >> "$HUB/.bizagent/env"
+        chmod 600 "$HUB/.bizagent/env"
+        ok ".bizagent/env written ($API_KEY_VAR)"
+      fi
+    else
+      ok ".bizagent/env already has $API_KEY_VAR"
     fi
   else
-    printf "\nHub turns need %s in .bizagent/env.\n" "$API_KEY_VAR"
+    printf "\nHub turns need %s in .bizagent/env (first-run will not work without it).\n" "$API_KEY_VAR"
     read -r -s -p "  $API_KEY_VAR (hidden, Enter to skip): " typed_key </dev/tty
     printf "\n"
     if [[ -n "$typed_key" ]]; then
-      printf '%s=%s\n' "$API_KEY_VAR" "$typed_key" > "$HUB/.bizagent/env"
+      printf '%s=%s\n' "$API_KEY_VAR" "$typed_key" >> "$HUB/.bizagent/env"
       chmod 600 "$HUB/.bizagent/env"
       ok ".bizagent/env written ($API_KEY_VAR)"
     else
-      printf "  ! Skipped — add .bizagent/env before expecting hub replies.\n"
+      printf "  ! Skipped — first-run/hub turns will fail until this key is set.\n"
     fi
   fi
 fi
 
-# --- 2. npm install ---
+# --- 2. npm install (control-plane + agent-runtime) ---
 step "Dependencies"
 command -v node >/dev/null 2>&1 || { echo "ERROR: Node.js is required." >&2; exit 1; }
-(cd "$CP_DIR" && npm install --silent)
-ok "npm install complete"
+if [[ -f "$CP_DIR/package.json" ]]; then
+  (cd "$CP_DIR" && npm install --silent) && ok "control-plane npm install complete"
+elif [[ -f "$HUB/package.json" ]]; then
+  (cd "$HUB" && npm install --silent) && ok "hub npm install complete"
+fi
+if [[ -f "$HUB/agent-runtime/package.json" ]]; then
+  (cd "$HUB/agent-runtime" && npm install --silent) && ok "agent-runtime npm install complete"
+  chmod +x "$HUB/scripts/bizagent-agent" "$HUB/agent-runtime/bin/bizagent-agent" 2>/dev/null || true
+fi
 
 # --- 3. Cron or systemd ---
 step "Service"
@@ -209,24 +207,43 @@ fi
 step "Starting"
 bash "$HUB/scripts/control-plane.sh" start "$HUB"
 
-# --- 6. Drop first-run inbox seed ---
+# --- 6. Pre-flight + first-run inbox seed ---
+step "First-run readiness"
+READY=0
+if [[ -x "$HUB/scripts/check-hub-ready.sh" ]]; then
+  if bash "$HUB/scripts/check-hub-ready.sh" "$HUB"; then
+    READY=1
+  else
+    printf "  ! Hub is not ready to run turns (see above). Fix provider/model/API key, then re-check:\n"
+    note "  bash scripts/check-hub-ready.sh"
+  fi
+else
+  note "check-hub-ready.sh missing — skipping pre-flight"
+  READY=1
+fi
+
 mkdir -p "$HUB/inbox"
 TODAY="$(date -u +%Y-%m-%d)"
 SEED_FILE="$HUB/inbox/${TODAY}-install-first-run.md"
 # Glob-guard: skip if any prior-date seed already exists (prevents duplicate on same-day re-run).
 _EXISTING=$(ls "$HUB/inbox/"*"-install-first-run.md" 2>/dev/null | head -1)
 if [ -z "$_EXISTING" ]; then
-  printf '---\nfrom: installer\nto: hub\ndate: %s\nsubject: first-run setup\n---\n\nA new bizagent installation just completed. Welcome the user, interview them about their products and projects, then set up the full system.\n' \
-    "$TODAY" > "$SEED_FILE"
-  ok "first-run message queued"
+  if [[ "$READY" -eq 1 ]]; then
+    printf '---\nfrom: installer\nto: hub\ndate: %s\nsubject: first-run setup\n---\n\nA new bizagent installation just completed. Welcome the operator in the web UI, interview them about their organization and products (gather → build → distribute), write registry.json and agent dirs as needed, and report when setup is done.\n\nPrerequisites are already checked: bizagent-agent runtime, hub provider/model, and API key in .bizagent/env.\n' \
+      "$TODAY" > "$SEED_FILE"
+    ok "first-run message queued (hub is ready to execute it)"
+  else
+    printf '---\nfrom: installer\nto: hub\ndate: %s\nsubject: first-run setup blocked\n---\n\nInstallation finished but the hub was NOT ready to launch (missing provider, model, API key, or agent-runtime deps). Do not run product onboarding until the operator fixes that.\n\nOperator: run `bash scripts/check-hub-ready.sh`, fix any ✗ items, restart control plane, then send a console message: "Run first-run setup / interview me and onboard my products."\n' \
+      "$TODAY" > "$SEED_FILE"
+    printf "  ! first-run seed written as BLOCKED (will not usefully execute until ready)\n"
+  fi
 fi
 
 # --- 7. Open browser ---
 sleep 1
 
 if [[ "$_is_headless" -eq 1 ]]; then
-  _ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+
- | grep -v '^127\.' | head -3)
+  _ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | head -3)
   if [[ -n "$_ips" ]]; then
     printf "\n${BOLD}Open one of these URLs in your browser to set up BizAgent:${NC}\n\n"
     while IFS= read -r ip; do
@@ -245,33 +262,3 @@ else
     open "http://localhost:$PORT"
   fi
 fi
-
-# --- 8. CLI setup completion instructions ---
-printf "\n${BOLD}${GREEN}=== CLI Setup Complete ===${NC}\n\n"
-printf "Next steps:\n\n"
-printf "1. Add your API key to ~/bizagent/.bizagent/env:\n"
-if [[ -n "$API_KEY_VAR" ]]; then
-  printf "   echo '%s=your_api_key_here' >> ~/bizagent/.bizagent/env\n" "$API_KEY_VAR"
-else
-  printf "   echo 'ANTHROPIC_API_KEY=your_api_key_here' >> ~/bizagent/.bizagent/env\n"
-  printf "   (or XAI_API_KEY, OPENAI_API_KEY, VENICE_API_KEY depending on your CLI)\n"
-fi
-printf "\n"
-printf "2. Set the default model for %s in your shell profile:\n" "$CLI_CMD"
-case "$_cli_key" in
-  claude)
-    printf "   # Claude uses ANTHROPIC_API_KEY; no additional model flag needed\n" ;;
-  grok)
-    printf "   # Grok uses XAI_API_KEY; no additional model flag needed\n" ;;
-  codex)
-    printf "   # Codex uses OPENAI_API_KEY; no additional model flag needed\n" ;;
-  agy)
-    printf "   # Agy uses ANTHROPIC_API_KEY; no additional model flag needed\n" ;;
-  venice)
-    printf "   export VENICE_AI_MODEL=kimi-k2-7-code  # or your preferred model\n" ;;
-  *)
-    printf "   # Check your CLI's documentation for model configuration\n" ;;
-esac
-printf "\n"
-printf "3. Launch the browser to begin onboarding and adding projects:\n"
-printf "   http://localhost:%s\n\n" "$PORT"

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Hub-relative launcher for the built-in OpenAI-compatible agent runtime.
+# Must resolve symlinks: hub runs with cwd .bizagent/runtime-cwd where scripts/ is a symlink.
+set -euo pipefail
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+HUB="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+exec "$HUB/agent-runtime/bin/bizagent-agent" "$@"

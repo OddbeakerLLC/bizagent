@@ -348,7 +348,7 @@ function isAgentActive(hub, slug, leaseSecs) {
 
 function buildArgs(extraArgs, modelOverride) {
   if (!modelOverride) return extraArgs;
-  if (!/^[A-Za-z0-9._:-]+$/.test(modelOverride)) {
+  if (!/^[A-Za-z0-9._:/-]+$/.test(modelOverride)) {
     throw new Error(`Invalid model name: ${modelOverride}`);
   }
   const stripped = extraArgs

@@ -44,3 +44,4 @@ sitemap.md
 
 # Operator-specific leak markers for publish-check
 scripts/publish-check.patterns
+node_modules/
