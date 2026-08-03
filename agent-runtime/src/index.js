@@ -193,8 +193,8 @@ async function interactiveLoop() {
     }
   } catch (err) {
     console.error(`Error: ${err.message || err}`);
-    process.exitCode = 1;
-  } finally {
-    rl.close();
+    try { rl.close(); } catch (_e) { /* ignore */ }
+    process.exit(1);
   }
+  try { rl.close(); } catch (_e) { /* ignore */ }
 })();
