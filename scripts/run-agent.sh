@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# run-agent.sh — invoke the hub CLI resolved from registry + cli.json.
+# run-agent.sh — invoke the hub agent (bizagent-agent + provider from registry).
 # Usage: scripts/run-agent.sh "prompt text" [extra CLI args...]
 #
 # Source of truth:
-#   registry.json settings.hub_agent.cliName  → which engine
-#   cli.json[name]                           → executable, promptFlag, extras
-# Legacy .cli is migration-only (name fallback if hub_agent.cliName is empty).
+#   registry.json settings.hub_agent.provider → LLM provider key in cli.json
+#   cli.json _runtime + provider entry       → executable, flags, baseURL
+# Legacy .cli is migration-only (name fallback if hub provider is empty).
 set -u
 
 HUB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,7 +31,7 @@ const hub = process.cwd();
 const config = loadRuntimeConfig(hub);
 const name = config.hubCliName || config.cli || "";
 if (!name) {
-  console.error("run-agent.sh: no hub CLI name — set settings.hub_agent.cliName in registry.json");
+  console.error("run-agent.sh: no hub provider — set settings.hub_agent.provider in registry.json");
   process.exit(1);
 }
 const s = getCliSettings(hub, config._cliJson, config, name, "");

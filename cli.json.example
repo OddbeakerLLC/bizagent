@@ -1,31 +1,66 @@
 {
-  "_comment": "CLI configuration. Standard CLI definitions (claude, codex, agy, grok) keyed by CLI name. Copy to cli.json and customize.",
-  "claude": {
-    "executable": "claude",
-    "promptFlag": "-p",
+  "_comment": "LLM provider catalog for bizagent-agent. Keys are LLM brands (not coding CLIs). Each entry is an OpenAI-compatible HTTP endpoint + models.",
+  "_runtime": {
+    "executable": "scripts/bizagent-agent",
+    "promptFlag": "-f",
     "flags": {
-      "extra": "--dangerously-skip-permissions"
-    }
-  },
-  "codex": {
-    "executable": "codex",
-    "promptFlag": "--prompt",
-    "flags": {
-      "extra": "--full-auto"
-    }
-  },
-  "agy": {
-    "executable": "agy",
-    "promptFlag": "-p",
-    "flags": {
-      "extra": "--dangerously-skip-permissions"
+      "extra": "-y"
     }
   },
   "grok": {
-    "executable": "grok",
-    "promptFlag": "--prompt-file",
-    "flags": {
-      "extra": "--always-approve"
-    }
+    "label": "Grok",
+    "baseURL": "https://api.x.ai/v1",
+    "keyEnv": "XAI_API_KEY",
+    "models": [
+      "grok-4.5"
+    ]
+  },
+  "chatgpt": {
+    "label": "ChatGPT",
+    "baseURL": "https://api.openai.com/v1",
+    "keyEnv": "OPENAI_API_KEY",
+    "models": [
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-4o"
+    ]
+  },
+  "claude": {
+    "label": "Claude",
+    "baseURL": "https://api.anthropic.com/v1/",
+    "keyEnv": "ANTHROPIC_API_KEY",
+    "models": [
+      "claude-sonnet-4-6",
+      "claude-opus-5",
+      "claude-sonnet-4"
+    ]
+  },
+  "gemini": {
+    "label": "Gemini",
+    "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "keyEnv": "GEMINI_API_KEY",
+    "models": [
+      "gemini-2.5-flash",
+      "gemini-2.5-pro",
+      "gemini-2.0-flash"
+    ]
+  },
+  "venice": {
+    "label": "Venice",
+    "baseURL": "https://api.venice.ai/api/v1",
+    "keyEnv": "VENICE_API_KEY",
+    "models": [
+      "llama-3.3-70b",
+      "kimi-k2-7-code"
+    ]
+  },
+  "ollama": {
+    "label": "Ollama (local)",
+    "baseURL": "http://127.0.0.1:11434/v1",
+    "keyEnv": "OLLAMA_API_KEY",
+    "optionalKey": true,
+    "models": [
+      "llama3.2"
+    ]
   }
 }

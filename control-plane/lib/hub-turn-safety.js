@@ -439,10 +439,16 @@ function hardFailMessage(turn) {
 /**
  * After hub CLI exit (or tick drain): ensure the operator sees a reply or a hard failure.
  * Idempotent — safe if real outbox mail already routed.
+ *
+ * ALWAYS-WARM: conversation_id is guaranteed. No blob promotion from stdout —
+ * if hub didn't write to reserved body file, that's a clear failure mode.
  */
 function ensureHubUserReply(hub, turn) {
   const conversationId = turn && turn.conversationId;
-  if (!conversationId) return { action: 'skip' };
+  // ALWAYS-WARM: conversation_id is required — fail fast if missing
+  if (!conversationId) {
+    return { action: 'skip-no-conversation', error: 'conversation_id required (warm-launch guarantee violated)' };
+  }
   if (!getConversation(hub, conversationId)) {
     clearPendingHubTurn(hub, turn);
     clearReservedReplyBody(hub, conversationId);
@@ -499,30 +505,7 @@ function ensureHubUserReply(hub, turn) {
     return result;
   }
 
-  // Last resort: promote from stdout (+ stderr) delta — recovery only, not the happy path.
-  const stdoutDelta = readLogDelta(turn.agentLog, turn.logByteOffset);
-  const stderrDelta = readLogDelta(turn.agentStderr, turn.stderrByteOffset || 0);
-  const combined = [stdoutDelta, stderrDelta].filter(Boolean).join('\n\n');
-  const blob = extractFinalAssistantBlob(combined);
-  if (blob) {
-    if (hubReplySince(hub, conversationId, turn.startedAt)) {
-      clearPendingHubTurn(hub, turn);
-      clearReservedReplyBody(hub, conversationId);
-      notifyConversationMutated(hub, conversationId);
-      return { action: 'ok-existing', conversationId, mutated: true };
-    }
-    const result = finalizeViaOutbox(
-      hub,
-      conversationId,
-      blob,
-      'recovered hub reply',
-      'promoted',
-    );
-    clearPendingHubTurn(hub, turn);
-    clearReservedReplyBody(hub, conversationId);
-    return result;
-  }
-
+  // ALWAYS-WARM: No blob promotion fallback. If reserved body is empty, that's a failure.
   if (hubReplySince(hub, conversationId, turn.startedAt)
     || hubFailureSince(hub, conversationId, turn.startedAt)) {
     clearPendingHubTurn(hub, turn);
@@ -531,6 +514,7 @@ function ensureHubUserReply(hub, turn) {
     return { action: 'ok-existing', conversationId, mutated: true };
   }
 
+  // Hard fail: hub didn't write to reserved body file
   supersedeLaunchAcks(hub, conversationId);
   appendMessage(
     hub,
@@ -544,7 +528,7 @@ function ensureHubUserReply(hub, turn) {
   logEvent(hub, {
     event: 'hub_safety_fail',
     conversation_id: conversationId,
-    reason: 'no_reply_or_outbox'
+    reason: 'no_reserved_body'
   });
   notifyConversationMutated(hub, conversationId);
   return { action: 'failed', conversationId, mutated: true };

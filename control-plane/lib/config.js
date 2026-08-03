@@ -68,6 +68,16 @@ function loadRegistry(hub) {
   });
 }
 
+/** Atomic-ish registry write (temp + rename). Preserves formatting with trailing newline. */
+function writeRegistry(hub, registry) {
+  const file = registryFile(hub);
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const body = `${JSON.stringify(registry, null, 2)}\n`;
+  fs.writeFileSync(tmp, body, "utf8");
+  fs.renameSync(tmp, file);
+  return registry;
+}
+
 function registryMtimeMs(hub) {
   try {
     return fs.statSync(registryFile(hub)).mtimeMs;
@@ -110,14 +120,14 @@ function cliBasename(name) {
 }
 
 /**
- * Hub default CLI **name** only (not flags).
- * Priority: env → registry settings.hub_agent.cliName → legacy .cli CLI_CMD (migration).
- * Flags always come from cli.json via getCliSettings — never from .cli.
+ * Hub default **provider** (LLM) name.
+ * Priority: env → hub_agent.provider → hub_agent.cliName (legacy) → legacy .cli CLI_CMD.
  */
 function resolveHubCliName(registry, legacyCliFile = {}) {
   const hubAgent =
     (registry && registry.settings && registry.settings.hub_agent) || {};
   const fromRegistry =
+    hubAgent.provider ||
     hubAgent.cliName ||
     (typeof hubAgent.cli === "string" ? hubAgent.cli : "") ||
     "";
@@ -125,6 +135,7 @@ function resolveHubCliName(registry, legacyCliFile = {}) {
     legacyCliFile.CLI_CMD || legacyCliFile.CLI || "",
   );
   return (
+    process.env.BIZAGENT_HUB_PROVIDER ||
     process.env.BIZAGENT_HUB_CLI ||
     String(fromRegistry || "").trim() ||
     fromLegacy ||
@@ -133,19 +144,22 @@ function resolveHubCliName(registry, legacyCliFile = {}) {
 }
 
 /**
- * Apply hub CLI name onto config after registry / .cli reloads.
- * Sets config.cli and config.hubCliName to the same catalog key.
+ * Apply hub provider onto config after registry / .cli reloads.
+ * hubCliName / hubProvider / cli are the same provider key (legacy field names kept).
  */
 function applyHubCliName(config) {
   const legacy = readCliFile(config.hub);
   const name = resolveHubCliName(config.registry || {}, legacy);
   config.hubCliName = name;
-  // getCliSettings falls back to config.cli when product cliName is empty.
+  config.hubProvider = name;
+  // getCliSettings falls back to config.cli when product provider is empty.
   config.cli = name;
+  const hubAgent = ((config.registry || {}).settings || {}).hub_agent || {};
   config._hubCliFromLegacyDotCli = !!(
     name &&
     legacy.CLI_CMD &&
-    !((config.registry.settings || {}).hub_agent || {}).cliName
+    !hubAgent.provider &&
+    !hubAgent.cliName
   );
   return config;
 }
@@ -212,10 +226,18 @@ function deriveRegistrySettings(registry) {
       hubAgent.model ||
       models.orchestrator ||
       "",
-    // Catalog key for the hub PTL CLI (flags live in cli.json). Empty until
-    // installer/registry sets it; resolveHubCliName may fill from legacy .cli.
+    // LLM provider key in cli.json (runtime is always bizagent-agent).
     hubCliName:
+      process.env.BIZAGENT_HUB_PROVIDER ||
       process.env.BIZAGENT_HUB_CLI ||
+      hubAgent.provider ||
+      hubAgent.cliName ||
+      (typeof hubAgent.cli === "string" ? hubAgent.cli : "") ||
+      "",
+    hubProvider:
+      process.env.BIZAGENT_HUB_PROVIDER ||
+      process.env.BIZAGENT_HUB_CLI ||
+      hubAgent.provider ||
       hubAgent.cliName ||
       (typeof hubAgent.cli === "string" ? hubAgent.cli : "") ||
       "",
@@ -305,17 +327,178 @@ function refreshRuntimeConfig(config) {
   return config;
 }
 
-function agentsFromRegistry(registry) {
+/** Expand leading ~ to $HOME. */
+function expandUserPath(projectPath) {
+  const s = String(projectPath || "");
+  if (s === "~") return process.env.HOME || s;
+  if (s.startsWith("~/") || s.startsWith("~\\")) {
+    return path.join(process.env.HOME || "", s.slice(2));
+  }
+  return s;
+}
+
+/**
+ * Resolve a registry project path relative to the hub root.
+ * Absolute paths and ~/… are preserved after expansion.
+ */
+function resolveProjectPath(hub, projectPath) {
+  const expanded = expandUserPath(projectPath);
+  if (!expanded) return "";
+  if (path.isAbsolute(expanded)) return path.resolve(expanded);
+  if (!hub) return path.resolve(expanded);
+  return path.resolve(hub, expanded);
+}
+
+/**
+ * True when `absPath` is a git working tree (`.git` dir or worktree file).
+ * Nested monorepo subfolders without their own .git are not projects.
+ */
+function isGitWorkTree(absPath) {
+  if (!absPath) return false;
+  try {
+    const gitPath = path.join(absPath, ".git");
+    const st = fs.lstatSync(gitPath);
+    return st.isDirectory() || st.isFile();
+  } catch (_err) {
+    return false;
+  }
+}
+
+/**
+ * A UI "project" is a git-backed directory:
+ * - has a non-empty `remote` (cloneable / deferred), or
+ * - the path on disk is its own git work tree.
+ * Subdirectories of a monorepo that are not separate repos are excluded.
+ */
+function isGitBackedProject(hub, project) {
+  if (!project || typeof project !== "object") return false;
+  if (String(project.remote || "").trim()) return true;
+  return isGitWorkTree(resolveProjectPath(hub, project.path));
+}
+
+function projectSummaries(projects, hub = "") {
+  if (!Array.isArray(projects)) return [];
+  return projects
+    .map((p) => {
+      if (!p || typeof p !== "object") return null;
+      const name = String(p.name || "").trim();
+      if (!name) return null;
+      if (!isGitBackedProject(hub, p)) return null;
+      return {
+        name,
+        path: String(p.path || ""),
+        remote: String(p.remote || ""),
+      };
+    })
+    .filter(Boolean);
+}
+
+function productProvider(product) {
+  if (!product || typeof product !== "object") return "";
+  return String(product.provider || product.cliName || product.cli || "").trim();
+}
+
+function agentsFromRegistry(registry, hub = "") {
   return (registry.products || [])
-    .map((product) => ({
-      slug: product.slug,
-      name: product.name || product.slug,
-      agentName: product.agent_name || product.name || product.slug,
-      model: product.model || "",
-      // Empty → getCliSettings uses hub settings.hub_agent.cliName / legacy fallback.
-      cliName: product.cliName || product.cli || "",
-    }))
+    .map((product) => {
+      const provider = productProvider(product);
+      return {
+        slug: product.slug,
+        name: product.name || product.slug,
+        agentName: product.agent_name || product.name || product.slug,
+        model: product.model || "",
+        // provider is primary; cliName kept as alias for older UI/API clients.
+        provider,
+        cliName: provider,
+        projects: projectSummaries(product.projects, hub),
+      };
+    })
     .filter((agent) => agent.slug);
+}
+
+/**
+ * Update hub or product agent provider/model in registry.json.
+ * @param {string} hub
+ * @param {string} slug - "hub" or a product slug
+ * @param {{ provider?: string, cliName?: string, model?: string }} patch
+ *   cliName is accepted as an alias for provider (legacy API body).
+ */
+function updateAgentConfig(hub, slug, patch = {}) {
+  const cleanSlug = String(slug || "").trim();
+  if (!cleanSlug || !/^[a-zA-Z0-9._-]+$/.test(cleanSlug)) {
+    throw new Error("invalid agent slug");
+  }
+
+  const nextProviderRaw =
+    patch.provider !== undefined && patch.provider !== null
+      ? String(patch.provider).trim()
+      : patch.cliName !== undefined && patch.cliName !== null
+        ? String(patch.cliName).trim()
+        : undefined;
+  const nextModel =
+    patch.model !== undefined && patch.model !== null
+      ? String(patch.model).trim()
+      : undefined;
+
+  if (nextProviderRaw !== undefined) {
+    if (!nextProviderRaw) throw new Error("provider is required");
+    if (!/^[A-Za-z0-9._-]+$/.test(nextProviderRaw)) {
+      throw new Error(`Invalid provider name: ${nextProviderRaw}`);
+    }
+  }
+  if (nextModel !== undefined) {
+    if (nextModel && !/^[A-Za-z0-9._:/-]+$/.test(nextModel)) {
+      throw new Error(`Invalid model name: ${nextModel}`);
+    }
+  }
+  if (nextProviderRaw === undefined && nextModel === undefined) {
+    throw new Error("provide provider and/or model");
+  }
+
+  const registry = loadRegistry(hub);
+
+  if (cleanSlug === "hub") {
+    registry.settings = registry.settings || {};
+    registry.settings.hub_agent = registry.settings.hub_agent || {};
+    if (nextProviderRaw !== undefined) {
+      registry.settings.hub_agent.provider = nextProviderRaw;
+      // Keep cliName in sync for older readers; value is the provider key.
+      registry.settings.hub_agent.cliName = nextProviderRaw;
+    }
+    if (nextModel !== undefined) registry.settings.hub_agent.model = nextModel;
+    writeRegistry(hub, registry);
+    const p =
+      registry.settings.hub_agent.provider ||
+      registry.settings.hub_agent.cliName ||
+      "";
+    return {
+      slug: "hub",
+      provider: p,
+      cliName: p,
+      model: registry.settings.hub_agent.model || "",
+    };
+  }
+
+  const products = registry.products || [];
+  const product = products.find((p) => p && p.slug === cleanSlug);
+  if (!product) throw new Error(`agent not found: ${cleanSlug}`);
+  if (nextProviderRaw !== undefined) {
+    product.provider = nextProviderRaw;
+    product.cliName = nextProviderRaw;
+  }
+  if (nextModel !== undefined) product.model = nextModel;
+  // Drop legacy inline cli object if present.
+  if (Object.prototype.hasOwnProperty.call(product, "cli") && typeof product.cli !== "string") {
+    delete product.cli;
+  }
+  writeRegistry(hub, registry);
+  const p = productProvider(product);
+  return {
+    slug: cleanSlug,
+    provider: p,
+    cliName: p,
+    model: product.model || "",
+  };
 }
 
 function appDir(hub) {
@@ -332,11 +515,18 @@ module.exports = {
   loadHubEnv,
   loadRegistry,
   loadRuntimeConfig,
+  expandUserPath,
+  isGitBackedProject,
+  isGitWorkTree,
+  projectSummaries,
   readCliFile,
   readJson,
   refreshCliConfig,
   refreshRegistry,
   refreshRuntimeConfig,
+  resolveProjectPath,
+  updateAgentConfig,
+  writeRegistry,
   registryMtimeMs,
   resolveHubCliName,
 };

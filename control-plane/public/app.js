@@ -130,6 +130,187 @@ function relativeTime(ms) {
   return `${Math.round(h / 24)}d ago`;
 }
 
+// --- Agent rail: expand state + LLM provider/model dialog ---
+const expandedAgentSlugs = new Set();
+let pendingAgentConfig = null; // { slug, agentName, provider, model }
+let cliModelsCache = null; // { clis/providers, cliModels, labels, defaultModel }
+
+async function loadCliModels(force = false) {
+  if (!force && cliModelsCache) return cliModelsCache;
+  const data = await api('/api/cli-models');
+  const providers = Array.isArray(data.providers)
+    ? data.providers
+    : (Array.isArray(data.clis) ? data.clis : []);
+  cliModelsCache = {
+    clis: providers,
+    providers,
+    cliModels: data.cliModels && typeof data.cliModels === 'object'
+      ? data.cliModels
+      : (data.providerModels || {}),
+    labels: data.labels && typeof data.labels === 'object' ? data.labels : {},
+    defaultModel: data.defaultModel || '',
+  };
+  return cliModelsCache;
+}
+
+function fillSelect(select, options, selected, labels) {
+  select.innerHTML = '';
+  const values = Array.isArray(options) ? options.slice() : [];
+  if (selected && !values.includes(selected)) values.unshift(selected);
+  if (values.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(none available)';
+    select.appendChild(opt);
+    return;
+  }
+  const labelMap = labels && typeof labels === 'object' ? labels : {};
+  for (const value of values) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = labelMap[value] || value;
+    if (value === selected) opt.selected = true;
+    select.appendChild(opt);
+  }
+}
+
+function refreshModelOptionsForCli() {
+  if (!pendingAgentConfig || !cliModelsCache) return;
+  const cliSelect = document.getElementById('modalCliSelect');
+  const modelSelect = document.getElementById('modalModelSelect');
+  if (!cliSelect || !modelSelect) return;
+  const provider = cliSelect.value;
+  const models = (cliModelsCache.cliModels && cliModelsCache.cliModels[provider]) || [];
+  // Prefer current model if still valid for this provider; otherwise first model.
+  const preferred =
+    models.includes(pendingAgentConfig.model) ? pendingAgentConfig.model
+      : (models[0] || pendingAgentConfig.model || '');
+  fillSelect(modelSelect, models, preferred);
+}
+
+async function showAgentConfigModal(agent) {
+  const provider = agent.provider || agent.cliName || '';
+  pendingAgentConfig = {
+    slug: agent.slug,
+    agentName: agent.agentName || agent.slug,
+    provider,
+    cliName: provider,
+    model: agent.model || '',
+  };
+  const modal = document.getElementById('configModal');
+  const title = document.getElementById('modalTitle');
+  const status = document.getElementById('modalStatus');
+  const cliSelect = document.getElementById('modalCliSelect');
+  const modelSelect = document.getElementById('modalModelSelect');
+  if (!modal || !cliSelect || !modelSelect) return;
+
+  title.textContent = `LLM & model — ${pendingAgentConfig.agentName}`;
+  if (status) {
+    status.hidden = true;
+    status.textContent = '';
+  }
+
+  try {
+    await loadCliModels(true);
+  } catch (err) {
+    if (status) {
+      status.hidden = false;
+      status.textContent = err.message || 'Failed to load LLMs';
+      status.dataset.kind = 'warn';
+    }
+  }
+
+  const clis = (cliModelsCache && (cliModelsCache.providers || cliModelsCache.clis)) || [];
+  fillSelect(cliSelect, clis, pendingAgentConfig.provider, cliModelsCache && cliModelsCache.labels);
+  refreshModelOptionsForCli();
+  modal.hidden = false;
+  cliSelect.focus();
+}
+
+function hideAgentConfigModal() {
+  const modal = document.getElementById('configModal');
+  if (modal) modal.hidden = true;
+  pendingAgentConfig = null;
+  const status = document.getElementById('modalStatus');
+  if (status) {
+    status.hidden = true;
+    status.textContent = '';
+  }
+}
+
+async function saveAgentConfigModal() {
+  if (!pendingAgentConfig) return;
+  const cliSelect = document.getElementById('modalCliSelect');
+  const modelSelect = document.getElementById('modalModelSelect');
+  const status = document.getElementById('modalStatus');
+  const saveBtn = document.getElementById('modalSave');
+  const provider = cliSelect ? cliSelect.value.trim() : '';
+  const model = modelSelect ? modelSelect.value.trim() : '';
+
+  if (!provider) {
+    if (status) {
+      status.hidden = false;
+      status.textContent = 'Select an LLM';
+      status.dataset.kind = 'warn';
+    }
+    return;
+  }
+
+  if (saveBtn) saveBtn.disabled = true;
+  if (status) {
+    status.hidden = false;
+    status.textContent = 'Saving…';
+    status.dataset.kind = 'pending';
+  }
+  try {
+    await api(`/api/agent/${encodeURIComponent(pendingAgentConfig.slug)}/config`, {
+      method: 'PUT',
+      body: JSON.stringify({ provider, cliName: provider, model }),
+    });
+    hideAgentConfigModal();
+    // Force re-render even if only model/provider changed.
+    lastAgentsJson = '';
+    await refreshStatus();
+  } catch (err) {
+    if (status) {
+      status.hidden = false;
+      status.textContent = err.message || 'Failed to save';
+      status.dataset.kind = 'warn';
+    }
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
+function bindAgentConfigModal() {
+  const modal = document.getElementById('configModal');
+  if (!modal || modal.dataset.bound === '1') return;
+  modal.dataset.bound = '1';
+  const close = () => hideAgentConfigModal();
+  const modalClose = document.getElementById('modalClose');
+  const modalCancel = document.getElementById('modalCancel');
+  const modalSave = document.getElementById('modalSave');
+  const cliSelect = document.getElementById('modalCliSelect');
+  if (modalClose) modalClose.addEventListener('click', close);
+  if (modalCancel) modalCancel.addEventListener('click', close);
+  if (modalSave) modalSave.addEventListener('click', () => { saveAgentConfigModal(); });
+  if (cliSelect) {
+    cliSelect.addEventListener('change', () => {
+      if (pendingAgentConfig) {
+        // When CLI changes, pick a model from the new CLI's list.
+        pendingAgentConfig.model = '';
+      }
+      refreshModelOptionsForCli();
+    });
+  }
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) close();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modal && !modal.hidden) close();
+  });
+}
+
 function makeDetailRow(label, field, isJournal) {
   const dr = document.createElement('div');
   dr.className = isJournal ? 'detail-row detail-row--journal' : 'detail-row';
@@ -145,39 +326,80 @@ function makeDetailRow(label, field, isJournal) {
   return dr;
 }
 
+function renderAgentProjects(detail, projects) {
+  detail.innerHTML = '';
+  const list = document.createElement('ul');
+  list.className = 'agent-projects';
+  const items = Array.isArray(projects) ? projects : [];
+  if (items.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'agent-project agent-project--empty';
+    empty.textContent = 'No projects';
+    list.appendChild(empty);
+  } else {
+    for (const project of items) {
+      const li = document.createElement('li');
+      li.className = 'agent-project';
+      li.textContent = project.name || project.path || '—';
+      if (project.path) li.title = project.path;
+      list.appendChild(li);
+    }
+  }
+  detail.appendChild(list);
+}
+
 function renderAgents(agents) {
   const root = document.getElementById('agents');
   root.innerHTML = '';
   // Sort agents alphabetically by agentName, keeping PTL first
   const sorted = [...agents].sort((a, b) => {
-    const aIsPTL = a.agentName === 'Agent PTL';
-    const bIsPTL = b.agentName === 'Agent PTL';
+    const aIsPTL = a.agentName === 'Agent PTL' || a.slug === 'hub';
+    const bIsPTL = b.agentName === 'Agent PTL' || b.slug === 'hub';
     if (aIsPTL && !bIsPTL) return -1;
     if (!aIsPTL && bIsPTL) return 1;
-    return a.agentName.localeCompare(b.agentName);
+    return (a.agentName || a.slug || '').localeCompare(b.agentName || b.slug || '');
   });
   sorted.forEach((agent) => {
+    const isExpanded = expandedAgentSlugs.has(agent.slug);
     const row = document.createElement('div');
     row.className = 'agent-row';
     row.setAttribute('role', 'button');
-    row.setAttribute('aria-expanded', 'false');
+    row.setAttribute('aria-expanded', String(isExpanded));
     row.tabIndex = 0;
 
     const light = document.createElement('span');
     light.className = `status-light ${agent.hasMail ? 'on' : ''}`;
+    light.title = agent.hasMail ? 'Inbox has mail' : 'Inbox empty';
 
     const labels = document.createElement('div');
     labels.className = 'agent-labels';
+
     const name = document.createElement('span');
     name.className = 'agent-name';
     name.textContent = agent.active ? `${agent.agentName} running` : agent.agentName;
     labels.appendChild(name);
+
     if (agent.name && agent.name !== agent.agentName) {
       const product = document.createElement('span');
       product.className = 'agent-product';
       product.textContent = agent.name;
       labels.appendChild(product);
     }
+
+    // LLM provider >> model (click opens config; does not toggle expand)
+    const cliLine = document.createElement('button');
+    cliLine.type = 'button';
+    cliLine.className = 'agent-cli-line';
+    const providerName = agent.provider || agent.cliName || '—';
+    const modelName = agent.model || '—';
+    cliLine.textContent = `${providerName} >> ${modelName}`;
+    cliLine.title = 'Change LLM and model';
+    cliLine.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showAgentConfigModal(agent);
+    });
+    labels.appendChild(cliLine);
 
     const chevron = document.createElement('span');
     chevron.className = 'expand-chevron';
@@ -190,34 +412,50 @@ function renderAgents(agents) {
 
     const detail = document.createElement('div');
     detail.className = 'agent-detail';
+    if (isExpanded) detail.classList.add('expanded');
     detail.dataset.status = agent.hasMail ? 'on' : '';
     detail.appendChild(makeDetailRow('INBOX', 'inbox', false));
     detail.appendChild(makeDetailRow('DISPATCHED', 'lastDispatched', false));
     detail.appendChild(makeDetailRow('JOURNAL', 'journal', true));
+    if (typeof renderAgentProjects === 'function') {
+      renderAgentProjects(detail, agent.projects);
+    }
 
     let loaded = false;
     const toggle = () => {
       const expanded = row.getAttribute('aria-expanded') === 'true';
-      row.setAttribute('aria-expanded', String(!expanded));
-      detail.classList.toggle('expanded', !expanded);
-      if (!expanded && !loaded) {
+      const next = !expanded;
+      row.setAttribute('aria-expanded', String(next));
+      detail.classList.toggle('expanded', next);
+      if (next) expandedAgentSlugs.add(agent.slug);
+      else expandedAgentSlugs.delete(agent.slug);
+      if (next && !loaded) {
         loaded = true;
-        detail.querySelector('[data-field="inbox"]').textContent = 'Loading…';
+        const inboxEl = detail.querySelector('[data-field="inbox"]');
+        if (inboxEl) inboxEl.textContent = 'Loading…';
         api(`/api/agent-detail/${encodeURIComponent(agent.slug)}`).then((data) => {
-          detail.querySelector('[data-field="inbox"]').textContent =
-            data.inbox > 0 ? String(data.inbox) : '—';
-          detail.querySelector('[data-field="lastDispatched"]').textContent =
-            data.lastDispatched ? relativeTime(data.lastDispatched) : '—';
-          detail.querySelector('[data-field="journal"]').textContent =
-            data.journal || '—';
+          const inbox = detail.querySelector('[data-field="inbox"]');
+          const disp = detail.querySelector('[data-field="lastDispatched"]');
+          const journal = detail.querySelector('[data-field="journal"]');
+          if (inbox) inbox.textContent = data.inbox > 0 ? String(data.inbox) : '—';
+          if (disp) {
+            disp.textContent = data.lastDispatched
+              ? relativeTime(data.lastDispatched)
+              : '—';
+          }
+          if (journal) journal.textContent = data.journal || '—';
         }).catch(() => {
-          detail.querySelector('[data-field="inbox"]').textContent = '—';
+          const inbox = detail.querySelector('[data-field="inbox"]');
+          if (inbox) inbox.textContent = '—';
         });
       }
     };
     row.addEventListener('click', toggle);
     row.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggle();
+      }
     });
 
     root.appendChild(row);
@@ -573,11 +811,14 @@ async function boot() {
   let sessionActive = false;
   try {
     setAuthStatus('Checking session...', 'pending');
+    bindAgentConfigModal();
     await refreshStatus();
     sessionActive = true;
     const named = await ensureDisplayName();
     setAuthenticated(true, displayName ? `Signed in as ${displayName}` : 'Signed in');
     if (!named) return;
+    // Prefetch CLI/model catalog for the agent config dialog (non-blocking).
+    loadCliModels().catch(() => {});
     // Primary: open WS first. Wait for ready (or short timeout) before subscribing.
     // This prevents the race that opens SSE fallbacks while WS is still connecting.
     openWebSocket();
