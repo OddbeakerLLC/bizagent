@@ -80,11 +80,13 @@ grep -q 'ANTHROPIC_API_KEY' "$ROOT/install.sh" \
   || fail "install.sh does not map claude → ANTHROPIC_API_KEY"
 grep -q 'BIZAGENT_API_KEY' "$ROOT/install.sh" \
   || fail "install.sh missing non-interactive BIZAGENT_API_KEY support"
-grep -q 'api_key_var_for_cli' "$ROOT/install/install.sh" \
+grep -qE 'api_key_var_for_provider|api_key_var_for_cli' "$ROOT/install/install.sh" \
   || fail "install/install.sh missing API key → .bizagent/env step"
+grep -q 'check-hub-ready' "$ROOT/install/install.sh" \
+  || fail "install/install.sh missing first-run readiness check"
 grep -q '\.bizagent/env' "$ROOT/install/install.sh" \
   || fail "install/install.sh does not write .bizagent/env"
-grep -q 'prompts for that CLI' "$ROOT/README.md" \
+grep -qE 'bizagent-agent|LLM provider|check-hub-ready' "$ROOT/README.md" \
   || fail "README does not document installer API key prompt"
 
 echo "  ok: installer source override"

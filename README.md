@@ -2,7 +2,11 @@
 
 **A local hub-and-spoke system for running AI agents across your digital products.**
 
-Clone this repo, run the installer, and your CLI coding agent builds a complete hub — one agent per product, plain-file messaging, a dark-themed web UI, and a local control plane that dispatches work in real time. No architecture decisions required.
+Clone this repo, run the installer, and open the web UI. BizAgent runs a built-in
+OpenAI-compatible agent runtime (**bizagent-agent**) against the LLM provider you
+choose (Grok, ChatGPT, Claude, Gemini, Venice, Ollama, …). One product agent per
+product, plain-file messaging, and a local control plane that dispatches work in
+real time.
 
 ---
 
@@ -44,13 +48,12 @@ You ask the hub for the big picture; it digests every journal and reports back.
 ## ⚠ Security — read before you install
 
 > [!WARNING]
-> **BizAgent runs your AI agent in "YOLO mode" — no permission prompts.**
+> **BizAgent runs agents in auto-approve mode — no permission prompts.**
 >
-> Agents execute with the CLI's autonomous flag enabled by default:
-> `--dangerously-skip-permissions` for Claude Code and Antigravity,
-> `--full-auto` for Codex. This means the agent can read, write, delete,
-> and execute **anything the OS user account has access to** — including your
-> home directory, SSH keys, `.env` files, and more.
+> The built-in runtime (`bizagent-agent`) uses `-y` so tools (file write, shell,
+> delete) run without confirmation. The agent can read, write, delete, and
+> execute **anything the OS user account has access to** — including your home
+> directory, SSH keys, `.env` files, and more.
 >
 > **Strongly recommended: create a dedicated OS user for BizAgent** — see
 > **Step 1 (optional)** in the Quick Start below. Running as a dedicated user
@@ -82,9 +85,10 @@ is required.
 
 > **Headless server (VPS, SSH-only)?** Prefer non-interactive key handoff:
 > `BIZAGENT_API_KEY=... curl -fsSL ... | bash` (writes `.bizagent/env` for the
-> selected CLI). Or export the provider key (`ANTHROPIC_API_KEY` / `XAI_API_KEY` /
-> `OPENAI_API_KEY`) before install and confirm when prompted. CLI browser login
-> alone is not enough for the hub daemon.
+> default LLM provider, Grok / `XAI_API_KEY` unless `BIZAGENT_PROVIDER` is set).
+> Or export the provider key (`XAI_API_KEY` / `OPENAI_API_KEY` /
+> `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `VENICE_API_KEY`) before install.
+> Browser-only login is not enough for hub turns.
 
 **Step 2.** Run the installer (macOS, Linux, or WSL on Windows):
 
@@ -92,14 +96,17 @@ is required.
 curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash
 ```
 
-This installs `git`, `python3`, Node.js, and `cron` if missing; asks which CLI
-coding agent to use; **prompts for that CLI’s API key** and writes it to
-`.bizagent/env` (mode 600, never committed); clones bizagent; starts the control
-plane; and prints your URL. The whole process takes about two minutes.
+This installs `git`, `python3`, Node.js, and `cron` if missing; installs the
+**bizagent-agent** runtime; sets a default LLM provider (override with
+`BIZAGENT_PROVIDER=chatgpt|claude|gemini|…`); **prompts for that provider’s API
+key** into `.bizagent/env` (mode 600, never committed); runs
+`scripts/check-hub-ready.sh`; starts the control plane; queues first-run setup
+mail when ready; and prints your URL.
 
 **Step 3.** Open the URL shown in your terminal (or `http://localhost:8787`
-if it doesn't appear). PTL has already read AGENT.md and begun the setup
-process — respond to it in the chat.
+if it doesn't appear). Create a login, then chat with PTL to finish onboarding
+(products, projects, prefs). Verify launch readiness anytime with
+`bash scripts/check-hub-ready.sh`.
 
 ### Install from a staging source
 
@@ -142,32 +149,39 @@ your `registry.json`).
 
 - **Login-protected** — on first visit the browser shows a setup form to create credentials; afterwards, standard login
 - **Dark-themed chat** — named conversations; create new ones with a button or pick from the dropdown
-- **Agent rail** — left sidebar showing each product agent with a status dot: green when active, gray when idle
-- **Agent detail panel** — click any agent row to expand an inline panel showing inbox message count, last-dispatched relative time, and a snippet from the most recent journal entry
+- **Agent rail** — left sidebar: each agent with a status light, **`provider >> model`**
+  (click to change LLM), expand for inbox / last dispatch / journal
+- **Agent detail panel** — expand a row for inbox count, last-dispatched time, journal snippet
 - **Dynamic page title** — browser tab reads `BizAgent — {org name}` from `registry.json`
-- **Inbox polling** — checks every 2 seconds; skips re-renders when nothing changed
+- **Push updates** — WebSocket feeds preferred; optional poll via `?poll=1`
 - **Hub session memory** — compact rolling markdown; older turns are summarized, not accumulated
 
 ---
 
-## Bring your own engine — including local models
+## Bring your own LLM — including local models
 
-bizagent is **engine-agnostic**: the "CLI agent" it runs is just a command, so any
-CLI coding agent works (Claude Code, Antigravity, Codex, Grok, OpenCode, and others).
-That command is what both the real-time control plane and the nightly cron invoke —
-whatever you choose runs the whole hub.
+BizAgent uses one runtime (**bizagent-agent**) and an OpenAI-compatible HTTP API
+per provider. Configure providers in `cli.json` (`baseURL`, `keyEnv`, `models`);
+pick **provider + model** per hub/product in the UI or `registry.json`
+(`settings.hub_agent.provider` / `model`).
 
-You can back that agent with a **local, open-weight model via [Ollama](https://ollama.com)**
-and run the entire system on your own hardware — private, offline, no per-token cost:
+| Provider key | Label | Key env (`.bizagent/env`) |
+|--------------|--------|---------------------------|
+| `grok` | Grok (xAI) | `XAI_API_KEY` |
+| `chatgpt` | ChatGPT | `OPENAI_API_KEY` |
+| `claude` | Claude | `ANTHROPIC_API_KEY` |
+| `gemini` | Gemini | `GEMINI_API_KEY` |
+| `venice` | Venice | `VENICE_API_KEY` |
+| `ollama` | Ollama (local) | optional |
 
 ```sh
-ollama launch claude --model qwen3-coder-next
+# Local models via Ollama's OpenAI-compatible endpoint
+# cli.json already has an ollama provider; set hub_agent.provider to "ollama"
+ollama serve   # default http://127.0.0.1:11434/v1
 ```
 
-A coding-tuned model with strong tool-calling and a large context window —
-e.g. `qwen3-coder-next` (256K context, tool-calling out of the box) — suits
-the hub's agent loop well. Point the setup's "CLI agent command" at your
-local-model-backed agent and the nightly pass runs fully local too.
+Nightly/weekly cron call `scripts/run-agent.sh`, which launches the same runtime
+with keys from `.bizagent/env`.
 
 ---
 
@@ -199,7 +213,10 @@ For console-initiated hub turns the control plane creates a reserved reply body 
 
 ### Secrets and environment
 
-Keys and secrets live in `.bizagent/env` (never committed). The control-plane systemd unit and CLI wrappers source it so child processes inherit `XAI_API_KEY`, `ANTHROPIC_API_KEY`, etc. See `.bizagent/env.example`.
+Keys and secrets live in `.bizagent/env` (never committed). The control-plane
+systemd unit and `run-agent.sh` / dispatch path source it so children inherit
+`XAI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, etc.
+See `.bizagent/env.example`. Pre-flight: `bash scripts/check-hub-ready.sh`.
 
 ### Operator commands
 
