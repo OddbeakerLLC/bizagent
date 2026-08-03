@@ -17,85 +17,95 @@ SERVER="$ROOT/control-plane/server.js"
 [ -f "$ROOT/templates/dispatch.md.template" ] || fail "dispatch prompt template missing"
 [ -f "$ROOT/install/bizagent-control-plane.service" ] || fail "control-plane systemd service missing"
 
-# cli.json is required: missing active CLI name must fail (no silent invent/leak).
-# Product cliName must NOT inherit hub .cli extraArgs.
+# cli.json provider catalog: empty provider fails; always launches bizagent-agent.
 if ! node - "$ROOT" <<'NODE'
 const path = require('path');
 const {
   getCliSettings,
-  compileAgentCommand,
   requireCliDef,
 } = require(path.join(process.argv[2], 'control-plane/lib/cli-config'));
 
 const catalog = {
-  grok: { executable: 'grok', promptFlag: '--prompt-file', flags: { extra: '--always-approve' } },
-  claude: { executable: 'claude', promptFlag: '-p', flags: { extra: '--dangerously-skip-permissions' } },
+  _runtime: { executable: 'scripts/bizagent-agent', promptFlag: '-f', flags: { extra: '-y' } },
+  grok: { baseURL: 'https://api.x.ai/v1', keyEnv: 'XAI_API_KEY', models: ['grok-4.5'] },
+  chatgpt: { baseURL: 'https://api.openai.com/v1', keyEnv: 'OPENAI_API_KEY', models: ['gpt-4o'] },
+  claude: { baseURL: 'https://api.anthropic.com/v1/', keyEnv: 'ANTHROPIC_API_KEY', models: ['claude-sonnet-4-6'] },
+  gemini: { baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/', keyEnv: 'GEMINI_API_KEY', models: ['gemini-2.5-flash'] },
 };
-const hubConfig = { cli: 'grok', hubCliName: 'grok' };
+const hubConfig = { cli: 'grok', hubCliName: 'grok', hubProvider: 'grok' };
 
-// Missing cli.json / empty → throw
+// Empty catalog providers → throw
 let threw = false;
 try {
-  getCliSettings(process.argv[2], {}, hubConfig, 'claude', '');
+  getCliSettings(process.argv[2], { _runtime: catalog._runtime }, hubConfig, 'grok', '');
 } catch (e) {
-  threw = /cli\.json/i.test(e.message);
+  threw = /no LLM providers|no provider/i.test(e.message);
 }
 if (!threw) {
-  console.error('expected throw when cli.json empty');
+  console.error('expected throw when providers missing');
   process.exit(1);
 }
 
-// Empty name → throw (no silent default)
+// Empty name → throw
 threw = false;
 try {
-  getCliSettings(process.argv[2], catalog, { cli: '', hubCliName: '' }, '', '');
+  getCliSettings(process.argv[2], catalog, { cli: '', hubCliName: '', hubProvider: '' }, '', '');
 } catch (e) {
-  threw = /CLI name is empty/i.test(e.message);
+  threw = /Provider is empty/i.test(e.message);
 }
 if (!threw) {
-  console.error('expected throw when hub and product CLI names empty');
+  console.error('expected throw when hub and product providers empty');
   process.exit(2);
 }
 
-// Unknown name → throw
+// Unknown provider → throw
 threw = false;
 try {
-  getCliSettings(process.argv[2], catalog, hubConfig, 'not-a-cli', '');
+  getCliSettings(process.argv[2], catalog, hubConfig, 'not-a-provider', '');
 } catch (e) {
-  threw = /no entry for CLI/i.test(e.message);
+  threw = /no provider/i.test(e.message);
 }
 if (!threw) {
-  console.error('expected throw for unknown CLI name');
+  console.error('expected throw for unknown provider');
   process.exit(3);
 }
 
 const fixed = getCliSettings(process.argv[2], catalog, hubConfig, '', '');
-if (fixed.promptFlag !== '--prompt-file') {
-  console.error('expected grok promptFlag from cli.json', fixed);
+if (fixed.cli !== 'scripts/bizagent-agent') {
+  console.error('expected bizagent-agent executable', fixed);
   process.exit(4);
 }
-if (!/--always-approve/.test(fixed.extraArgs || '')) {
-  console.error('expected grok extraArgs from cli.json', fixed);
+if (fixed.promptFlag !== '-f') {
+  console.error('expected -f promptFlag', fixed);
   process.exit(5);
 }
-
-const claude = getCliSettings(process.argv[2], catalog, hubConfig, 'claude', '');
-if (claude.cli !== 'claude') {
-  console.error('claude cliName resolved wrong executable', claude);
+if (!/--provider grok/.test(fixed.extraArgs || '')) {
+  console.error('expected --provider grok', fixed);
   process.exit(6);
 }
-if (/always-approve/.test(claude.extraArgs || '')) {
-  console.error('hub flags leaked onto claude product agent', claude);
+
+const chatgpt = getCliSettings(process.argv[2], catalog, hubConfig, 'chatgpt', 'gpt-4o');
+if (chatgpt.cli !== 'scripts/bizagent-agent') {
+  console.error('chatgpt must still use bizagent-agent', chatgpt);
   process.exit(7);
 }
-if (!/dangerously-skip-permissions/.test(claude.extraArgs || '')) {
-  console.error('claude missing headless permission flag from cli.json', claude);
+if (!/--provider chatgpt/.test(chatgpt.extraArgs || '')) {
+  console.error('expected --provider chatgpt', chatgpt);
   process.exit(8);
+}
+if (!/--model gpt-4o/.test(chatgpt.extraArgs || '')) {
+  console.error('expected model', chatgpt);
+  process.exit(9);
+}
+const gemini = getCliSettings(process.argv[2], catalog, hubConfig, 'gemini', 'gemini-2.5-flash');
+if (!/--provider gemini/.test(gemini.extraArgs || '')) {
+  console.error('expected --provider gemini', gemini);
+  process.exit(11);
 }
 requireCliDef(catalog, 'grok');
 NODE
 then
-  fail "cli.json required-entry / isolation checks failed"
+  fail "cli.json provider catalog checks failed"
 fi
 # Enterprise Phase 0 plugin seams (optional multi-user layer; soft-fail when absent)
 [ -f "$ROOT/control-plane/lib/enterprise-plugin.js" ] \
@@ -459,15 +469,6 @@ grep -q "CODESPAN" "$ROOT/control-plane/public/app.js" \
   || fail "UI codespan placeholder does not use a collision-safe marker"
 grep -q "agent-detail" "$SERVER" \
   || fail "server missing /api/agent-detail endpoint"
-grep -q "/api/cli-models" "$SERVER" \
-  || fail "server missing /api/cli-models endpoint"
-grep -q "modelsFromCliEntry\|buildCliModelsPayload" "$SERVER" \
-  || fail "server missing buildCliModelsPayload from cli.json models"
-if grep -q "DEFAULT_CLI_MODELS\|claude-sonnet-4-20250514\|gpt-4o" "$SERVER"; then
-  fail "server must not hardcode stale model names (use cli.json models)"
-fi
-grep -q '"models"' "$ROOT/cli.json" \
-  || fail "cli.json should define per-CLI models arrays"
 grep -q "titleSet" "$ROOT/control-plane/public/app.js" \
   || fail "UI does not track whether page title has been set"
 grep -q "relativeTime" "$ROOT/control-plane/public/app.js" \
@@ -913,6 +914,148 @@ if (viewedAfter.messages.some((m) => m.content === 'origin reply')) {
 }
 // Clear fixture so later dry-run launch tests on the same hub see no pending turns.
 fs.unlinkSync(pendingFile);
+
+// Stale active conversation (older than 30s presence) must still stamp —
+// agents often finish after the short UI presence window.
+const stale = createConversation(hub, 'Stale Active');
+const activeFile = path.join(appDir(hub), 'active-conversation.json');
+fs.writeFileSync(activeFile, JSON.stringify({
+  id: stale.id,
+  updated_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+}, null, 2));
+const {
+  STAMP_ACTIVE_MAX_AGE_MS,
+  getActiveConversationId: getActiveNow,
+  getStampConversationId: getStampNow,
+  recordPendingAgentWork,
+  getPendingAgentWorkConversationId,
+} = require(`${root}/control-plane/lib/conversations`);
+if (getActiveNow(hub) !== null) {
+  console.error('presence window should treat 10min-old active as stale');
+  process.exit(27);
+}
+if (getStampNow(hub) !== stale.id) {
+  console.error('stamp window should still use stale active', getStampNow(hub), stale.id, STAMP_ACTIVE_MAX_AGE_MS);
+  process.exit(28);
+}
+fs.writeFileSync(path.join(hub, 'outbox', '2026-07-24-hub-user-stale.md'), `---
+from: hub
+to: user
+date: 2026-07-24
+subject: stale active stamp
+---
+
+stale-active reply
+`);
+routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected stale-active deliver', routed);
+  process.exit(29);
+}
+const stalePath = path.join(userInbox(hub), '2026-07-24-hub-user-stale.md');
+const staleText = fs.readFileSync(stalePath, 'utf8');
+if (frontmatterValue(staleText, 'conversation_id') !== stale.id) {
+  console.error('stale active did not stamp hub→user', staleText);
+  process.exit(30);
+}
+relayed = readUserInboxMessages(hub);
+if ((relayed.relayed ?? relayed) !== 1) {
+  console.error('expected stale-active relay', relayed);
+  process.exit(31);
+}
+
+// hub→agent records pending work; agent→hub stamps even with no active/originating
+fs.writeFileSync(activeFile, JSON.stringify({
+  id: stale.id,
+  updated_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+}, null, 2));
+// Wipe active so only pending-agent-work can provide the id for agent→hub
+fs.unlinkSync(activeFile);
+const agentSlug = 'shell-tools';
+fs.mkdirSync(path.join(hub, 'agents', agentSlug, 'inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents', agentSlug, 'outbox'), { recursive: true });
+// Restore a known conversation and record pending work as hub→agent route would
+const workConv = createConversation(hub, 'Agent Work');
+if (!recordPendingAgentWork(hub, agentSlug, workConv.id)) {
+  console.error('recordPendingAgentWork failed');
+  process.exit(32);
+}
+if (getPendingAgentWorkConversationId(hub, agentSlug) !== workConv.id) {
+  console.error('pending agent work lookup failed');
+  process.exit(33);
+}
+if (getStampNow(hub) !== null && getStampNow(hub) !== workConv.id) {
+  // no active/originating — stamp without fromSlug should be null
+}
+if (getStampNow(hub, agentSlug) !== workConv.id) {
+  console.error('stamp with fromSlug should use pending work', getStampNow(hub, agentSlug));
+  process.exit(34);
+}
+// Simulate agent outbox → hub
+fs.writeFileSync(path.join(hub, 'agents', agentSlug, 'outbox', '2026-07-24-shell-tools-done.md'), `---
+from: shell-tools
+to: hub
+date: 2026-07-24
+subject: work done
+---
+
+agent finished the task
+`);
+routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected agent→hub deliver', routed);
+  process.exit(35);
+}
+const agentHubPath = path.join(hub, 'inbox', '2026-07-24-shell-tools-done.md');
+if (!fs.existsSync(agentHubPath)) {
+  console.error('missing stamped agent→hub file');
+  process.exit(36);
+}
+const agentHubText = fs.readFileSync(agentHubPath, 'utf8');
+if (frontmatterValue(agentHubText, 'conversation_id') !== workConv.id) {
+  console.error('agent→hub missing pending-work conversation_id', agentHubText);
+  process.exit(37);
+}
+
+// hub→agent route records pending work from stamp id
+const dispatchConv = createConversation(hub, 'Dispatch Chat');
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 2, lock_lease_secs: 60 } },
+  products: [{ slug: 'shell-tools', name: 'Shell Tools', agent_name: 'Agent ST', projects: [] }],
+}));
+fs.writeFileSync(activeFile, JSON.stringify({
+  id: dispatchConv.id,
+  updated_at: new Date().toISOString(),
+}, null, 2));
+fs.writeFileSync(path.join(hub, 'outbox', '2026-07-24-hub-shell-tools-task.md'), `---
+from: hub
+to: shell-tools
+date: 2026-07-24
+subject: do task
+---
+
+please do the thing
+`);
+routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected hub→agent deliver', routed);
+  process.exit(38);
+}
+if (getPendingAgentWorkConversationId(hub, agentSlug) !== dispatchConv.id) {
+  console.error('hub→agent did not record pending work', getPendingAgentWorkConversationId(hub, agentSlug));
+  process.exit(39);
+}
+
+// Clean fixtures so the next TMP2 test (launch ack) starts from a quiet hub.
+for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
+  if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
+}
+try { fs.unlinkSync(activeFile); } catch (_e) { /* ignore */ }
+try { fs.unlinkSync(path.join(appDir(hub), 'pending-agent-work.json')); } catch (_e) { /* ignore */ }
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 2, lock_lease_secs: 60 } },
+  products: [],
+}));
 NODE
   then
     fail "conversation_id stamp-on-route failed"
@@ -1709,113 +1852,97 @@ NODE
     fail "first-run auth flow (hasAuth/initAuth/verifyLogin) failed"
   fi
 
-  # compileAgentCommand: -p promptPath must be LAST arguments, with extraArgs before it
+  # compileAgentCommand matches dispatcher: cli promptFlag promptFile extraArgs
   if ! node - "$ROOT" <<'NODE'
 const root = process.argv[2];
 const { compileAgentCommand } = require(`${root}/control-plane/lib/cli-config`);
 
-// Test 1: agy with extra flags; -p must be last
-const cmd1 = compileAgentCommand({ cli: 'agy', promptFlag: '-p', extraArgs: '--dangerously-skip-permissions' }, '/path/to/prompt.md');
-const argv1 = cmd1.split(' ');
-if (argv1[argv1.length - 2] !== '-p' || argv1[argv1.length - 1] !== '/path/to/prompt.md') {
-  console.error('Test 1 failed: -p not last:', argv1);
+const cmd1 = compileAgentCommand(
+  { cli: 'scripts/bizagent-agent', promptFlag: '-f', extraArgs: '-y --provider grok --model grok-4.5' },
+  '/path/to/prompt.md',
+);
+const expected1 = 'scripts/bizagent-agent -f /path/to/prompt.md -y --provider grok --model grok-4.5';
+if (cmd1 !== expected1) {
+  console.error('Test 1 failed. Got:', cmd1, 'Expected:', expected1);
   process.exit(1);
 }
 
-// Test 2: agy with no extra flags; -p still last
-const cmd2 = compileAgentCommand({ cli: 'agy', promptFlag: '-p', extraArgs: '' }, '/path/to/prompt.md');
-const argv2 = cmd2.split(' ');
-if (argv2[argv2.length - 2] !== '-p' || argv2[argv2.length - 1] !== '/path/to/prompt.md') {
-  console.error('Test 2 failed: -p not last:', argv2);
+const cmd2 = compileAgentCommand(
+  { cli: 'scripts/bizagent-agent', promptFlag: '-f', extraArgs: '' },
+  '/path/to/prompt.md',
+);
+if (cmd2 !== 'scripts/bizagent-agent -f /path/to/prompt.md') {
+  console.error('Test 2 failed:', cmd2);
   process.exit(2);
-}
-
-// Test 3: claude with extra flags
-const cmd3 = compileAgentCommand({ cli: 'claude', promptFlag: '-p', extraArgs: '--model claude-opus-4-8' }, '/path/to/prompt.md');
-const argv3 = cmd3.split(' ');
-if (argv3[argv3.length - 2] !== '-p' || argv3[argv3.length - 1] !== '/path/to/prompt.md') {
-  console.error('Test 3 failed: -p not last:', argv3);
-  process.exit(3);
-}
-
-// Test 4: Verify argument order for agy with extra flags
-const cmd4 = compileAgentCommand({ cli: 'agy', promptFlag: '-p', extraArgs: '--dangerously-skip-permissions' }, '/path/to/prompt.md');
-const expected4 = 'agy --dangerously-skip-permissions -p /path/to/prompt.md';
-if (cmd4 !== expected4) {
-  console.error('Test 4 failed: wrong order. Got:', cmd4, 'Expected:', expected4);
-  process.exit(4);
 }
 NODE
   then
-    fail "compileAgentCommand argument ordering (-p as last pair) failed"
+    fail "compileAgentCommand argument ordering failed"
   fi
 
-  # cli.json must be keyed by CLI name only (claude/codex/agy), not agent slugs.
-  # registry.json must reference CLI by cliName, not embed cli object.
+  # cli.json is a provider catalog (+ _runtime); registry uses provider (cliName alias).
   if ! node - "$ROOT" <<'NODE'
 const root = process.argv[2];
 const fs = require('fs');
 const path = require('path');
-const cliCatalogPath = path.join(root, 'cli.json');
+const cliExamplePath = path.join(root, 'cli.json.example');
 const registryExamplePath = path.join(root, 'registry.example.json');
 
-// Load public catalog + registry example
-const cliCatalog = JSON.parse(fs.readFileSync(cliCatalogPath, 'utf8'));
+const cliExample = JSON.parse(fs.readFileSync(cliExamplePath, 'utf8'));
 const registryExample = JSON.parse(fs.readFileSync(registryExamplePath, 'utf8'));
 
-// cli.json keys must be CLI names, not slugs. Known slugs from registry: widgets, platform, tooling.
-const knownSlugs = (registryExample.products || []).map(p => p.slug);
-const cliKeys = Object.keys(cliCatalog).filter(k => !k.startsWith('_'));
-for (const slug of knownSlugs) {
-  if (cliKeys.includes(slug)) {
-    console.error('cli.json has agent slug key (should only be CLI names):', slug);
-    process.exit(1);
-  }
+if (!cliExample._runtime || !cliExample._runtime.executable) {
+  console.error('cli.json.example missing _runtime.executable');
+  process.exit(1);
 }
 
-// cli.json keys should be valid CLI names (catalog + known optional backends)
-const validCliNames = ['claude', 'codex', 'agy', 'grok', 'venice'];
-for (const key of cliKeys) {
-  if (!validCliNames.includes(key)) {
-    console.error('cli.json has unexpected CLI name:', key);
+const knownSlugs = (registryExample.products || []).map(p => p.slug);
+const cliKeys = Object.keys(cliExample).filter(k => !k.startsWith('_'));
+for (const slug of knownSlugs) {
+  if (cliKeys.includes(slug)) {
+    console.error('cli.json has agent slug key (should only be providers):', slug);
     process.exit(2);
   }
 }
-// Each CLI entry should define promptFlag (path-based), not only legacy prompt
-for (const key of cliKeys) {
-  const def = cliCatalog[key] || {};
-  if (!def.promptFlag && !def.prompt) {
-    console.error('cli.json entry missing promptFlag:', key);
-    process.exit(8);
-  }
-}
-// Grok must use --prompt-file (path), not -p (prompt text)
-if (cliCatalog.grok && cliCatalog.grok.promptFlag !== '--prompt-file') {
-  console.error('grok promptFlag must be --prompt-file, got:', cliCatalog.grok.promptFlag);
-  process.exit(9);
-}
 
-// Each product must have cliName field (string), not inline cli object
-for (const product of registryExample.products || []) {
-  if (typeof product.cliName !== 'string') {
-    console.error('product missing cliName field:', product.slug);
+const validProviders = ['grok', 'chatgpt', 'claude', 'gemini', 'venice', 'ollama'];
+for (const key of cliKeys) {
+  if (!validProviders.includes(key)) {
+    console.error('cli.json has unexpected provider:', key);
     process.exit(3);
   }
-  if (product.cli !== undefined) {
-    console.error('product has inline cli object (should use cliName):', product.slug);
+  const def = cliExample[key] || {};
+  if (!def.baseURL && !def.baseUrl) {
+    console.error('provider missing baseURL:', key);
     process.exit(4);
   }
-  if (!validCliNames.includes(product.cliName)) {
-    console.error('product cliName is not a valid CLI name:', product.cliName);
+  if (!Array.isArray(def.models)) {
+    console.error('provider missing models:', key);
     process.exit(5);
+  }
+}
+
+for (const product of registryExample.products || []) {
+  const provider = product.provider || product.cliName;
+  if (typeof provider !== 'string') {
+    console.error('product missing provider:', product.slug);
+    process.exit(6);
+  }
+  if (product.cli !== undefined) {
+    console.error('product has inline cli object:', product.slug);
+    process.exit(7);
+  }
+  if (!validProviders.includes(provider)) {
+    console.error('product provider not valid:', product.provider, product.slug);
+    process.exit(8);
   }
 }
 NODE
   then
-    fail "cli.json/registry.json schema validation (cliName references only, no slugs in cli.json) failed"
+    fail "cli.json/registry.json provider schema validation failed"
   fi
 
-  # hub_agent.cliName drives hub launches; legacy .cli is name-only migration fallback
+  # hub_agent.provider drives launches; always bizagent-agent; legacy .cli name-only fallback
   if ! node - "$ROOT" <<'NODE'
 const root = process.argv[2];
 const fs = require('fs');
@@ -1827,12 +1954,12 @@ const { getCliSettings } = require(`${root}/control-plane/lib/cli-config`);
 const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-hub-cli-'));
 fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
   settings: {
-    hub_agent: { cliName: 'grok', model: 'grok-4.5' },
+    hub_agent: { provider: 'grok', cliName: 'grok', model: 'grok-4.5' },
     models: { agent_default: 'grok-4.5' },
   },
   products: [],
 }));
-// Legacy .cli says claude — must NOT win when registry hub_agent.cliName is set
+// Legacy .cli says claude — must NOT win when registry provider is set
 fs.writeFileSync(path.join(hub, '.cli'), [
   'CLI_CMD=claude',
   'CLI_PROMPT_FLAG=-p',
@@ -1840,13 +1967,16 @@ fs.writeFileSync(path.join(hub, '.cli'), [
   '',
 ].join('\n'));
 fs.writeFileSync(path.join(hub, 'cli.json'), JSON.stringify({
-  claude: { executable: 'claude', promptFlag: '-p', flags: { extra: '--dangerously-skip-permissions' } },
-  grok: { executable: 'grok', promptFlag: '--prompt-file', flags: { extra: '--always-approve' } },
+  _runtime: { executable: 'scripts/bizagent-agent', promptFlag: '-f', flags: { extra: '-y' } },
+  grok: { baseURL: 'https://api.x.ai/v1', keyEnv: 'XAI_API_KEY', models: ['grok-4.5'] },
+  claude: { baseURL: 'https://api.anthropic.com/v1/', keyEnv: 'ANTHROPIC_API_KEY', models: ['claude-sonnet-4-6'] },
+  chatgpt: { baseURL: 'https://api.openai.com/v1', keyEnv: 'OPENAI_API_KEY', models: ['gpt-4o'] },
+  gemini: { baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/', keyEnv: 'GEMINI_API_KEY', models: ['gemini-2.5-flash'] },
 }));
 
 const config = loadRuntimeConfig(hub);
-if (config.hubCliName !== 'grok') {
-  console.error('hubCliName wrong:', config.hubCliName);
+if (config.hubCliName !== 'grok' && config.hubProvider !== 'grok') {
+  console.error('hub provider wrong:', config.hubCliName, config.hubProvider);
   process.exit(1);
 }
 if (config.hubModel !== 'grok-4.5') {
@@ -1854,24 +1984,24 @@ if (config.hubModel !== 'grok-4.5') {
   process.exit(2);
 }
 const settings = getCliSettings(hub, config._cliJson, config, config.hubCliName || '', config.hubModel || '');
-if (settings.cli !== 'grok') {
+if (settings.cli !== 'scripts/bizagent-agent') {
   console.error('hub executable wrong:', settings.cli);
   process.exit(3);
 }
-if (settings.promptFlag !== '--prompt-file') {
-  console.error('hub grok promptFlag wrong:', settings.promptFlag);
+if (settings.promptFlag !== '-f') {
+  console.error('hub promptFlag wrong:', settings.promptFlag);
   process.exit(10);
 }
 if (!settings.extraArgs.includes('--model grok-4.5')) {
   console.error('hub model not applied:', settings.extraArgs);
   process.exit(4);
 }
-if (!settings.extraArgs.includes('--always-approve')) {
-  console.error('hub grok extra flags missing:', settings.extraArgs);
+if (!settings.extraArgs.includes('--provider grok')) {
+  console.error('hub provider flag missing:', settings.extraArgs);
   process.exit(5);
 }
 
-// Empty hub_agent.cliName → migrate name from legacy .cli only
+// Empty hub_agent.provider → migrate name from legacy .cli only
 fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
   settings: { hub_agent: { model: '' }, models: {} },
   products: [],
@@ -1885,22 +2015,23 @@ if (!fallback._hubCliFromLegacyDotCli) {
   console.error('expected _hubCliFromLegacyDotCli marker');
   process.exit(7);
 }
+// Legacy cliName "claude" maps to claude provider
 const fallbackSettings = getCliSettings(
   hub, fallback._cliJson, fallback, fallback.hubCliName || '', fallback.hubModel || '',
 );
-if (fallbackSettings.cli !== 'claude') {
+if (fallbackSettings.cli !== 'scripts/bizagent-agent') {
   console.error('fallback executable wrong:', fallbackSettings.cli);
   process.exit(8);
 }
-if (!fallbackSettings.extraArgs.includes('dangerously-skip-permissions')) {
-  console.error('claude flags should come from cli.json:', fallbackSettings.extraArgs);
+if (!/--provider claude/.test(fallbackSettings.extraArgs || '')) {
+  console.error('legacy claude should map to claude provider:', fallbackSettings.extraArgs);
   process.exit(9);
 }
 
 fs.rmSync(hub, { recursive: true, force: true });
 NODE
   then
-    fail "hub_agent.cliName does not control hub CLI selection"
+    fail "hub_agent.provider does not control hub LLM selection"
   fi
 
   # Phase 0/1: slim hub prompt, turn injection, runtime cwd, pollSeconds, promptFlag key

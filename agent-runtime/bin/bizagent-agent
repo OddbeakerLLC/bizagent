@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve the real directory of the script (follow symlinks)
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Prefer local node_modules when present
+export NODE_PATH="${ROOT}/node_modules${NODE_PATH:+:$NODE_PATH}"
+
+exec node "$ROOT/src/index.js" "$@"

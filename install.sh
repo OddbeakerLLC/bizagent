@@ -127,8 +127,9 @@ KNOWN_CLIS=(
   "claude|Claude Code (Anthropic)|-p|curl|https://claude.ai/install.sh|--dangerously-skip-permissions"
   "agy|Antigravity CLI (Google)|-p|curl|https://antigravity.google/cli/install.sh|--dangerously-skip-permissions"
   "codex|Codex CLI (OpenAI)|exec|curl|https://chatgpt.com/codex/install.sh|--full-auto"
+  # Grok: -p/--single is prompt *text*; hub turns pass a file path → must use --prompt-file.
+  # --always-approve is required so the agent can write reserved-body / run write-message.
   "grok|Grok CLI (xAI)|--prompt-file|curl|https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh|--always-approve"
-  "venice|Venice Code (Venice.ai)|-f|curl|https://raw.githubusercontent.com/OddbeakerLLC/venice-code/main/install.sh|-y"
 )
 
 SELECTED_CLI=""
@@ -248,89 +249,50 @@ install_cli() {
   ok "$bin installed"
 }
 
-detect_and_select_cli() {
-  local all_bins=() all_names=() all_flags=() all_methods=() all_targets=() all_yolo=()
-  local default_idx=0
-
-  for entry in "${KNOWN_CLIS[@]}"; do
-    IFS='|' read -r bin name flag method target yolo <<< "$entry"
-    all_bins+=("$bin")
-    all_names+=("$name")
-    all_flags+=("$flag")
-    all_methods+=("$method")
-    all_targets+=("$target")
-    all_yolo+=("$yolo")
-  done
-
-  # Find default: first installed CLI, or 0 (claude) if none
-  local i
-  for i in "${!all_bins[@]}"; do
-    if have "${all_bins[$i]}"; then
-      default_idx=$i
-      break
-    fi
-  done
-
-  printf "\n${BOLD}Which AI CLI should bizagent use?${NC}\n\n"
-  for i in "${!all_bins[@]}"; do
-    local marker="  "
-    have "${all_bins[$i]}" && marker="${GREEN}✓${NC}"
-    local default_hint=""
-    [[ "$i" -eq "$default_idx" ]] && default_hint=" ${DIM}(default)${NC}"
-    printf "  %b %d) %s%b\n" "$marker" "$((i+1))" "${all_names[$i]}" "$default_hint"
-  done
-  printf "\n"
-  note "✓ = already installed"
-  printf "\n"
-
-  local choice
-  while true; do
-    read -r -p "Enter number [$((default_idx+1))]: " choice </dev/tty
-    choice="${choice:-$((default_idx+1))}"
-    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#all_bins[@]} )); then
-      break
-    fi
-    warn "Please enter a number between 1 and ${#all_bins[@]}."
-  done
-
-  local idx=$(( choice - 1 ))
-  SELECTED_CLI="${all_bins[$idx]}"
-  SELECTED_PROMPT_FLAG="${all_flags[$idx]}"
-  SELECTED_YOLO_FLAG="${all_yolo[$idx]}"
-
-  if ! have "$SELECTED_CLI"; then
-    local confirm
-    read -r -p "  ${all_names[$idx]} is not installed. Install it now? [Y/n]: " confirm </dev/tty
-    confirm="${confirm:-Y}"
-    if [[ "$confirm" =~ ^[Yy] ]]; then
-      install_cli "$SELECTED_CLI" "${all_methods[$idx]}" "${all_targets[$idx]}"
-    else
-      die "Cannot continue without an AI CLI. Re-run and choose an installed CLI or allow installation."
-    fi
-  fi
-
-  ok "Selected: ${all_names[$idx]} ($SELECTED_CLI)"
+# Default LLM provider for new hubs (bizagent-agent is always the runtime).
+# Override with BIZAGENT_PROVIDER=openai|venice|openrouter|grok
+select_default_provider() {
+  SELECTED_PROVIDER="${BIZAGENT_PROVIDER:-grok}"
+  case "$SELECTED_PROVIDER" in
+    grok|chatgpt|claude|gemini|venice|ollama) ;;
+    xai) SELECTED_PROVIDER="grok" ;;
+    openai|codex) SELECTED_PROVIDER="chatgpt" ;;
+    openrouter) SELECTED_PROVIDER="claude" ;;
+    agy) SELECTED_PROVIDER="gemini" ;;
+    *)
+      warn "Unknown BIZAGENT_PROVIDER=$SELECTED_PROVIDER — using grok"
+      SELECTED_PROVIDER="grok"
+      ;;
+  esac
+  # Legacy vars still set for older install paths that reference SELECTED_CLI
+  SELECTED_CLI="bizagent-agent"
+  SELECTED_PROMPT_FLAG="-f"
+  SELECTED_YOLO_FLAG="-y"
+  ok "LLM runtime: bizagent-agent · default provider: $SELECTED_PROVIDER"
 }
 
-# Map CLI binary → primary API key env var used by hub-daemon / cold spawn.
-# Empty means "login-based or unknown"; we still create .bizagent/env.example guidance.
+# Map provider → primary API key env var for .bizagent/env
 api_key_var_for_cli() {
   case "$1" in
+    grok|xai) echo "XAI_API_KEY" ;;
+    chatgpt|openai|codex) echo "OPENAI_API_KEY" ;;
     claude) echo "ANTHROPIC_API_KEY" ;;
-    grok)   echo "XAI_API_KEY" ;;
-    codex)  echo "OPENAI_API_KEY" ;;
-    *)      echo "" ;;
+    openrouter) echo "OPENROUTER_API_KEY" ;;
+    gemini|agy) echo "GEMINI_API_KEY" ;;
+
+    venice) echo "VENICE_API_KEY" ;;
+    ollama) echo "OLLAMA_API_KEY" ;;
+    *) echo "XAI_API_KEY" ;;
   esac
 }
 
 prompt_api_key() {
-  SELECTED_API_KEY_VAR="$(api_key_var_for_cli "$SELECTED_CLI")"
+  SELECTED_API_KEY_VAR="$(api_key_var_for_cli "${SELECTED_PROVIDER:-grok}")"
   SELECTED_API_KEY=""
 
   # Non-interactive / CI: BIZAGENT_API_KEY wins when set.
   if [[ -n "${BIZAGENT_API_KEY:-}" ]]; then
     if [[ -z "$SELECTED_API_KEY_VAR" ]]; then
-      warn "BIZAGENT_API_KEY is set but $SELECTED_CLI has no known key variable; writing XAI_API_KEY as fallback."
       SELECTED_API_KEY_VAR="XAI_API_KEY"
     fi
     SELECTED_API_KEY="$BIZAGENT_API_KEY"
@@ -339,8 +301,7 @@ prompt_api_key() {
   fi
 
   if [[ -z "$SELECTED_API_KEY_VAR" ]]; then
-    note "No standard API-key variable for $SELECTED_CLI — ensure that CLI is already logged in."
-    note "You can still put keys in $INSTALL_DIR/.bizagent/env later (see .bizagent/env.example)."
+    note "No standard API-key variable — put keys in $INSTALL_DIR/.bizagent/env later."
     return
   fi
 
@@ -359,7 +320,7 @@ prompt_api_key() {
     return
   fi
 
-  printf "\n${BOLD}API key for %s${NC}\n" "$SELECTED_CLI"
+  printf "\n${BOLD}API key for provider %s${NC}\n" "${SELECTED_PROVIDER:-grok}"
   note "Hub turns need $SELECTED_API_KEY_VAR in .bizagent/env (sourced by control-plane + hub-daemon)."
   note "Paste the key (input hidden). Leave blank to skip — chat will fail until you add it."
   local key
@@ -376,94 +337,108 @@ prompt_api_key() {
   fi
 }
 
-# Ensure cli.json (public engine catalog) exists and lists the selected hub CLI.
-# The clone ships cli.json; runtime refuses any cliName not listed there.
-# Flags never come from legacy .cli.
+# Seed cli.json (LLM provider catalog + fixed _runtime). Runtime is always bizagent-agent.
 write_cli_json() {
   local dest="$INSTALL_DIR/cli.json"
-  local key
-  key="$(basename "$SELECTED_CLI")"
-  key="${key%.exe}"
+  local src="$INSTALL_DIR/cli.json.example"
+  local provider="${SELECTED_PROVIDER:-grok}"
 
   if [[ ! -f "$dest" ]]; then
-    # Fallback if the clone is missing the shipped catalog (corrupt/partial install).
-    cat > "$dest" <<EOF
+    if [[ -f "$src" ]]; then
+      cp "$src" "$dest"
+      ok "cli.json seeded from example (provider catalog)"
+    else
+      cat > "$dest" <<'EOF'
 {
-  "claude": {
-    "executable": "claude",
-    "promptFlag": "-p",
-    "flags": { "extra": "--dangerously-skip-permissions" }
+  "_runtime": {
+    "executable": "scripts/bizagent-agent",
+    "promptFlag": "-f",
+    "flags": { "extra": "-y" }
   },
   "grok": {
-    "executable": "grok",
-    "promptFlag": "--prompt-file",
-    "flags": { "extra": "--always-approve" }
+    "label": "Grok (xAI)",
+    "baseURL": "https://api.x.ai/v1",
+    "keyEnv": "XAI_API_KEY",
+    "models": ["grok-4.5"]
   },
-  "codex": {
-    "executable": "codex",
-    "promptFlag": "--prompt",
-    "flags": { "extra": "--full-auto" }
+  "openai": {
+    "label": "OpenAI",
+    "baseURL": "https://api.openai.com/v1",
+    "keyEnv": "OPENAI_API_KEY",
+    "models": ["gpt-4o"]
   },
-  "agy": {
-    "executable": "agy",
-    "promptFlag": "-p",
-    "flags": { "extra": "--dangerously-skip-permissions" }
+  "venice": {
+    "label": "Venice",
+    "baseURL": "https://api.venice.ai/api/v1",
+    "keyEnv": "VENICE_API_KEY",
+    "models": ["llama-3.3-70b"]
   }
 }
 EOF
-    ok "cli.json written (built-in catalog fallback)"
-  else
-    ok "cli.json present (public catalog)"
+      ok "cli.json written (built-in provider catalog)"
+    fi
   fi
 
-  if ! python3 - "$dest" "$key" "$SELECTED_CLI" "$SELECTED_PROMPT_FLAG" "$SELECTED_YOLO_FLAG" <<'PY'
+  if ! python3 - "$dest" "$provider" <<'PY'
 import json, sys
-path, key, exe, pflag, extra = sys.argv[1:6]
+path, provider = sys.argv[1:3]
 try:
     d = json.load(open(path))
 except Exception:
     d = {}
 if not isinstance(d, dict):
     d = {}
-def has(k):
-    return k in d and isinstance(d.get(k), dict)
-if not has(key):
-    d[key] = {
-        "executable": exe or key,
-        "promptFlag": pflag or "-p",
-        "flags": {"extra": extra or ""},
+if "_runtime" not in d or not isinstance(d.get("_runtime"), dict):
+    d["_runtime"] = {
+        "executable": "scripts/bizagent-agent",
+        "promptFlag": "-f",
+        "flags": {"extra": "-y"},
     }
-    json.dump(d, open(path, "w"), indent=2)
-    open(path, "a").write("\n")
-    print("added")
-else:
-    print("ok")
+# Ensure selected provider exists as a minimal entry
+if provider not in d or not isinstance(d.get(provider), dict):
+    defaults = {
+        "grok": {"label": "Grok (xAI)", "baseURL": "https://api.x.ai/v1", "keyEnv": "XAI_API_KEY", "models": ["grok-4.5"]},
+        "openai": {"label": "OpenAI", "baseURL": "https://api.openai.com/v1", "keyEnv": "OPENAI_API_KEY", "models": ["gpt-4o"]},
+        "venice": {"label": "Venice", "baseURL": "https://api.venice.ai/api/v1", "keyEnv": "VENICE_API_KEY", "models": ["llama-3.3-70b"]},
+        "openrouter": {"label": "OpenRouter", "baseURL": "https://openrouter.ai/api/v1", "keyEnv": "OPENROUTER_API_KEY", "models": ["anthropic/claude-sonnet-4"]},
+    }
+    d[provider] = defaults.get(provider, {"label": provider, "baseURL": "https://api.x.ai/v1", "keyEnv": "XAI_API_KEY", "models": []})
+json.dump(d, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+print("ok")
 PY
   then
-    warn "could not ensure cli.json has entry for $key — runtime will fail launches until fixed"
+    warn "could not ensure cli.json provider catalog — runtime may fail until fixed"
   else
-    ok "cli.json has entry for hub CLI '$key'"
+    ok "cli.json has provider '$provider' (runtime: bizagent-agent)"
+  fi
+
+  # Install agent-runtime deps if present
+  if [[ -f "$INSTALL_DIR/agent-runtime/package.json" ]]; then
+    if command -v npm >/dev/null 2>&1; then
+      (cd "$INSTALL_DIR/agent-runtime" && npm install --silent) \
+        && ok "agent-runtime npm dependencies installed" \
+        || warn "agent-runtime npm install failed — run: cd agent-runtime && npm install"
+    fi
+    chmod +x "$INSTALL_DIR/scripts/bizagent-agent" "$INSTALL_DIR/agent-runtime/bin/bizagent-agent" 2>/dev/null || true
   fi
 }
 
-# Seed operator registry.json; set settings.hub_agent.cliName to the selected CLI.
+# Seed operator registry.json; set settings.hub_agent.provider to the default LLM.
 # registry.json is gitignored; the public repo only ships registry.example.json.
-# Legacy .cli is NOT written — hub CLI name lives in registry; flags live in cli.json.
 write_registry_seed() {
   local dest="$INSTALL_DIR/registry.json"
   local src="$INSTALL_DIR/registry.example.json"
-  local key
-  key="$(basename "$SELECTED_CLI")"
-  key="${key%.exe}"
+  local provider="${SELECTED_PROVIDER:-grok}"
 
   if [[ ! -f "$dest" ]]; then
     if [[ ! -f "$src" ]]; then
       warn "registry.example.json missing — control plane needs a registry.json"
       return
     fi
-    if ! python3 - "$src" "$dest" "$key" <<'PY'
+    if ! python3 - "$src" "$dest" "$provider" <<'PY'
 import json, sys
-src, dest, cli_name = sys.argv[1:4]
+src, dest, provider = sys.argv[1:4]
 d = json.load(open(src))
 d["org"] = ""
 d["products"] = []
@@ -472,7 +447,10 @@ if "hub" in d and isinstance(d["hub"], dict):
     d["hub"]["name"] = "BizAgent"
 settings = d.setdefault("settings", {})
 hub_agent = settings.setdefault("hub_agent", {})
-hub_agent["cliName"] = cli_name
+hub_agent["provider"] = provider
+hub_agent["cliName"] = provider  # legacy alias
+if provider == "grok" and not hub_agent.get("model"):
+    hub_agent["model"] = "grok-4.5"
 json.dump(d, open(dest, "w"), indent=2)
 open(dest, "a").write("\n")
 PY
@@ -480,49 +458,43 @@ PY
       cp "$src" "$dest"
       warn "seeded registry.json as a full example copy (python seed failed)"
     else
-      ok "registry.json seeded (empty products, hub_agent.cliName=$key)"
+      ok "registry.json seeded (empty products, hub_agent.provider=$provider)"
     fi
   else
-    # Existing registry: ensure hub CLI name is set (migrate from empty / legacy .cli).
-    if ! python3 - "$dest" "$key" "$INSTALL_DIR/.cli" <<'PY'
-import json, sys, os, re
-path, cli_name, dotcli = sys.argv[1:4]
+    # Existing registry: ensure hub provider is set.
+    if ! python3 - "$dest" "$provider" <<'PY'
+import json, sys
+path, provider = sys.argv[1:3]
 d = json.load(open(path))
 settings = d.setdefault("settings", {})
 hub_agent = settings.setdefault("hub_agent", {})
-current = (hub_agent.get("cliName") or hub_agent.get("cli") or "").strip()
+current = (hub_agent.get("provider") or hub_agent.get("cliName") or hub_agent.get("cli") or "").strip()
+legacy_map = {"claude": "openrouter", "codex": "openai", "agy": "openrouter", "bizagent-agent": provider or "grok", "xai": "grok"}
 if current:
+    current = legacy_map.get(current, current)
+    hub_agent["provider"] = current
+    hub_agent["cliName"] = current
+    json.dump(d, open(path, "w"), indent=2)
+    open(path, "a").write("\n")
     print("keep")
     raise SystemExit(0)
-# Migration: pull name from legacy .cli if present
-legacy = ""
-if os.path.isfile(dotcli):
-    for line in open(dotcli, encoding="utf-8", errors="replace"):
-        m = re.match(r'^CLI_CMD=(.*)$', line.strip())
-        if m:
-            legacy = m.group(1).strip().strip('"').strip("'")
-            break
-    if legacy:
-        legacy = os.path.basename(legacy).replace(".exe", "")
-name = legacy or cli_name
-hub_agent["cliName"] = name
-if "cli" in hub_agent and not hub_agent.get("cliName"):
-    hub_agent["cliName"] = hub_agent["cli"]
+hub_agent["provider"] = provider
+hub_agent["cliName"] = provider
+if provider == "grok" and not hub_agent.get("model"):
+    hub_agent["model"] = "grok-4.5"
 json.dump(d, open(path, "w"), indent=2)
 open(path, "a").write("\n")
-print(name)
+print(provider)
 PY
     then
-      warn "could not set hub_agent.cliName on existing registry.json"
+      warn "could not set hub_agent.provider on existing registry.json"
     else
-      ok "registry.json hub_agent.cliName ensured"
+      ok "registry.json hub_agent.provider ensured"
     fi
   fi
 
-  # Do not write .cli on new installs. If a leftover .cli exists, leave it for
-  # runtime migration fallback but prefer registry hub_agent.cliName.
   if [[ -f "$INSTALL_DIR/.cli" ]]; then
-    note "legacy .cli present — hub CLI name is in registry.json; .cli is migration-only"
+    note "legacy .cli present — hub provider is in registry.json; .cli is migration-only"
   fi
 }
 
@@ -691,8 +663,8 @@ main() {
   ensure_node
   ensure_cron
 
-  step "Selecting AI CLI"
-  detect_and_select_cli
+  step "Default LLM provider"
+  select_default_provider
 
   step "API key for hub agents"
   # INSTALL_DIR is not finalized yet; prompt still works — path hints use default until choose_dir.

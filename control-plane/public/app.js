@@ -130,23 +130,30 @@ function relativeTime(ms) {
   return `${Math.round(h / 24)}d ago`;
 }
 
-// --- Agent rail: expand state + CLI/model dialog ---
+// --- Agent rail: expand state + LLM provider/model dialog ---
 const expandedAgentSlugs = new Set();
-let pendingAgentConfig = null; // { slug, agentName, cliName, model }
-let cliModelsCache = null; // { clis, cliModels, defaultModel }
+let pendingAgentConfig = null; // { slug, agentName, provider, model }
+let cliModelsCache = null; // { clis/providers, cliModels, labels, defaultModel }
 
 async function loadCliModels(force = false) {
   if (!force && cliModelsCache) return cliModelsCache;
   const data = await api('/api/cli-models');
+  const providers = Array.isArray(data.providers)
+    ? data.providers
+    : (Array.isArray(data.clis) ? data.clis : []);
   cliModelsCache = {
-    clis: Array.isArray(data.clis) ? data.clis : [],
-    cliModels: data.cliModels && typeof data.cliModels === 'object' ? data.cliModels : {},
+    clis: providers,
+    providers,
+    cliModels: data.cliModels && typeof data.cliModels === 'object'
+      ? data.cliModels
+      : (data.providerModels || {}),
+    labels: data.labels && typeof data.labels === 'object' ? data.labels : {},
     defaultModel: data.defaultModel || '',
   };
   return cliModelsCache;
 }
 
-function fillSelect(select, options, selected) {
+function fillSelect(select, options, selected, labels) {
   select.innerHTML = '';
   const values = Array.isArray(options) ? options.slice() : [];
   if (selected && !values.includes(selected)) values.unshift(selected);
@@ -157,10 +164,11 @@ function fillSelect(select, options, selected) {
     select.appendChild(opt);
     return;
   }
+  const labelMap = labels && typeof labels === 'object' ? labels : {};
   for (const value of values) {
     const opt = document.createElement('option');
     opt.value = value;
-    opt.textContent = value;
+    opt.textContent = labelMap[value] || value;
     if (value === selected) opt.selected = true;
     select.appendChild(opt);
   }
@@ -171,9 +179,9 @@ function refreshModelOptionsForCli() {
   const cliSelect = document.getElementById('modalCliSelect');
   const modelSelect = document.getElementById('modalModelSelect');
   if (!cliSelect || !modelSelect) return;
-  const cli = cliSelect.value;
-  const models = (cliModelsCache.cliModels && cliModelsCache.cliModels[cli]) || [];
-  // Prefer current model if still valid for this CLI; otherwise first model.
+  const provider = cliSelect.value;
+  const models = (cliModelsCache.cliModels && cliModelsCache.cliModels[provider]) || [];
+  // Prefer current model if still valid for this provider; otherwise first model.
   const preferred =
     models.includes(pendingAgentConfig.model) ? pendingAgentConfig.model
       : (models[0] || pendingAgentConfig.model || '');
@@ -181,10 +189,12 @@ function refreshModelOptionsForCli() {
 }
 
 async function showAgentConfigModal(agent) {
+  const provider = agent.provider || agent.cliName || '';
   pendingAgentConfig = {
     slug: agent.slug,
     agentName: agent.agentName || agent.slug,
-    cliName: agent.cliName || '',
+    provider,
+    cliName: provider,
     model: agent.model || '',
   };
   const modal = document.getElementById('configModal');
@@ -194,7 +204,7 @@ async function showAgentConfigModal(agent) {
   const modelSelect = document.getElementById('modalModelSelect');
   if (!modal || !cliSelect || !modelSelect) return;
 
-  title.textContent = `CLI & model — ${pendingAgentConfig.agentName}`;
+  title.textContent = `LLM & model — ${pendingAgentConfig.agentName}`;
   if (status) {
     status.hidden = true;
     status.textContent = '';
@@ -205,13 +215,13 @@ async function showAgentConfigModal(agent) {
   } catch (err) {
     if (status) {
       status.hidden = false;
-      status.textContent = err.message || 'Failed to load CLIs';
+      status.textContent = err.message || 'Failed to load LLMs';
       status.dataset.kind = 'warn';
     }
   }
 
-  const clis = (cliModelsCache && cliModelsCache.clis) || [];
-  fillSelect(cliSelect, clis, pendingAgentConfig.cliName);
+  const clis = (cliModelsCache && (cliModelsCache.providers || cliModelsCache.clis)) || [];
+  fillSelect(cliSelect, clis, pendingAgentConfig.provider, cliModelsCache && cliModelsCache.labels);
   refreshModelOptionsForCli();
   modal.hidden = false;
   cliSelect.focus();
@@ -234,13 +244,13 @@ async function saveAgentConfigModal() {
   const modelSelect = document.getElementById('modalModelSelect');
   const status = document.getElementById('modalStatus');
   const saveBtn = document.getElementById('modalSave');
-  const cliName = cliSelect ? cliSelect.value.trim() : '';
+  const provider = cliSelect ? cliSelect.value.trim() : '';
   const model = modelSelect ? modelSelect.value.trim() : '';
 
-  if (!cliName) {
+  if (!provider) {
     if (status) {
       status.hidden = false;
-      status.textContent = 'Select a CLI';
+      status.textContent = 'Select an LLM';
       status.dataset.kind = 'warn';
     }
     return;
@@ -255,10 +265,10 @@ async function saveAgentConfigModal() {
   try {
     await api(`/api/agent/${encodeURIComponent(pendingAgentConfig.slug)}/config`, {
       method: 'PUT',
-      body: JSON.stringify({ cliName, model }),
+      body: JSON.stringify({ provider, cliName: provider, model }),
     });
     hideAgentConfigModal();
-    // Force re-render even if only model/cli changed.
+    // Force re-render even if only model/provider changed.
     lastAgentsJson = '';
     await refreshStatus();
   } catch (err) {
@@ -299,6 +309,21 @@ function bindAgentConfigModal() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && modal && !modal.hidden) close();
   });
+}
+
+function makeDetailRow(label, field, isJournal) {
+  const dr = document.createElement('div');
+  dr.className = isJournal ? 'detail-row detail-row--journal' : 'detail-row';
+  const lbl = document.createElement('span');
+  lbl.className = 'detail-label';
+  lbl.textContent = label;
+  const val = document.createElement('span');
+  val.className = isJournal ? 'detail-value detail-value--journal' : 'detail-value';
+  val.dataset.field = field;
+  val.textContent = '—';
+  dr.appendChild(lbl);
+  dr.appendChild(val);
+  return dr;
 }
 
 function renderAgentProjects(detail, projects) {
@@ -361,13 +386,14 @@ function renderAgents(agents) {
       labels.appendChild(product);
     }
 
+    // LLM provider >> model (click opens config; does not toggle expand)
     const cliLine = document.createElement('button');
     cliLine.type = 'button';
     cliLine.className = 'agent-cli-line';
-    const cliName = agent.cliName || '—';
+    const providerName = agent.provider || agent.cliName || '—';
     const modelName = agent.model || '—';
-    cliLine.textContent = `${cliName} >> ${modelName}`;
-    cliLine.title = 'Change CLI and model';
+    cliLine.textContent = `${providerName} >> ${modelName}`;
+    cliLine.title = 'Change LLM and model';
     cliLine.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -388,8 +414,14 @@ function renderAgents(agents) {
     detail.className = 'agent-detail';
     if (isExpanded) detail.classList.add('expanded');
     detail.dataset.status = agent.hasMail ? 'on' : '';
-    renderAgentProjects(detail, agent.projects);
+    detail.appendChild(makeDetailRow('INBOX', 'inbox', false));
+    detail.appendChild(makeDetailRow('DISPATCHED', 'lastDispatched', false));
+    detail.appendChild(makeDetailRow('JOURNAL', 'journal', true));
+    if (typeof renderAgentProjects === 'function') {
+      renderAgentProjects(detail, agent.projects);
+    }
 
+    let loaded = false;
     const toggle = () => {
       const expanded = row.getAttribute('aria-expanded') === 'true';
       const next = !expanded;
@@ -397,6 +429,26 @@ function renderAgents(agents) {
       detail.classList.toggle('expanded', next);
       if (next) expandedAgentSlugs.add(agent.slug);
       else expandedAgentSlugs.delete(agent.slug);
+      if (next && !loaded) {
+        loaded = true;
+        const inboxEl = detail.querySelector('[data-field="inbox"]');
+        if (inboxEl) inboxEl.textContent = 'Loading…';
+        api(`/api/agent-detail/${encodeURIComponent(agent.slug)}`).then((data) => {
+          const inbox = detail.querySelector('[data-field="inbox"]');
+          const disp = detail.querySelector('[data-field="lastDispatched"]');
+          const journal = detail.querySelector('[data-field="journal"]');
+          if (inbox) inbox.textContent = data.inbox > 0 ? String(data.inbox) : '—';
+          if (disp) {
+            disp.textContent = data.lastDispatched
+              ? relativeTime(data.lastDispatched)
+              : '—';
+          }
+          if (journal) journal.textContent = data.journal || '—';
+        }).catch(() => {
+          const inbox = detail.querySelector('[data-field="inbox"]');
+          if (inbox) inbox.textContent = '—';
+        });
+      }
     };
     row.addEventListener('click', toggle);
     row.addEventListener('keydown', (e) => {

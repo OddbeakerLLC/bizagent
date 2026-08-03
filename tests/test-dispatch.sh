@@ -34,17 +34,22 @@ cat > "$TMP/registry.json" <<'JSON'
 {
   "settings": {
     "dispatch": { "max_concurrency": 1, "lock_lease_secs": 60 },
-    "hub_agent": { "cliName": "claude" }
+    "hub_agent": { "provider": "grok", "cliName": "grok", "model": "grok-4.5" }
   },
-  "products": [{ "slug": "alpha", "name": "Alpha", "agent_name": "Agent A", "cliName": "claude", "projects": [] }]
+  "products": [{ "slug": "alpha", "name": "Alpha", "agent_name": "Agent A", "provider": "grok", "cliName": "grok", "projects": [] }]
 }
 JSON
 cat > "$TMP/cli.json" <<'JSON'
 {
-  "claude": {
-    "executable": "claude",
-    "promptFlag": "-p",
-    "flags": { "extra": "--dangerously-skip-permissions" }
+  "_runtime": {
+    "executable": "scripts/bizagent-agent",
+    "promptFlag": "-f",
+    "flags": { "extra": "-y" }
+  },
+  "grok": {
+    "baseURL": "https://api.x.ai/v1",
+    "keyEnv": "XAI_API_KEY",
+    "models": ["grok-4.5"]
   }
 }
 JSON

@@ -155,13 +155,15 @@ Lease and caps are configurable via env (`BIZAGENT_*`) or
 `settings.dispatch.{poll_seconds,max_concurrency,hub_slots,agent_slots,lock_lease_secs}`
 in `registry.json`.
 
-CLI selection is **registry + `cli.json`**:
+LLM selection is **registry + `cli.json`** (single runtime):
 
-- `cli.json` — catalog of engines (executable, `promptFlag`, headless extras).
-- `registry.json` `settings.hub_agent.cliName` and product `cliName` — which
-  catalog entry to launch.
-- Legacy root `.cli` is **migration-only**: if present and hub `cliName` is
-  empty, its `CLI_CMD` supplies the hub name. Flags are never read from `.cli`.
+- **Runtime:** always `bizagent-agent` (`agent-runtime/`, launcher
+  `scripts/bizagent-agent`) — OpenAI-compatible tool loop; no vendor CLIs.
+- `cli.json` — `_runtime` launcher flags plus **provider** entries (`baseURL`,
+  `keyEnv`, `models`) e.g. `grok`, `openai`, `venice`, `openrouter`.
+- `registry.json` `settings.hub_agent.provider` / product `provider` (+ `model`) —
+  which LLM endpoint and model to use. `cliName` is a legacy alias for `provider`.
+- UI agent rail shows `provider >> model` (not a CLI binary name).
 
 ## Messaging
 

@@ -255,23 +255,32 @@ function attachEnterprisePlugin(config) {
   return state;
 }
 
+const { providerEntries, resolveProviderName, getRuntimeDef } = require("./lib/cli-config");
+
 function listCliNames(cliJson) {
-  return Object.keys(cliJson || {}).filter(
-    (k) => !k.startsWith("_") && cliJson[k] && typeof cliJson[k] === "object",
-  );
+  return Object.keys(providerEntries(cliJson));
 }
 
-/** True when `executable` is an absolute path that exists, or is on PATH. */
-function isCliInstalled(executable) {
+/** True when bizagent-agent runtime launcher exists (or absolute/PATH override). */
+function isCliInstalled(executable, hub) {
   const exe = String(executable || "").trim();
   if (!exe) return false;
   if (exe.includes("/") || exe.includes("\\")) {
-    try {
-      fs.accessSync(exe, fs.constants.X_OK);
-      return true;
-    } catch (_err) {
-      return false;
+    const candidates = [];
+    if (path.isAbsolute(exe)) candidates.push(exe);
+    else {
+      if (hub) candidates.push(path.join(hub, exe));
+      candidates.push(path.resolve(exe));
     }
+    for (const c of candidates) {
+      try {
+        fs.accessSync(c, fs.constants.X_OK);
+        return true;
+      } catch (_err) {
+        /* try next */
+      }
+    }
+    return false;
   }
   try {
     execFileSync("which", [exe], { stdio: "ignore" });
@@ -281,11 +290,8 @@ function isCliInstalled(executable) {
   }
 }
 
-// Models for the selection dialog come from each CLI's `models` array in
-// cli.json (source of truth). Optional registry override:
-// settings.models.by_cli[name] replaces that CLI's list only. Never invent
-// model names and never broadcast a flat settings.models.available list
-// into every CLI dropdown.
+// Models for the selection dialog come from each provider's `models` array in
+// cli.json. Optional registry override: settings.models.by_cli[name] (legacy name).
 function modelsFromCliEntry(entry) {
   if (!entry || typeof entry !== "object") return [];
   if (!Array.isArray(entry.models)) return [];
@@ -294,43 +300,60 @@ function modelsFromCliEntry(entry) {
 
 function buildCliModelsPayload(config) {
   const cliJson = config._cliJson || {};
-  const allNames = listCliNames(cliJson);
+  const providers = providerEntries(cliJson);
+  const allNames = Object.keys(providers);
+  const runtime = getRuntimeDef(cliJson);
+  const runtimeOk = isCliInstalled(runtime.executable, config.hub);
 
-  // Only expose CLIs whose executable is actually installed. Always include a
-  // currently-configured hub/product CLI even if missing, so the dialog can
-  // still show/change it.
+  // Show all catalog providers when runtime is installed. Always include
+  // currently-configured hub/product providers so the dialog can edit them.
   const keep = new Set();
-  for (const name of allNames) {
-    const entry = cliJson[name] || {};
-    const exe = entry.executable || name;
-    if (isCliInstalled(exe)) keep.add(name);
+  if (runtimeOk) {
+    for (const name of allNames) keep.add(name);
   }
   const hubAgent =
     (config.registry &&
       config.registry.settings &&
       config.registry.settings.hub_agent) ||
     {};
-  if (hubAgent.cliName) keep.add(String(hubAgent.cliName));
+  const hubProv =
+    hubAgent.provider || hubAgent.cliName || hubAgent.cli || "";
+  if (hubProv) {
+    keep.add(resolveProviderName(String(hubProv), cliJson) || String(hubProv));
+  }
   for (const product of (config.registry && config.registry.products) || []) {
-    const n = product && (product.cliName || product.cli);
-    if (n) keep.add(String(n));
+    const n = product && (product.provider || product.cliName || product.cli);
+    if (n) {
+      keep.add(resolveProviderName(String(n), cliJson) || String(n));
+    }
   }
 
   const clis = allNames.filter((n) => keep.has(n));
+  // If runtime missing, still list configured providers so UI isn't empty.
+  if (clis.length === 0) {
+    for (const n of keep) {
+      if (allNames.includes(n) || providers[n]) clis.push(n);
+    }
+  }
 
   const registry = config.registry || {};
   const modelsConfig = (registry.settings && registry.settings.models) || {};
   const byCli =
     modelsConfig.by_cli && typeof modelsConfig.by_cli === "object"
       ? modelsConfig.by_cli
-      : {};
+      : modelsConfig.by_provider && typeof modelsConfig.by_provider === "object"
+        ? modelsConfig.by_provider
+        : {};
 
   const cliModels = {};
+  const labels = {};
   for (const name of clis) {
+    const entry = providers[name] || cliJson[name] || {};
+    labels[name] = entry.label || name;
     if (Array.isArray(byCli[name]) && byCli[name].length > 0) {
       cliModels[name] = byCli[name].map(String);
     } else {
-      cliModels[name] = modelsFromCliEntry(cliJson[name]);
+      cliModels[name] = modelsFromCliEntry(entry);
     }
   }
 
@@ -340,10 +363,15 @@ function buildCliModelsPayload(config) {
   }
 
   return {
+    // Backward-compatible field names (UI historically said "CLI").
     clis,
+    providers: clis,
     models: [...flat],
     cliModels,
+    providerModels: cliModels,
+    labels,
     defaultModel: modelsConfig.agent_default || "",
+    runtime: runtime.executable,
   };
 }
 
@@ -357,18 +385,21 @@ function hubAgentEntry(registry) {
   // Match product agents: primary "Agent …", secondary product/system name.
   // agent_name overrides when set (e.g. interview confirmed a custom hub label).
   const agentName = hub.agent_name || "Agent PTL";
+  const provider =
+    hubAgent.provider || hubAgent.cliName || hubAgent.cli || "";
   return {
     slug: "hub",
     name: productName,
     agentName,
     model: hubAgent.model || "",
-    cliName: hubAgent.cliName || hubAgent.cli || "",
+    provider,
+    cliName: provider,
     projects: [],
   };
 }
 
 function currentState(config, session) {
-  const hubCli = config.hubCliName || "";
+  const hubCli = config.hubProvider || config.hubCliName || "";
   const hubModel = config.hubModel || "";
   const agentDefault = config.agentDefaultModel || "";
 
@@ -378,11 +409,12 @@ function currentState(config, session) {
   ]).map((agent) => {
     const isHub = agent.slug === "hub";
     // Display effective launch values (empty product fields inherit hub/default).
-    const cliName = agent.cliName || hubCli || "";
+    const provider = agent.provider || agent.cliName || hubCli || "";
     const model = agent.model || (isHub ? hubModel : agentDefault || hubModel) || "";
     return {
       ...agent,
-      cliName,
+      provider,
+      cliName: provider,
       model,
       projects: Array.isArray(agent.projects) ? agent.projects : [],
       active: isAgentActive(config.hub, agent.slug, config.lockLeaseSecs),
@@ -734,18 +766,24 @@ async function handleApi(config, req, res) {
     }
   }
 
-  // List available (installed) CLIs from cli.json
+  // List available LLM providers from cli.json
   if (url.pathname === "/api/clis" && req.method === "GET") {
     const payload = buildCliModelsPayload(config);
-    return send(res, 200, { clis: payload.clis });
+    return send(res, 200, {
+      clis: payload.clis,
+      providers: payload.providers || payload.clis,
+    });
   }
 
-  // CLI names + per-CLI models for the selection dialog (from cli.json)
-  if (url.pathname === "/api/cli-models" && req.method === "GET") {
+  // Providers + models for the selection dialog (from cli.json)
+  if (
+    (url.pathname === "/api/cli-models" || url.pathname === "/api/providers") &&
+    req.method === "GET"
+  ) {
     return send(res, 200, buildCliModelsPayload(config));
   }
 
-  // Update agent CLI/model in registry.json
+  // Update agent provider/model in registry.json
   const agentConfigMatch = url.pathname.match(
     /^\/api\/agent\/([^/]+)\/config$/,
   );
@@ -754,7 +792,8 @@ async function handleApi(config, req, res) {
     try {
       const body = await parseBody(req);
       const result = updateAgentConfig(config.hub, slug, {
-        cliName: body.cliName,
+        provider: body.provider || body.cliName,
+        cliName: body.cliName || body.provider,
         model: body.model,
       });
       // Force in-process registry reload even if mtime granularity is coarse.

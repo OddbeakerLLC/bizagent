@@ -31,10 +31,11 @@
       "enterprise_api_min": 1
     },
     "hub_agent": {
-      "_comment": "Hub PTL launch settings. cliName is a key in cli.json (e.g. claude, grok). Installer sets this; product agents use their own cliName. Flags always come from cli.json — never from legacy .cli.",
+      "_comment": "Hub PTL launch settings. provider is an LLM key in cli.json (grok, openai, venice, openrouter…). Runtime is always bizagent-agent. cliName is a legacy alias for provider.",
       "prompt": "You are the hub PTL agent. Read inbox/*.md for incoming messages, process each one, then archive it. After processing all messages, send a single PushNotification with status=proactive summarizing what arrived and what you did.",
-      "cliName": "claude",
-      "model": ""
+      "provider": "grok",
+      "cliName": "grok",
+      "model": "grok-4.5"
     },
     "models": {
       "_comment": "Default model for product agent launches. Per-product model field overrides this.",
@@ -74,8 +75,9 @@
       "slug": "widgets",
       "name": "Widgets",
       "agent_name": "Agent W",
-      "model": "",
-      "cliName": "claude",
+      "model": "grok-4.5",
+      "provider": "grok",
+      "cliName": "grok",
       "projects": [
         {
           "name": "widgets-web",
@@ -93,8 +95,9 @@
       "slug": "platform",
       "name": "Platform",
       "agent_name": "Agent P",
-      "model": "",
-      "cliName": "claude",
+      "model": "grok-4.5",
+      "provider": "grok",
+      "cliName": "grok",
       "projects": [
         {
           "name": "platform-core",
@@ -107,8 +110,9 @@
       "slug": "tooling",
       "name": "Tooling",
       "agent_name": "Agent T",
-      "model": "",
-      "cliName": "agy",
+      "model": "gpt-4o",
+      "provider": "chatgpt",
+      "cliName": "chatgpt",
       "projects": [
         {
           "name": "cli-tools",
