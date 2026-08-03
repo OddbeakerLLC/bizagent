@@ -6,6 +6,7 @@
 #   - source .bizagent/env for API keys
 #   - resolve node if installed via nvm
 #   - write prompt to a temp file when runtime expects -f/--prompt-file
+#   - timestamp every line (cron logs have no other clock)
 #
 # Source of truth:
 #   registry.json settings.hub_agent.provider → LLM provider key in cli.json
@@ -14,6 +15,9 @@ set -u
 
 HUB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HUB" || { echo "run-agent.sh: cannot cd to $HUB" >&2; exit 1; }
+
+# shellcheck source=lib/log-ts.sh
+. "$HUB/scripts/lib/log-ts.sh"
 
 # Cron often has a tiny PATH. Prefer login-shell node locations.
 export PATH="${HOME}/.local/bin:${HOME}/.nvm/versions/node/$(ls "${HOME}/.nvm/versions/node" 2>/dev/null | tail -1)/bin:${PATH:-/usr/bin:/bin}"
@@ -35,18 +39,23 @@ if ! command -v node >/dev/null 2>&1; then
   fi
 fi
 
+ts_err() { printf '%s %s\n' "$(bizagent_ts)" "$*" >&2; }
+ts_out() { printf '%s %s\n' "$(bizagent_ts)" "$*"; }
+
 if ! command -v node >/dev/null 2>&1; then
-  echo "run-agent.sh: node is required (not on PATH for this environment)" >&2
+  ts_err "run-agent.sh: node is required (not on PATH for this environment)"
   exit 1
 fi
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: scripts/run-agent.sh \"prompt\" [extra args...]" >&2
+  ts_err "usage: scripts/run-agent.sh \"prompt\" [extra args...]"
   exit 2
 fi
 
 PROMPT="$1"
 shift
+
+ts_out "run-agent: start"
 
 SETTINGS="$(node -e '
 const { loadRuntimeConfig } = require("./control-plane/lib/config");
@@ -61,14 +70,17 @@ if (!name) {
 const model = config.hubModel || "";
 const s = getCliSettings(hub, config._cliJson, config, name, model);
 process.stdout.write(JSON.stringify(s));
-')" || exit 1
+')" || {
+  ts_err "run-agent: failed to resolve CLI settings"
+  exit 1
+}
 
 CLI="$(node -e 'const s=JSON.parse(process.argv[1]); process.stdout.write(s.cli||"")' "$SETTINGS")"
 PFLAG="$(node -e 'const s=JSON.parse(process.argv[1]); process.stdout.write(s.promptFlag||"")' "$SETTINGS")"
 EXTRA="$(node -e 'const s=JSON.parse(process.argv[1]); process.stdout.write(s.extraArgs||"")' "$SETTINGS")"
 
-[ -n "$CLI" ] || { echo "run-agent.sh: empty executable from cli.json" >&2; exit 1; }
-[ -n "$PFLAG" ] || { echo "run-agent.sh: empty promptFlag from cli.json" >&2; exit 1; }
+[ -n "$CLI" ] || { ts_err "run-agent.sh: empty executable from cli.json"; exit 1; }
+[ -n "$PFLAG" ] || { ts_err "run-agent.sh: empty promptFlag from cli.json"; exit 1; }
 
 # Relative executables (scripts/bizagent-agent) must resolve from hub cwd.
 if [[ "$CLI" != /* && "$CLI" == */* ]]; then
@@ -97,6 +109,16 @@ case "$PFLAG" in
     ;;
 esac
 
-# Match dispatcher order: cli, promptFlag, prompt, extra
+ts_out "run-agent: launch cli=$CLI flag=$PFLAG extra=$EXTRA"
+
+# Timestamp every stdout/stderr line so nightly.log / weekly.log are navigable.
 # shellcheck disable=SC2086
-exec "$CLI" "$PFLAG" "$PROMPT_ARG" $EXTRA "$@"
+set +e
+"$CLI" "$PFLAG" "$PROMPT_ARG" $EXTRA "$@" \
+  > >(bizagent_ts_prefix) \
+  2> >(bizagent_ts_prefix >&2)
+code=$?
+set -e
+
+ts_out "run-agent: exit code=$code"
+exit "$code"

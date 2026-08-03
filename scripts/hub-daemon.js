@@ -380,12 +380,12 @@ function main() {
       env_keys_applied: envInfo.applied || 0,
     });
     // eslint-disable-next-line no-console
-    console.log(`hub-daemon listening on ${SOCK} pid=${process.pid}`);
+    console.log(`${new Date().toISOString()} hub-daemon listening on ${SOCK} pid=${process.pid}`);
   });
 
   server.on('error', (err) => {
     // eslint-disable-next-line no-console
-    console.error('hub-daemon server error:', err.message);
+    console.error(`${new Date().toISOString()} hub-daemon server error:`, err.message);
     shutdown(1);
   });
 
