@@ -1115,7 +1115,7 @@ function start(hubInput) {
       poll_seconds: config.pollSeconds,
       bind_url: bindUrl
     });
-    console.log(logLine);
+    console.log(`${new Date().toISOString()} ${logLine}`);
   });
   return server;
 }

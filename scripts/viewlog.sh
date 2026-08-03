@@ -4,10 +4,18 @@
 # Usage:
 #   scripts/viewlog.sh              # follow the usual human-readable set
 #   scripts/viewlog.sh hub          # hub daemon + dispatch-hub.*
+#   scripts/viewlog.sh cron         # nightly.log + weekly.log
 #   scripts/viewlog.sh all          # every non-empty *.log / *.stderr (skips structured.log)
 #   scripts/viewlog.sh -n 200       # last N lines then follow (default 50)
 #
 # Hub root: BIZAGENT_HUB or parent of this script.
+#
+# Log clocks (after timestamping work):
+#   control-plane.log / structured.log — always ISO ts
+#   control-plane-server.log / hub-daemon.log — ISO on process messages
+#   dispatch-*.log — ISO turn start/end banners (stdout body is agent text)
+#   dispatch-*.stderr — ISO per line + turn banners
+#   nightly.log / weekly.log — ISO per line via run-agent.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,13 +28,15 @@ usage() {
   cat <<'EOF' >&2
 usage: scripts/viewlog.sh [mode] [-n LINES]
 
-  mode     default | hub | cp | all
+  mode     default | hub | cp | cron | all
   -n N     show last N lines before following (default 50)
 
   default  control-plane.log, control-plane-server.log,
-           hub-daemon.log, dispatch-hub.log, dispatch-hub.stderr
+           hub-daemon.log, dispatch-hub.log, dispatch-hub.stderr,
+           nightly.log, weekly.log (when present)
   hub      hub-daemon.log + dispatch-hub.*
   cp       control-plane.log + control-plane-server.log
+  cron     nightly.log + weekly.log
   all      every non-empty *.log / *.stderr under logs/ (never structured.log)
 EOF
   exit 2
@@ -40,7 +50,7 @@ while [[ $# -gt 0 ]]; do
       [[ "$LINES" =~ ^[0-9]+$ ]] || { echo "viewlog: -n requires a number" >&2; exit 2; }
       shift 2
       ;;
-    default|hub|cp|all)
+    default|hub|cp|cron|all)
       MODE="$1"
       shift
       ;;
@@ -72,7 +82,9 @@ case "$MODE" in
       "$LOG_DIR/control-plane-server.log" \
       "$LOG_DIR/hub-daemon.log" \
       "$LOG_DIR/dispatch-hub.log" \
-      "$LOG_DIR/dispatch-hub.stderr")
+      "$LOG_DIR/dispatch-hub.stderr" \
+      "$LOG_DIR/nightly.log" \
+      "$LOG_DIR/weekly.log")
     ;;
   hub)
     mapfile -t FILES < <(pick_existing \
@@ -84,6 +96,11 @@ case "$MODE" in
     mapfile -t FILES < <(pick_existing \
       "$LOG_DIR/control-plane.log" \
       "$LOG_DIR/control-plane-server.log")
+    ;;
+  cron)
+    mapfile -t FILES < <(pick_existing \
+      "$LOG_DIR/nightly.log" \
+      "$LOG_DIR/weekly.log")
     ;;
   all)
     # Human-readable logs only — structured.log is JSON for tooling/APIs.
