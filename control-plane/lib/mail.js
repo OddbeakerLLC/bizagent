@@ -9,6 +9,12 @@ const {
   stampConversationId,
   userInbox,
 } = require('./conversations');
+const {
+  applyResolveUserInbox,
+  getActiveEnterpriseHooks,
+  getActiveEnterpriseState,
+  isActiveEnterprise,
+} = require('./enterprise-plugin');
 const { logEvent, appendLog } = require('./log');
 
 function frontmatterValue(text, key) {
@@ -16,8 +22,17 @@ function frontmatterValue(text, key) {
   return match ? match[1].trim() : '';
 }
 
-function inboxFor(hub, slug) {
-  if (slug === 'user') return userInbox(hub);
+function inboxFor(hub, slug, frontmatter = null) {
+  if (slug === 'user') {
+    if (isActiveEnterprise()) {
+      const ent = getActiveEnterpriseState();
+      const fm = frontmatter && typeof frontmatter === 'object' ? frontmatter : {};
+      const resolved = applyResolveUserInbox(ent, hub, fm, null);
+      if (resolved === null) return null; // signal quarantine
+      if (resolved) return resolved;
+    }
+    return userInbox(hub);
+  }
   return slug === 'hub' ? path.join(hub, 'inbox') : path.join(hub, 'agents', slug, 'inbox');
 }
 
@@ -25,10 +40,12 @@ function recipientSlugs(hub) {
   return new Set(['hub', 'user', ...agentsFromRegistry(loadRegistry(hub)).map((agent) => agent.slug)]);
 }
 
-function safeInboxFor(hub, slug) {
+function safeInboxFor(hub, slug, frontmatter = null) {
   if (!recipientSlugs(hub).has(slug)) return null;
   const hubRoot = path.resolve(hub);
-  const inbox = path.resolve(inboxFor(hub, slug));
+  const raw = inboxFor(hub, slug, frontmatter);
+  if (raw === null) return null;
+  const inbox = path.resolve(raw);
   if (inbox !== path.join(hubRoot, 'inbox') && !inbox.startsWith(`${hubRoot}${path.sep}`)) {
     throw new Error(`invalid inbox path for ${slug}`);
   }
@@ -241,7 +258,25 @@ function routeOutboxes(hub) {
         });
         continue;
       }
-      const dest = safeInboxFor(hub, to);
+
+      // Enterprise: hub→user requires user_id (quarantine if missing — never mis-deliver).
+      const fm = {
+        to,
+        from,
+        user_id: frontmatterValue(text, 'user_id'),
+        conversation_id: frontmatterValue(text, 'conversation_id'),
+      };
+      if (to === 'user' && isActiveEnterprise()) {
+        const uid = (fm.user_id || '').trim();
+        if (!uid) {
+          quarantineOutboxFile(hub, file, 'missing-user_id');
+          quarantined += 1;
+          warnings += 1;
+          continue;
+        }
+      }
+
+      const dest = safeInboxFor(hub, to, fm);
       if (!dest || !fs.existsSync(dest)) {
         if (to === 'user' && dest) fs.mkdirSync(dest, { recursive: true });
       }
@@ -373,6 +408,9 @@ function writeOutboxMessage(hub, opts = {}) {
   const conversationId = opts.conversationId != null
     ? String(opts.conversationId).trim()
     : '';
+  const userId = opts.userId != null
+    ? String(opts.userId).trim()
+    : (opts.user_id != null ? String(opts.user_id).trim() : '');
 
   if (!from || !VALID_SLUG.test(from)) {
     throw new Error('writeOutboxMessage: invalid or missing from slug');
@@ -395,6 +433,7 @@ function writeOutboxMessage(hub, opts = {}) {
     `date: ${date}`,
     `subject: ${subject}`,
     conversationId ? `conversation_id: ${conversationId}` : '',
+    userId ? `user_id: ${userId}` : '',
     '---',
   ].filter((line) => line !== '').join('\n');
 

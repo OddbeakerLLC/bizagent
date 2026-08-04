@@ -126,7 +126,41 @@ function createEmptyHooks() {
     resolveUserInbox: null,
     filterAgents: null,
     getHubSessionPath: null,
+    /** (hub, text, meta) => stamped text — optional user_id stamp helpers */
+    stampOutboundMail: null,
+    /** (hub) => [{ userId, inboxDir }] human inboxes to relay */
+    listUserInboxes: null,
+    /** (hub, conversationId, session?) => abs hub-session path */
+    resolveHubSessionPath: null,
+    /** (hub, ctx) => string block injected into hub turn prompt */
+    hubTurnContext: null,
+    /** (hub, conversationId) => user_id | null from pending mail / active map */
+    resolveActingUserId: null,
   };
+}
+
+/** Process-wide active hooks so mail/conversations/hub-memory can resolve without config. */
+let activeEnterpriseHooks = createEmptyHooks();
+let activeEnterpriseState = null;
+
+function setActiveEnterprise(state) {
+  activeEnterpriseState = state && state.active ? state : null;
+  activeEnterpriseHooks =
+    state && state.active && state.hooks
+      ? { ...createEmptyHooks(), ...state.hooks }
+      : createEmptyHooks();
+}
+
+function getActiveEnterpriseHooks() {
+  return activeEnterpriseHooks;
+}
+
+function getActiveEnterpriseState() {
+  return activeEnterpriseState;
+}
+
+function isActiveEnterprise() {
+  return !!(activeEnterpriseState && activeEnterpriseState.active);
 }
 
 /**
@@ -200,6 +234,7 @@ function loadEnterprisePlugin(config, options = {}) {
   };
 
   if (!isEnterpriseEnabled(registry)) {
+    setActiveEnterprise(null);
     return empty;
   }
 
@@ -256,7 +291,7 @@ function loadEnterprisePlugin(config, options = {}) {
   if (reported < minApi) {
     const msg = `enterprise_api ${reported} < required ${minApi}; treating inactive`;
     pluginLog(hub, 'warn', msg, { status: 'warn' });
-    return {
+    const inactive = {
       active: false,
       enabled,
       info: info || null,
@@ -266,6 +301,8 @@ function loadEnterprisePlugin(config, options = {}) {
       module: mod,
       error: msg,
     };
+    setActiveEnterprise(null);
+    return inactive;
   }
 
   const active = !!(info && info.active !== false);
@@ -274,7 +311,7 @@ function loadEnterprisePlugin(config, options = {}) {
     version: (info && info.version) || '',
   });
 
-  return {
+  const state = {
     active,
     enabled,
     info: info || null,
@@ -284,17 +321,45 @@ function loadEnterprisePlugin(config, options = {}) {
     module: mod,
     error: null,
   };
+  setActiveEnterprise(state);
+  return state;
 }
 
 /**
- * Match a registered plugin route. Exact path match for Phase 0
- * (enterprise can register parameterized routes later with its own matcher).
+ * Match a registered plugin route.
+ * Supports Express-style :param segments (e.g. /api/enterprise/seats/:id).
+ * On match, sets route.params on a shallow copy.
  */
 function matchPluginRoute(routes, method, pathname) {
   if (!routes || !routes.length) return null;
   const m = String(method || '').toUpperCase();
+  const pathStr = String(pathname || '');
   for (const r of routes) {
-    if (r.method === m && r.path === pathname) return r;
+    if (r.method !== m) continue;
+    if (r.path === pathStr) return { ...r, params: {} };
+    if (!r.path || !r.path.includes(':')) continue;
+    const names = [];
+    const rx = new RegExp(
+      '^' +
+        String(r.path)
+          .split('/')
+          .map((seg) => {
+            if (seg.startsWith(':')) {
+              names.push(seg.slice(1));
+              return '([^/]+)';
+            }
+            return seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          })
+          .join('/') +
+        '$'
+    );
+    const match = pathStr.match(rx);
+    if (!match) continue;
+    const params = {};
+    names.forEach((n, i) => {
+      params[n] = decodeURIComponent(match[i + 1]);
+    });
+    return { ...r, params };
   }
   return null;
 }
@@ -335,15 +400,52 @@ function applyResolveUserInbox(enterpriseState, hub, frontmatter, session) {
   return path.join(hub, 'user', 'inbox');
 }
 
+/**
+ * Hub-session path via hook, or default single-file OSS path.
+ */
+function applyHubSessionPath(hub, sessionOrUserId) {
+  const hooks = getActiveEnterpriseHooks();
+  const fn = hooks.resolveHubSessionPath || hooks.getHubSessionPath;
+  if (typeof fn === 'function') {
+    try {
+      const p = fn(hub, sessionOrUserId);
+      if (p) return p;
+    } catch (_err) {
+      /* fall through */
+    }
+  }
+  return path.join(appDir(hub), 'hub-session.md');
+}
+
+/**
+ * Optional hub-turn context block (acting user_id / seat).
+ */
+function applyHubTurnContext(hub, ctx) {
+  const fn = getActiveEnterpriseHooks().hubTurnContext;
+  if (typeof fn !== 'function') return '';
+  try {
+    const block = fn(hub, ctx || {});
+    return block ? String(block) : '';
+  } catch (_err) {
+    return '';
+  }
+}
+
 module.exports = {
   ENTERPRISE_API,
   applyFilterAgents,
+  applyHubSessionPath,
+  applyHubTurnContext,
   applyResolveUserInbox,
   createEmptyHooks,
   createPluginApi,
   enterpriseSettings,
+  getActiveEnterpriseHooks,
+  getActiveEnterpriseState,
+  isActiveEnterprise,
   isEnterpriseEnabled,
   loadEnterprisePlugin,
   matchPluginRoute,
   resolveEnterpriseTarget,
+  setActiveEnterprise,
 };

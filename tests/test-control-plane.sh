@@ -215,8 +215,10 @@ if (fs.existsSync(path.join(entHome, 'index.js'))) {
       },
     },
   });
-  if (!real.active || !real.info || real.info.phase !== 0) {
-    console.error('bizagent-enterprise scaffold should load active phase 0', real);
+  // Phase 0 scaffold reported phase:0; Phase 1+ reports phase >= 1.
+  const phase = real.info && real.info.phase;
+  if (!real.active || !real.info || !(phase === 0 || phase >= 1)) {
+    console.error('bizagent-enterprise should load active (phase 0 scaffold or phase >= 1)', real);
     process.exit(7);
   }
 }
@@ -1272,7 +1274,7 @@ if (fs.existsSync(turnsDir)) {
   }
 }
 
-// --- safety net: promote stdout blob when no outbox (stdout-only simulated hub) ---
+// --- safety net: reserved-body path (ALWAYS-WARM — no stdout blob promotion) ---
 const conv3 = createConversation(hub, 'Promote');
 postLaunchAck(hub, conv3.id);
 const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
@@ -1286,7 +1288,7 @@ fs.appendFileSync(agentLog, [
   '**Agent B** finished the CP launch-ack work. Ready to verify live.',
   '',
 ].join('\n'));
-// Ensure empty reserved body so promote path is exercised
+// Empty reserved body + stdout blob only → hard-fail (blob promotion removed).
 prepareReservedReplyBody(hub, conv3.id);
 recordPendingHubTurn(hub, {
   conversationId: conv3.id,
@@ -1294,43 +1296,59 @@ recordPendingHubTurn(hub, {
   startedAt,
   agentLog,
 });
-const promoted = ensureHubUserReply(hub, {
+const noBlob = ensureHubUserReply(hub, {
   conversationId: conv3.id,
   logByteOffset: offset,
   startedAt,
   agentLog,
 });
-if (promoted.action !== 'promoted') {
-  console.error('expected promote', promoted);
+if (noBlob.action !== 'failed') {
+  console.error('expected failed without reserved body (no blob promote)', noBlob);
   process.exit(12);
 }
-const afterPromote = getConversation(hub, conv3.id);
+// Fresh conv: reserved body path delivers hub reply.
+const conv3b = createConversation(hub, 'ReservedBody');
+postLaunchAck(hub, conv3b.id);
+const startedAtB = new Date().toISOString();
+const reservedPath = prepareReservedReplyBody(hub, conv3b.id);
+fs.writeFileSync(reservedPath, '**Agent B** finished the CP launch-ack work. Ready to verify live.\n');
+recordPendingHubTurn(hub, {
+  conversationId: conv3b.id,
+  logByteOffset: 0,
+  startedAt: startedAtB,
+  agentLog,
+});
+const promoted = ensureHubUserReply(hub, {
+  conversationId: conv3b.id,
+  logByteOffset: 0,
+  startedAt: startedAtB,
+  agentLog,
+});
+if (promoted.action !== 'reserved-body') {
+  console.error('expected reserved-body', promoted);
+  process.exit(12);
+}
+const afterPromote = getConversation(hub, conv3b.id);
 if (afterPromote.messages.some(isLaunchAckMessage)) {
-  console.error('ack survived promote', afterPromote.messages);
+  console.error('ack survived reserved-body', afterPromote.messages);
   process.exit(13);
 }
 if (!afterPromote.messages.some((m) => m.role === 'hub' && /finished the CP launch-ack/.test(m.content))) {
-  console.error('promoted body not in conversation', afterPromote.messages);
+  console.error('reserved body not in conversation', afterPromote.messages);
   process.exit(14);
 }
 // idempotent second call
 const again = ensureHubUserReply(hub, {
-  conversationId: conv3.id,
-  logByteOffset: offset,
-  startedAt,
+  conversationId: conv3b.id,
+  logByteOffset: 0,
+  startedAt: startedAtB,
   agentLog,
 });
-if (again.action !== 'ok-existing' && again.action !== 'skip') {
-  // pending cleared → may skip-no pending path via ok-existing
-  if (again.action !== 'ok-existing') {
-    // still must not double-post hub messages
-  }
-}
 const hubCount = afterPromote.messages.filter((m) => m.role === 'hub').length;
-const afterAgain = getConversation(hub, conv3.id);
+const afterAgain = getConversation(hub, conv3b.id);
 const hubCount2 = afterAgain.messages.filter((m) => m.role === 'hub').length;
 if (hubCount2 !== hubCount) {
-  console.error('double promote', hubCount, hubCount2);
+  console.error('double reserved-body delivery', hubCount, hubCount2, again);
   process.exit(15);
 }
 

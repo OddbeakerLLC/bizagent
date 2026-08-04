@@ -422,7 +422,20 @@ function currentState(config, session) {
   });
   // Enterprise hook: filter roster by seat/ownership (identity when plugin off).
   agents = applyFilterAgents(config.enterprise, agents, session || null);
-  return { agents, org: config.registry.org || "" };
+  const out = { agents, org: config.registry.org || "" };
+  if (
+    config.enterprise &&
+    config.enterprise.active &&
+    session
+  ) {
+    out.enterprise = {
+      enabled: true,
+      user_id: session.user_id || null,
+      role: session.role || null,
+      username: session.username || null,
+    };
+  }
+  return out;
 }
 
 function getAgentDetail(hub, slug) {
@@ -480,19 +493,20 @@ function getAgentDetail(hub, slug) {
 function syncUserInbox(config) {
   // Returns numeric relayed count. Also push the specific convs that were relayed
   // (prefer updated conv id over only the active file).
-  const inbox = path.join(config.hub, 'user', 'inbox');
+  const { listHumanInboxes } = require('./lib/conversations');
   let preIds = [];
   try {
-    preIds = fs.readdirSync(inbox)
-      .filter((f) => f.endsWith('.md'))
-      .map((f) => {
-        try {
-          const t = fs.readFileSync(path.join(inbox, f), 'utf8');
-          const m = t.match(/^conversation_id:\s*(\S+)/m);
-          return m ? m[1] : null;
-        } catch (_) { return null; }
-      })
-      .filter(Boolean);
+    for (const { inboxDir } of listHumanInboxes(config.hub)) {
+      try {
+        for (const f of fs.readdirSync(inboxDir).filter((n) => n.endsWith('.md'))) {
+          try {
+            const t = fs.readFileSync(path.join(inboxDir, f), 'utf8');
+            const m = t.match(/^conversation_id:\s*(\S+)/m);
+            if (m) preIds.push(m[1]);
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
   } catch (_) {}
   const result = readUserInboxMessages(config.hub);
   const count = typeof result === 'number' ? result : Number((result && result.relayed) || 0);
@@ -666,7 +680,8 @@ async function handleApi(config, req, res) {
   );
   if (pluginRoute && pluginRoute.auth === false) {
     try {
-      return await pluginRoute.handler(req, res, config);
+      req.params = pluginRoute.params || {};
+      return await pluginRoute.handler(req, res, config, pluginRoute.params || {});
     } catch (err) {
       return send(res, 500, { error: err.message || "plugin route error" });
     }
@@ -676,7 +691,8 @@ async function handleApi(config, req, res) {
 
   if (pluginRoute) {
     try {
-      return await pluginRoute.handler(req, res, config);
+      req.params = pluginRoute.params || {};
+      return await pluginRoute.handler(req, res, config, pluginRoute.params || {});
     } catch (err) {
       return send(res, 500, { error: err.message || "plugin route error" });
     }
@@ -745,12 +761,12 @@ async function handleApi(config, req, res) {
   }
 
   if (url.pathname === "/api/conversations" && req.method === "GET") {
-    return send(res, 200, listConversations(config.hub));
+    return send(res, 200, listConversations(config.hub, req.session));
   }
 
   if (url.pathname === "/api/conversations" && req.method === "POST") {
     const body = await parseBody(req);
-    return send(res, 200, createConversation(config.hub, body.name));
+    return send(res, 200, createConversation(config.hub, body.name, req.session));
   }
 
   if (url.pathname === "/api/profile" && req.method === "GET") {
@@ -827,11 +843,11 @@ async function handleApi(config, req, res) {
   );
   if (conversationMatch && req.method === "GET") {
     const id = decodeURIComponent(conversationMatch[1]);
-    const conv = getConversation(config.hub, id);
+    const conv = getConversation(config.hub, id, req.session);
     if (!conv) return send(res, 404, { error: "conversation not found" });
     // Console poll / open: keep this conversation active so hub→user mail
     // missing conversation_id can be stamped on route and relay into chat.
-    setActiveConversation(config.hub, id);
+    setActiveConversation(config.hub, id, req.session);
     return send(res, 200, conv);
   }
 
@@ -841,9 +857,9 @@ async function handleApi(config, req, res) {
   );
   if (convStreamMatch && req.method === "GET") {
     const id = decodeURIComponent(convStreamMatch[1]);
-    const conv = getConversation(config.hub, id);
+    const conv = getConversation(config.hub, id, req.session);
     if (!conv) return send(res, 404, { error: "conversation not found" });
-    setActiveConversation(config.hub, id);
+    setActiveConversation(config.hub, id, req.session);
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -858,10 +874,10 @@ async function handleApi(config, req, res) {
 
   if (conversationMatch && req.method === "DELETE") {
     const id = decodeURIComponent(conversationMatch[1]);
-    if (!getConversation(config.hub, id)) {
+    if (!getConversation(config.hub, id, req.session)) {
       return send(res, 404, { error: "conversation not found" });
     }
-    if (!deleteConversation(config.hub, id)) {
+    if (!deleteConversation(config.hub, id, req.session)) {
       return send(res, 500, { error: "could not delete conversation" });
     }
     didChangeState();
@@ -875,12 +891,16 @@ async function handleApi(config, req, res) {
     const start = Date.now();
     const body = await parseBody(req);
     const content = body.content || "";
+    // PTL-only: browser may only write hub inbox via this path (never agents/*/inbox).
     const id = shouldStartNewConversation(content)
-      ? createConversation(config.hub, conversationNameFromContent(content)).id
+      ? createConversation(config.hub, conversationNameFromContent(content), req.session).id
       : decodeURIComponent(messageMatch[1]);
-    writeHubInboxMessage(config.hub, content, id);
+    if (!getConversation(config.hub, id, req.session) && !shouldStartNewConversation(content)) {
+      return send(res, 404, { error: "conversation not found" });
+    }
+    writeHubInboxMessage(config.hub, content, id, req.session);
     const conv = appendMessage(config.hub, id, "user", content);
-    setActiveConversation(config.hub, id);
+    setActiveConversation(config.hub, id, req.session);
 
     logEvent(config.hub, {
       event: 'user_message_received',
@@ -952,6 +972,33 @@ function createServer(config) {
       );
       return;
     }
+    // Enterprise package static assets (additive panels) under /enterprise/*
+    if (
+      req.url.startsWith('/enterprise/') &&
+      config.enterprise &&
+      config.enterprise.active &&
+      config.enterprise.module
+    ) {
+      try {
+        const entRoot =
+          (config.registry.settings.enterprise &&
+            config.registry.settings.enterprise.package_path) ||
+          process.env.BIZAGENT_ENTERPRISE_PATH ||
+          '';
+        if (entRoot) {
+          const rel = decodeURIComponent(req.url.split('?')[0].replace(/^\/enterprise\//, ''));
+          const file = path.resolve(path.join(entRoot, 'ui', rel));
+          const uiRoot = path.resolve(path.join(entRoot, 'ui'));
+          if (file.startsWith(uiRoot + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
+            const ext = path.extname(file).toLowerCase();
+            const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.svg': 'image/svg+xml' };
+            res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream' });
+            fs.createReadStream(file).pipe(res);
+            return;
+          }
+        }
+      } catch (_) {}
+    }
     if (!serveStatic(req, res)) send(res, 404, "not found");
   });
 
@@ -970,19 +1017,28 @@ function createServer(config) {
         return;
       }
       // Cookie/session auth identical to requireAuth (no body parsing here).
-      if (!hasAuth(config.hub)) {
+      const provider = authProvider(config);
+      const has =
+        provider && typeof provider.hasAuth === 'function'
+          ? provider.hasAuth(config.hub)
+          : hasAuth(config.hub);
+      if (!has) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
       }
       const cookies = parseCookies(req.headers.cookie);
-      const session = getSession(config.hub, cookies.bizagent_session);
+      const session =
+        provider && typeof provider.getSession === 'function'
+          ? provider.getSession(config.hub, cookies.bizagent_session)
+          : getSession(config.hub, cookies.bizagent_session);
       if (!session) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
       }
       const username = session.username || 'operator';
+      const sessionFull = { id: cookies.bizagent_session, ...session };
 
       wss.handleUpgrade(req, socket, head, (ws) => {
         const meta = getClientMeta(ws);
@@ -997,12 +1053,12 @@ function createServer(config) {
               meta.subscribed.add('agents');
               addWsAgentsClient(ws);
               // Immediate snapshot on subscribe (and reconnect)
-              try { wsSend(ws, { feed: 'agents', snapshot: currentState(config) }); } catch (_) {}
+              try { wsSend(ws, { feed: 'agents', snapshot: currentState(config, sessionFull) }); } catch (_) {}
             } else if (feed.startsWith('conversation:')) {
               const id = feed.slice('conversation:'.length);
               // Conversation visibility gate (OSS = any existing conv; Enterprise = ownership/ACL).
               // We validate the conv exists for this hub; per-user scoping is a documented hook.
-              const conv = getConversation(config.hub, id);
+              const conv = getConversation(config.hub, id, sessionFull);
               if (!conv) {
                 wsSend(ws, { feed, error: 'not found' });
                 return;
