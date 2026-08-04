@@ -1023,57 +1023,6 @@ document.getElementById('messageInput').addEventListener('keydown', (event) => {
   }
 });
 
-async function refreshObservability() {
-  try {
-    const data = await api('/api/observability');
-    const container = document.getElementById('observabilityContent');
-    let html = '<h3>Recent Events (last 50)</h3><table class="observability-table"><tr><th>Time</th><th>Event</th><th>Duration</th><th>Details</th></tr>';
-
-    data.recent_events.forEach(e => {
-      const time = e.ts ? e.ts.split('T')[1].slice(0,8) : '—';
-      const duration = e.duration_ms ? e.duration_ms + 'ms' : '—';
-      const details = e.conversation_id ? `conv=${e.conversation_id}` : 
-                     (e.slug ? `slug=${e.slug}` : JSON.stringify(e).slice(0,60));
-      html += `<tr><td>${time}</td><td>${e.event || 'event'}</td><td>${duration}</td><td>${details}</td></tr>`;
-    });
-
-    html += '</table>';
-    container.innerHTML = html;
-  } catch (err) {
-    document.getElementById('observabilityContent').innerHTML = `<p style="color:red">Error loading observability: ${err.message}</p>`;
-  }
-}
-
-// Add observability tab to navigation (safe for test environment).
-// Must preserve ordering: do not call originalBoot without await; it is async.
-const originalBoot = boot || (async function() {});
-boot = async function() {
-  if (typeof originalBoot === 'function') {
-    await originalBoot();
-  }
-
-  // Only run DOM code in real browser
-  if (typeof document === 'undefined') return;
-
-  // Add observability tab button
-  if (!document.getElementById('observabilityTabBtn')) {
-    const tabs = document.querySelector('.tabs') || document.createElement('div');
-    const btn = document.createElement('button');
-    btn.id = 'observabilityTabBtn';
-    btn.textContent = 'Observability';
-    btn.onclick = () => {
-      document.querySelectorAll('.tab-content').forEach(el => el.hidden = true);
-      document.getElementById('observabilityTab').hidden = false;
-      refreshObservability();
-    };
-    if (tabs.parentNode) {
-      tabs.parentNode.insertBefore(btn, tabs.nextSibling);
-    } else {
-      document.body.appendChild(btn);
-    }
-  }
-};
-
 // --- Single-channel helpers ---
 function closeAllSse() {
   try { if (stateSource) { stateSource.close(); } } catch (_) {}
