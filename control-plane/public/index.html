@@ -21,6 +21,8 @@
           <button id="deleteConversation" type="button" class="btn-secondary" title="Delete conversation" aria-label="Delete conversation">Delete</button>
         </div>
         <div class="auth-controls">
+          <button id="libraryBtn" type="button" class="btn-secondary" hidden title="Browse plans, specs, and other docs written for you">Library</button>
+          <button id="companyFilesBtn" type="button" class="btn-secondary" hidden title="Upload files to company/ for the Knowledge Stack">Company</button>
           <button id="editDisplayName" type="button" class="btn-secondary" hidden title="Change your display name">Name</button>
           <span id="authStatus" class="auth-status">Checking session...</span>
           <button id="logout" type="button" hidden>Logout</button>
@@ -39,14 +41,6 @@
         <span id="nameStatus" class="auth-status" hidden></span>
       </div>
 
-      <!-- Observability tab (Phase 0) -->
-      <div id="observabilityTab" class="tab-content" hidden>
-        <h2>Observability</h2>
-        <div id="observabilityContent">
-          <p>Loading recent events and metrics...</p>
-        </div>
-        <button onclick="refreshObservability()">Refresh</button>
-      </div>
       <div id="messages" class="messages" aria-live="polite"></div>
       <form id="composer" class="fixed-composer">
         <textarea id="messageInput" rows="2" placeholder="Message the hub"></textarea>
@@ -71,6 +65,81 @@
       <div class="modal-footer">
         <button id="modalCancel" type="button" class="btn-secondary">Cancel</button>
         <button id="modalSave" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="libraryModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="libraryModalTitle">
+    <div class="modal-content modal-content--wide modal-content--library">
+      <div class="modal-header">
+        <h3 id="libraryModalTitle">Library</h3>
+        <button id="libraryModalClose" type="button" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body library-body">
+        <p class="company-help">
+          Plans, specs, and other markdown written for you on the hub.
+          Agents should save deliverables under <code>library/</code> so you can open them here without SSH.
+        </p>
+        <div class="library-layout">
+          <div class="library-sidebar">
+            <div class="company-upload-row">
+              <label class="company-file-label btn-secondary">
+                Upload
+                <input id="libraryFileInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden>
+              </label>
+              <button id="libraryRefresh" type="button" class="btn-secondary">Refresh</button>
+            </div>
+            <ul id="libraryList" class="company-file-list library-list"></ul>
+          </div>
+          <div class="library-preview">
+            <div id="libraryPreviewTitle" class="library-preview-title">Select a document</div>
+            <div id="libraryPreviewBody" class="library-preview-body message-body">
+              <p class="company-file-empty">Nothing selected.</p>
+            </div>
+          </div>
+        </div>
+        <p id="libraryStatus" class="modal-status auth-status" hidden></p>
+      </div>
+      <div class="modal-footer">
+        <button id="libraryModalDone" type="button">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="companyModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="companyModalTitle">
+    <div class="modal-content modal-content--wide">
+      <div class="modal-header">
+        <h3 id="companyModalTitle">Company files</h3>
+        <button id="companyModalClose" type="button" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="company-help">
+          Upload docs into <code>company/</code> on the hub for the weekly Knowledge Stack.
+          Use this when you cannot reach the hub filesystem (remote server / VPN).
+        </p>
+        <div class="company-upload-row">
+          <label for="companySubdir">Folder</label>
+          <select id="companySubdir">
+            <option value="">company/ (root)</option>
+            <option value="news">company/news/</option>
+            <option value="incidents">company/incidents/</option>
+            <option value="uploads">company/uploads/</option>
+          </select>
+          <label class="company-file-label btn-secondary">
+            Choose file
+            <input id="companyFileInput" type="file" hidden>
+          </label>
+          <label class="company-overwrite">
+            <input id="companyOverwrite" type="checkbox"> Overwrite if exists
+          </label>
+        </div>
+        <p id="companyStatus" class="modal-status auth-status" hidden></p>
+        <div class="company-list-head">Files on hub</div>
+        <ul id="companyFileList" class="company-file-list"></ul>
+      </div>
+      <div class="modal-footer">
+        <button id="companyRefresh" type="button" class="btn-secondary">Refresh</button>
+        <button id="companyModalDone" type="button">Done</button>
       </div>
     </div>
   </div>

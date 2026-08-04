@@ -54,8 +54,14 @@ function setAuthenticated(isAuthenticated, message) {
   document.getElementById('authPanel').hidden = isAuthenticated;
   document.getElementById('logout').hidden = !isAuthenticated;
   document.getElementById('editDisplayName').hidden = !isAuthenticated;
+  const companyBtn = document.getElementById('companyFilesBtn');
+  if (companyBtn) companyBtn.hidden = !isAuthenticated;
+  const libraryBtn = document.getElementById('libraryBtn');
+  if (libraryBtn) libraryBtn.hidden = !isAuthenticated;
   if (!isAuthenticated) {
     document.getElementById('namePanel').hidden = true;
+    if (typeof hideCompanyModal === 'function') hideCompanyModal();
+    if (typeof hideLibraryModal === 'function') hideLibraryModal();
   }
   setAuthStatus(message || (isAuthenticated ? 'Signed in' : 'Login required'), isAuthenticated ? 'ok' : 'warn');
 }
@@ -834,6 +840,251 @@ async function boot() {
   }
 }
 
+function setLibraryStatus(message, kind = 'neutral') {
+  const status = document.getElementById('libraryStatus');
+  if (!status) return;
+  if (!message) {
+    status.hidden = true;
+    status.textContent = '';
+    return;
+  }
+  status.hidden = false;
+  status.textContent = message;
+  status.dataset.kind = kind;
+}
+
+function hideLibraryModal() {
+  const modal = document.getElementById('libraryModal');
+  if (modal) modal.hidden = true;
+  setLibraryStatus('');
+  const input = document.getElementById('libraryFileInput');
+  if (input) input.value = '';
+}
+
+async function openLibraryDoc(id) {
+  const titleEl = document.getElementById('libraryPreviewTitle');
+  const bodyEl = document.getElementById('libraryPreviewBody');
+  if (!bodyEl) return;
+  bodyEl.innerHTML = '<p class="company-file-empty">Loading…</p>';
+  try {
+    const doc = await api(`/api/library/file?id=${encodeURIComponent(id)}`);
+    if (titleEl) {
+      titleEl.textContent = doc.title || doc.path || id;
+    }
+    bodyEl.innerHTML = renderMarkdown(doc.content || '');
+    // highlight selected
+    document.querySelectorAll('.library-list-item').forEach((el) => {
+      el.classList.toggle('is-selected', el.dataset.id === id);
+    });
+  } catch (err) {
+    bodyEl.innerHTML = `<p class="company-file-empty">${escapeHtml(err.message || 'Failed to load')}</p>`;
+  }
+}
+
+async function refreshLibraryList(selectId) {
+  const list = document.getElementById('libraryList');
+  if (!list) return;
+  list.innerHTML = '<li class="company-file-empty">Loading…</li>';
+  try {
+    const data = await api('/api/library');
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    list.innerHTML = '';
+    if (entries.length === 0) {
+      list.innerHTML = '<li class="company-file-empty">Library is empty. Upload a .md or ask the hub to save a plan here.</li>';
+      return;
+    }
+    for (const e of entries) {
+      const li = document.createElement('li');
+      li.className = 'company-file-item library-list-item';
+      li.dataset.id = e.id;
+      const when = e.created_at ? new Date(e.created_at).toLocaleString() : '';
+      li.innerHTML = `<span class="company-file-path">${escapeHtml(e.title || e.path || e.id)}</span>`
+        + `<span class="company-file-meta">${escapeHtml(when)}</span>`;
+      li.addEventListener('click', () => openLibraryDoc(e.id));
+      list.appendChild(li);
+    }
+    const pick = selectId || (entries[0] && entries[0].id);
+    if (pick) await openLibraryDoc(pick);
+  } catch (err) {
+    list.innerHTML = '';
+    setLibraryStatus(err.message || 'Failed to list library', 'warn');
+  }
+}
+
+async function showLibraryModal() {
+  const modal = document.getElementById('libraryModal');
+  if (!modal) return;
+  modal.hidden = false;
+  setLibraryStatus('');
+  await refreshLibraryList();
+}
+
+async function uploadLibraryFile(file) {
+  if (!file) return;
+  setLibraryStatus(`Uploading ${file.name}…`, 'pending');
+  try {
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    fd.append('title', file.name.replace(/\.[^.]+$/, ''));
+    const res = await fetch('/api/library', {
+      method: 'POST',
+      body: fd,
+      credentials: 'same-origin',
+    });
+    const text = await res.text();
+    let body = {};
+    try { body = JSON.parse(text); } catch (_e) { body = { error: text }; }
+    if (!res.ok) throw new Error(body.error || `Upload failed (${res.status})`);
+    setLibraryStatus(`Added ${body.entry && body.entry.path}`, 'ok');
+    await refreshLibraryList(body.entry && body.entry.id);
+  } catch (err) {
+    setLibraryStatus(err.message || 'Upload failed', 'warn');
+  }
+}
+
+function bindLibraryModal() {
+  const modal = document.getElementById('libraryModal');
+  if (!modal || modal.dataset.bound === '1') return;
+  modal.dataset.bound = '1';
+  const openBtn = document.getElementById('libraryBtn');
+  if (openBtn) openBtn.addEventListener('click', () => showLibraryModal());
+  const close = () => hideLibraryModal();
+  const closeBtn = document.getElementById('libraryModalClose');
+  const doneBtn = document.getElementById('libraryModalDone');
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  if (doneBtn) doneBtn.addEventListener('click', close);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) close();
+  });
+  const refreshBtn = document.getElementById('libraryRefresh');
+  if (refreshBtn) refreshBtn.addEventListener('click', () => refreshLibraryList());
+  const fileInput = document.getElementById('libraryFileInput');
+  if (fileInput) {
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (file) await uploadLibraryFile(file);
+      fileInput.value = '';
+    });
+  }
+}
+
+// --- Company files (Knowledge Stack inputs on remote hubs) ---
+function setCompanyStatus(message, kind = 'neutral') {
+  const status = document.getElementById('companyStatus');
+  if (!status) return;
+  if (!message) {
+    status.hidden = true;
+    status.textContent = '';
+    return;
+  }
+  status.hidden = false;
+  status.textContent = message;
+  status.dataset.kind = kind;
+}
+
+function hideCompanyModal() {
+  const modal = document.getElementById('companyModal');
+  if (modal) modal.hidden = true;
+  setCompanyStatus('');
+  const input = document.getElementById('companyFileInput');
+  if (input) input.value = '';
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function refreshCompanyFileList() {
+  const list = document.getElementById('companyFileList');
+  if (!list) return;
+  list.innerHTML = '<li class="company-file-empty">Loading…</li>';
+  try {
+    const data = await api('/api/company/files');
+    const files = Array.isArray(data.files) ? data.files : [];
+    list.innerHTML = '';
+    if (files.length === 0) {
+      list.innerHTML = '<li class="company-file-empty">No files in company/ yet.</li>';
+      return;
+    }
+    for (const f of files.slice(0, 100)) {
+      const li = document.createElement('li');
+      li.className = 'company-file-item';
+      const when = f.mtime ? new Date(f.mtime).toLocaleString() : '';
+      li.innerHTML = `<span class="company-file-path">${escapeHtml(f.path || f.name || '')}</span>`
+        + `<span class="company-file-meta">${formatBytes(f.size || 0)} · ${escapeHtml(when)}</span>`;
+      list.appendChild(li);
+    }
+  } catch (err) {
+    list.innerHTML = '';
+    setCompanyStatus(err.message || 'Failed to list files', 'warn');
+  }
+}
+
+async function showCompanyModal() {
+  const modal = document.getElementById('companyModal');
+  if (!modal) return;
+  modal.hidden = false;
+  setCompanyStatus('');
+  await refreshCompanyFileList();
+}
+
+async function uploadCompanyFile(file) {
+  if (!file) return;
+  const subdirEl = document.getElementById('companySubdir');
+  const overwriteEl = document.getElementById('companyOverwrite');
+  const subdir = subdirEl ? subdirEl.value : '';
+  const overwrite = overwriteEl ? overwriteEl.checked : false;
+  setCompanyStatus(`Uploading ${file.name}…`, 'pending');
+  try {
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    if (subdir) fd.append('subdir', subdir);
+    if (overwrite) fd.append('overwrite', 'true');
+    // Don't set Content-Type — browser sets multipart boundary.
+    const res = await fetch('/api/company/files', {
+      method: 'POST',
+      body: fd,
+      credentials: 'same-origin',
+    });
+    const text = await res.text();
+    let body = {};
+    try { body = JSON.parse(text); } catch (_e) { body = { error: text }; }
+    if (!res.ok) throw new Error(body.error || `Upload failed (${res.status})`);
+    setCompanyStatus(`Saved company/${body.path} (${formatBytes(body.size || file.size)})`, 'ok');
+    await refreshCompanyFileList();
+  } catch (err) {
+    setCompanyStatus(err.message || 'Upload failed', 'warn');
+  }
+}
+
+function bindCompanyModal() {
+  const modal = document.getElementById('companyModal');
+  if (!modal || modal.dataset.bound === '1') return;
+  modal.dataset.bound = '1';
+  const openBtn = document.getElementById('companyFilesBtn');
+  if (openBtn) openBtn.addEventListener('click', () => showCompanyModal());
+  const close = () => hideCompanyModal();
+  const closeBtn = document.getElementById('companyModalClose');
+  const doneBtn = document.getElementById('companyModalDone');
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  if (doneBtn) doneBtn.addEventListener('click', close);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) close();
+  });
+  const refreshBtn = document.getElementById('companyRefresh');
+  if (refreshBtn) refreshBtn.addEventListener('click', () => refreshCompanyFileList());
+  const fileInput = document.getElementById('companyFileInput');
+  if (fileInput) {
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (file) await uploadCompanyFile(file);
+      fileInput.value = '';
+    });
+  }
+}
+
 document.getElementById('login').addEventListener('click', () => {
   if (needsSetup) setup();
   else login();
@@ -842,6 +1093,8 @@ document.getElementById('logout').addEventListener('click', async () => {
   await api('/api/logout', { method: 'POST', body: '{}' }).catch(() => {});
   setAuthenticated(false, 'Signed out');
 });
+bindCompanyModal();
+bindLibraryModal();
 document.getElementById('newConversation').addEventListener('click', async () => {
   if (!displayName) {
     showNamePanel(true);
@@ -903,58 +1156,7 @@ document.getElementById('messageInput').addEventListener('keydown', (event) => {
   }
 });
 
-async function refreshObservability() {
-  try {
-    const data = await api('/api/observability');
-    const container = document.getElementById('observabilityContent');
-    let html = '<h3>Recent Events (last 50)</h3><table class="observability-table"><tr><th>Time</th><th>Event</th><th>Duration</th><th>Details</th></tr>';
 
-    data.recent_events.forEach(e => {
-      const time = e.ts ? e.ts.split('T')[1].slice(0,8) : '—';
-      const duration = e.duration_ms ? e.duration_ms + 'ms' : '—';
-      const details = e.conversation_id ? `conv=${e.conversation_id}` : 
-                     (e.slug ? `slug=${e.slug}` : JSON.stringify(e).slice(0,60));
-      html += `<tr><td>${time}</td><td>${e.event || 'event'}</td><td>${duration}</td><td>${details}</td></tr>`;
-    });
-
-    html += '</table>';
-    container.innerHTML = html;
-  } catch (err) {
-    document.getElementById('observabilityContent').innerHTML = `<p style="color:red">Error loading observability: ${err.message}</p>`;
-  }
-}
-
-// Add observability tab to navigation (safe for test environment).
-// Must preserve ordering: do not call originalBoot without await; it is async.
-const originalBoot = boot || (async function() {});
-boot = async function() {
-  if (typeof originalBoot === 'function') {
-    await originalBoot();
-  }
-
-  // Only run DOM code in real browser
-  if (typeof document === 'undefined') return;
-
-  // Add observability tab button
-  if (!document.getElementById('observabilityTabBtn')) {
-    const tabs = document.querySelector('.tabs') || document.createElement('div');
-    const btn = document.createElement('button');
-    btn.id = 'observabilityTabBtn';
-    btn.textContent = 'Observability';
-    btn.onclick = () => {
-      document.querySelectorAll('.tab-content').forEach(el => el.hidden = true);
-      document.getElementById('observabilityTab').hidden = false;
-      refreshObservability();
-    };
-    if (tabs.parentNode) {
-      tabs.parentNode.insertBefore(btn, tabs.nextSibling);
-    } else {
-      document.body.appendChild(btn);
-    }
-  }
-};
-
-// --- Single-channel helpers ---
 function closeAllSse() {
   try { if (stateSource) { stateSource.close(); } } catch (_) {}
   try { if (convSource) { convSource.close(); } } catch (_) {}
