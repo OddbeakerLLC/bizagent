@@ -215,8 +215,8 @@ if (fs.existsSync(path.join(entHome, 'index.js'))) {
       },
     },
   });
-  if (!real.active || !real.info || real.info.phase !== 0) {
-    console.error('bizagent-enterprise scaffold should load active phase 0', real);
+  if (!real.active || !real.info || !(real.info.phase >= 0)) {
+    console.error('bizagent-enterprise scaffold should load active (phase >= 0)', real);
     process.exit(7);
   }
 }
@@ -1272,8 +1272,8 @@ if (fs.existsSync(turnsDir)) {
   }
 }
 
-// --- safety net: promote stdout blob when no outbox (stdout-only simulated hub) ---
-const conv3 = createConversation(hub, 'Promote');
+// --- always-warm: stdout blob alone must NOT promote; empty reserved body → hard fail ---
+const conv3 = createConversation(hub, 'NoPromote');
 postLaunchAck(hub, conv3.id);
 const agentLog = path.join(hub, 'logs', 'dispatch-hub.log');
 const prefix = 'old log line before this turn\n\n';
@@ -1286,7 +1286,6 @@ fs.appendFileSync(agentLog, [
   '**Agent B** finished the CP launch-ack work. Ready to verify live.',
   '',
 ].join('\n'));
-// Ensure empty reserved body so promote path is exercised
 prepareReservedReplyBody(hub, conv3.id);
 recordPendingHubTurn(hub, {
   conversationId: conv3.id,
@@ -1294,24 +1293,29 @@ recordPendingHubTurn(hub, {
   startedAt,
   agentLog,
 });
-const promoted = ensureHubUserReply(hub, {
+const noPromote = ensureHubUserReply(hub, {
   conversationId: conv3.id,
   logByteOffset: offset,
   startedAt,
   agentLog,
+  exitCode: 0,
 });
-if (promoted.action !== 'promoted') {
-  console.error('expected promote', promoted);
+if (noPromote.action !== 'failed') {
+  console.error('expected hard-fail (no stdout promote in always-warm)', noPromote);
   process.exit(12);
 }
-const afterPromote = getConversation(hub, conv3.id);
-if (afterPromote.messages.some(isLaunchAckMessage)) {
-  console.error('ack survived promote', afterPromote.messages);
+const afterNoPromote = getConversation(hub, conv3.id);
+if (afterNoPromote.messages.some(isLaunchAckMessage)) {
+  console.error('ack survived hard fail', afterNoPromote.messages);
   process.exit(13);
 }
-if (!afterPromote.messages.some((m) => m.role === 'hub' && /finished the CP launch-ack/.test(m.content))) {
-  console.error('promoted body not in conversation', afterPromote.messages);
+if (afterNoPromote.messages.some((m) => m.role === 'hub' && /finished the CP launch-ack/.test(m.content))) {
+  console.error('stdout must not be promoted into hub reply', afterNoPromote.messages);
   process.exit(14);
+}
+if (!afterNoPromote.messages.some((m) => m.role === 'status' && m.kind === STATUS_ERROR_KIND)) {
+  console.error('expected status error when reserved body empty', afterNoPromote.messages);
+  process.exit(15);
 }
 // idempotent second call
 const again = ensureHubUserReply(hub, {
@@ -1320,17 +1324,14 @@ const again = ensureHubUserReply(hub, {
   startedAt,
   agentLog,
 });
-if (again.action !== 'ok-existing' && again.action !== 'skip') {
-  // pending cleared → may skip-no pending path via ok-existing
-  if (again.action !== 'ok-existing') {
-    // still must not double-post hub messages
-  }
+if (again.action !== 'ok-existing' && again.action !== 'ok-failed-already' && again.action !== 'skip') {
+  // pending cleared — must not double-post errors
 }
-const hubCount = afterPromote.messages.filter((m) => m.role === 'hub').length;
+const statusErrCount = afterNoPromote.messages.filter((m) => m.role === 'status' && m.kind === STATUS_ERROR_KIND).length;
 const afterAgain = getConversation(hub, conv3.id);
-const hubCount2 = afterAgain.messages.filter((m) => m.role === 'hub').length;
-if (hubCount2 !== hubCount) {
-  console.error('double promote', hubCount, hubCount2);
+const statusErrCount2 = afterAgain.messages.filter((m) => m.role === 'status' && m.kind === STATUS_ERROR_KIND).length;
+if (statusErrCount2 !== statusErrCount) {
+  console.error('double hard-fail post', statusErrCount, statusErrCount2);
   process.exit(15);
 }
 
@@ -2124,31 +2125,32 @@ if (fs.existsSync(path.join(cwd, 'AGENT.md'))) {
   process.exit(8);
 }
 
-// promptFlag from cli.json (not legacy .cli flags)
-const settings = getCliSettings(hub, {
-  grok: { executable: 'grok', promptFlag: '--prompt-file', flags: { extra: '--always-approve' } },
-}, { cli: 'claude', hubCliName: 'claude' }, 'grok', '');
-if (settings.promptFlag !== '--prompt-file') {
-  console.error('getCliSettings ignored promptFlag:', settings.promptFlag);
+// Provider catalog → always bizagent-agent (-f / -y); provider name is not a vendor CLI.
+const catalog = {
+  _runtime: { executable: 'scripts/bizagent-agent', promptFlag: '-f', flags: { extra: '-y' } },
+  grok: { baseURL: 'https://api.x.ai/v1', keyEnv: 'XAI_API_KEY', models: ['grok-4.5'] },
+  claude: { baseURL: 'https://api.anthropic.com/v1/', keyEnv: 'ANTHROPIC_API_KEY', models: ['claude-sonnet-4-6'] },
+};
+const settings = getCliSettings(hub, catalog, {
+  cli: 'claude', hubCliName: 'claude', hubProvider: 'grok',
+}, 'grok', '');
+if (settings.cli !== 'scripts/bizagent-agent') {
+  console.error('expected bizagent-agent executable:', settings.cli);
   process.exit(9);
 }
-// legacy `prompt` key in cli.json is still honored; for grok, -p → --prompt-file
-const legacy = getCliSettings(hub, {
-  grok: { executable: 'grok', prompt: '-p', flags: { extra: '' } },
-}, { cli: 'claude', hubCliName: 'claude' }, 'grok', '');
-if (legacy.promptFlag !== '--prompt-file') {
-  console.error('legacy prompt key / grok -p safety net broken:', legacy.promptFlag);
+if (settings.promptFlag !== '-f') {
+  console.error('getCliSettings ignored runtime promptFlag:', settings.promptFlag);
+  process.exit(9);
+}
+if (!/(^|\s)-y(\s|$)/.test(settings.extraArgs || '')) {
+  console.error('expected -y auto-approve in extraArgs:', settings.extraArgs);
   process.exit(10);
 }
-if (!/--always-approve/.test(legacy.extraArgs || '')) {
-  console.error('grok should force --always-approve for headless tool use:', legacy.extraArgs);
-  process.exit(10);
-}
-const legacyClaude = getCliSettings(hub, {
-  claude: { executable: 'claude', prompt: '-p', flags: { extra: '' } },
-}, { cli: 'grok', hubCliName: 'grok' }, 'claude', '');
-if (legacyClaude.promptFlag !== '-p') {
-  console.error('legacy prompt key broken for claude:', legacyClaude.promptFlag);
+const viaClaude = getCliSettings(hub, catalog, {
+  cli: 'grok', hubCliName: 'grok', hubProvider: 'claude',
+}, 'claude', '');
+if (viaClaude.cli !== 'scripts/bizagent-agent' || viaClaude.promptFlag !== '-f') {
+  console.error('claude provider should still launch bizagent-agent:', viaClaude);
   process.exit(10);
 }
 
@@ -2664,5 +2666,118 @@ NODE
   then
     fail "delete conversation / display name profile failed"
   fi
+
+# Provider failure classification + operator-visible agent error alerts
+[ -f "$ROOT/control-plane/lib/provider-errors.js" ] \
+  || fail "provider-errors.js missing"
+grep -q "notifyAgentExitFromLogs" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing notifyAgentExitFromLogs (shell EXIT hook)"
+grep -q "notifyAgentExitFromLogs," "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "notifyAgentExitFromLogs not exported from dispatcher"
+grep -q "used all available credits" "$ROOT/control-plane/lib/hub-turn-safety.js" \
+  || fail "hub-turn-safety hardFail does not detect credit exhaustion"
+if ! node - "$ROOT" <<'NODE'
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const root = process.argv[2];
+const {
+  classifyProviderError,
+  formatProviderFailureMessage,
+} = require(path.join(root, 'control-plane/lib/provider-errors'));
+const {
+  notifyAgentExitFromLogs,
+  recordAgentError,
+} = require(path.join(root, 'control-plane/lib/dispatcher'));
+const {
+  createConversation,
+  getConversation,
+  setActiveConversation,
+} = require(path.join(root, 'control-plane/lib/conversations'));
+
+const creditLine =
+  'Error: 403 "Your team has either used all available credits or reached its monthly spending limit. To continue making API requests, please purchase more credits or raise your spending limit."';
+const c = classifyProviderError(creditLine);
+if (!c || c.kind !== 'credits') {
+  console.error('expected credits classification', c);
+  process.exit(1);
+}
+const auth = classifyProviderError('Error: 401 Incorrect API key provided');
+if (!auth || auth.kind !== 'auth') {
+  console.error('expected auth classification', auth);
+  process.exit(2);
+}
+const rate = classifyProviderError('Error: 429 Too Many Requests — rate limit');
+if (!rate || rate.kind !== 'rate_limit') {
+  console.error('expected rate_limit', rate);
+  process.exit(3);
+}
+const msg = formatProviderFailureMessage({
+  slug: 'bizagent',
+  exitCode: 1,
+  text: creditLine,
+  classified: c,
+});
+if (!/credits|spending/i.test(msg) || !/bizagent/.test(msg)) {
+  console.error('format message missing bits', msg);
+  process.exit(4);
+}
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-credit-alert-'));
+fs.mkdirSync(path.join(hub, '.bizagent'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'journal'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'user', 'inbox'), { recursive: true });
+const conv = createConversation(hub, 'Credit test');
+setActiveConversation(hub, conv.id);
+fs.writeFileSync(
+  path.join(hub, 'logs', 'dispatch-bizagent.stderr'),
+  creditLine + '\n',
+  'utf8',
+);
+
+notifyAgentExitFromLogs(hub, 'bizagent', 1);
+const after = getConversation(hub, conv.id);
+const errMsgs = (after.messages || []).filter(
+  (m) => m.role === 'status' && m.kind === 'error',
+);
+if (errMsgs.length !== 1) {
+  console.error('expected one status error in chat', after.messages);
+  process.exit(5);
+}
+if (!/credits|spending/i.test(errMsgs[0].content)) {
+  console.error('status error content not credit-related', errMsgs[0].content);
+  process.exit(6);
+}
+// Dedup: second notify within window must not double-post
+notifyAgentExitFromLogs(hub, 'bizagent', 1);
+const after2 = getConversation(hub, conv.id);
+const errMsgs2 = (after2.messages || []).filter(
+  (m) => m.role === 'status' && m.kind === 'error',
+);
+if (errMsgs2.length !== 1) {
+  console.error('dedup failed; got', errMsgs2.length);
+  process.exit(7);
+}
+const journal = fs.readFileSync(
+  path.join(hub, 'journal', new Date().toISOString().slice(0, 10) + '.md'),
+  'utf8',
+);
+if (!/Incident.*bizagent/i.test(journal)) {
+  console.error('journal missing incident', journal);
+  process.exit(8);
+}
+// Export smoke
+if (typeof recordAgentError !== 'function' || typeof notifyAgentExitFromLogs !== 'function') {
+  console.error('exports missing');
+  process.exit(9);
+}
+try {
+  fs.rmSync(hub, { recursive: true, force: true });
+} catch (_e) { /* ignore */ }
+NODE
+then
+  fail "provider credit-alert checks failed"
+fi
 
 echo "  ok: control-plane"

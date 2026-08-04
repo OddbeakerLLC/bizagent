@@ -116,6 +116,33 @@ function parseToolArgs(toolCall) {
   }
 }
 
+/** One-line human progress for dispatch logs (stdout → dispatch-<slug>.log). */
+function toolProgressLine(name, args) {
+  const a = args && typeof args === 'object' ? args : {};
+  switch (name) {
+    case 'read_file':
+      return `→ read_file ${a.path || ''}`.trim();
+    case 'write_file':
+      return `→ write_file ${a.path || ''}`.trim();
+    case 'search_replace':
+      return `→ search_replace ${a.path || ''}`.trim();
+    case 'delete_file':
+      return `→ delete_file ${a.path || ''}`.trim();
+    case 'list_directory':
+      return `→ list_directory ${a.path || '.'}`.trim();
+    case 'glob_files':
+      return `→ glob_files ${a.pattern || ''}`.trim();
+    case 'grep_search':
+      return `→ grep_search ${JSON.stringify(a.pattern || '').slice(0, 60)}`.trim();
+    case 'execute_shell_command':
+      return `→ shell ${String(a.command || '').slice(0, 100)}`.trim();
+    case 'fetch_url':
+      return `→ fetch_url ${String(a.url || '').slice(0, 80)}`.trim();
+    default:
+      return `→ ${name || 'tool'}`;
+  }
+}
+
 async function runAgent(userMessage) {
   const messages = [
     {
@@ -276,7 +303,31 @@ async function interactiveLoop() {
       await interactiveLoop();
     }
   } catch (err) {
-    console.error(`Error: ${err.message || err}`);
+    // Prefer full provider body so control-plane can classify credits/auth/etc.
+    const status = err && (err.status || err.statusCode || (err.response && err.response.status));
+    const body =
+      (err && err.error && (err.error.message || JSON.stringify(err.error))) ||
+      (err && err.message) ||
+      String(err);
+    const line = status ? `Error: ${status} ${body}` : `Error: ${body}`;
+    console.error(line);
+    // Operator-facing one-liner (also lands in dispatch-*.stderr for CP alerts).
+    const lower = String(body).toLowerCase();
+    if (
+      /used all available credits|spending limit|purchase more credits|insufficient.?credit|payment required|usage balance exhausted/.test(
+        lower,
+      )
+    ) {
+      console.error(
+        'FATAL: LLM API credits / spending limit exhausted. Top up or raise the limit at the provider console, then retry.',
+      );
+    } else if (status === 401 || /invalid.?api.?key|unauthorized|authentication/.test(lower)) {
+      console.error(
+        'FATAL: LLM API authentication failed. Check the provider API key in `.bizagent/env`.',
+      );
+    } else if (status === 429 || /rate.?limit|too many requests/.test(lower)) {
+      console.error('FATAL: LLM API rate limit. Wait and retry, or reduce concurrency.');
+    }
     try {
       rl.close();
     } catch (_e) {
