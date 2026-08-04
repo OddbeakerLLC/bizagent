@@ -310,12 +310,29 @@ function pendingUserOutboxFor(hub, conversationId) {
 }
 
 function promoteBlobToOutbox(hub, conversationId, body, subject = 'recovered hub reply') {
+  let userId = '';
+  try {
+    const conv = getConversation(hub, conversationId);
+    if (conv && conv.user_id) userId = String(conv.user_id);
+  } catch (_e) { /* ignore */ }
+  if (!userId) {
+    try {
+      const { getActiveEnterpriseHooks, isActiveEnterprise } = require('./enterprise-plugin');
+      if (isActiveEnterprise()) {
+        const hooks = getActiveEnterpriseHooks();
+        if (typeof hooks.resolveActingUserId === 'function') {
+          userId = hooks.resolveActingUserId(hub, { conversationId }) || '';
+        }
+      }
+    } catch (_e) { /* ignore */ }
+  }
   return writeOutboxMessage(hub, {
     from: 'hub',
     to: 'user',
     subject,
     body,
     conversationId,
+    userId,
   });
 }
 

@@ -37,6 +37,7 @@ function parseArgs(argv) {
     else if (arg === '--to') opts.to = argv[++i];
     else if (arg === '--from') opts.from = argv[++i];
     else if (arg === '--subject') opts.subject = argv[++i];
+    else if (arg === '--user-id' || arg === '--user_id') opts.userId = argv[++i];
     else usage();
   }
   return opts;
@@ -108,6 +109,7 @@ async function main() {
       subject: opts.subject,
       body,
       conversationId: opts.conversation || '',
+      userId: opts.userId || '',
     });
     console.log(`wrote ${result.file}`);
     return null;

@@ -826,6 +826,7 @@ async function boot() {
     await loadConversations();
     // Subscribe after WS has had a chance; subscribe* will close SSE if WS is live.
     subscribeAgents();
+    try { loadEnterprisePanel(); } catch (_) {}
   } catch (_err) {
     if (!sessionActive && !needsSetup) {
       setAuthenticated(false, 'Login required');
@@ -1086,3 +1087,14 @@ setInterval(() => {
 }, 2000);
 
 boot();
+
+
+// Optional Enterprise additive UI (served when plugin active).
+function loadEnterprisePanel() {
+  if (document.getElementById('enterprise-panel-script')) return;
+  const s = document.createElement('script');
+  s.id = 'enterprise-panel-script';
+  s.src = '/enterprise/enterprise-panel.js';
+  s.onerror = function () { try { s.remove(); } catch (_) {} };
+  document.head.appendChild(s);
+}
