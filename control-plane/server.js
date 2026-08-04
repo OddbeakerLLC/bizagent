@@ -96,6 +96,20 @@ const {
   isAgentActive,
 } = require("./lib/dispatcher");
 const {
+  listCompanyFiles,
+  parseMultipart,
+  readRequestBuffer,
+  writeCompanyFile,
+  MAX_UPLOAD_BYTES,
+} = require("./lib/company-files");
+const {
+  addLibraryDocument,
+  ensureLibrary,
+  getLibraryEntry,
+  listLibrary,
+  MAX_BYTES: LIBRARY_MAX_BYTES,
+} = require("./lib/library");
+const {
   conversationIdsFromSafetyResults,
   setOnConversationMutated,
 } = require("./lib/hub-turn-safety");
@@ -758,6 +772,222 @@ async function handleApi(config, req, res) {
         last_tick: recentEvents.find(e => e.event === "control_plane_tick")
       }
     });
+  }
+
+  // --- Company files (Knowledge Stack inputs; for operators without hub FS access) ---
+  if (url.pathname === "/api/company/files" && req.method === "GET") {
+    try {
+      const subdir = (url.searchParams.get("subdir") || "").trim();
+      const files = listCompanyFiles(config.hub, { subdir });
+      return send(res, 200, {
+        root: "company/",
+        files,
+        max_upload_bytes: MAX_UPLOAD_BYTES,
+      });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "list failed" });
+    }
+  }
+
+  if (url.pathname === "/api/company/files" && req.method === "POST") {
+    try {
+      const ct = String(req.headers["content-type"] || "");
+      let filename = "";
+      let subdir = "";
+      let overwrite = false;
+      let buffer;
+
+      if (ct.includes("multipart/form-data")) {
+        const raw = await readRequestBuffer(req);
+        const parsed = parseMultipart(raw, ct);
+        if (!parsed.file || !parsed.file.buffer) {
+          return send(res, 400, { error: "missing file field (use name=file)" });
+        }
+        filename = parsed.fields.filename || parsed.file.filename || "upload.bin";
+        subdir = parsed.fields.subdir || "";
+        overwrite =
+          parsed.fields.overwrite === "1" ||
+          parsed.fields.overwrite === "true" ||
+          parsed.fields.overwrite === "yes";
+        buffer = parsed.file.buffer;
+      } else {
+        // JSON: { filename, subdir?, content_base64|content, overwrite? }
+        const body = await parseBody(req);
+        filename = body.filename || body.name || "";
+        subdir = body.subdir || body.dir || "";
+        overwrite = !!body.overwrite;
+        if (body.content_base64 || body.contentBase64) {
+          buffer = Buffer.from(
+            body.content_base64 || body.contentBase64,
+            "base64",
+          );
+        } else if (typeof body.content === "string") {
+          buffer = Buffer.from(body.content, "utf8");
+        } else {
+          return send(res, 400, {
+            error: "provide content_base64 or content (utf8 string)",
+          });
+        }
+      }
+
+      const written = writeCompanyFile(config.hub, {
+        filename,
+        subdir,
+        buffer,
+        overwrite,
+      });
+
+      try {
+        logEvent(config.hub, {
+          event: "company_upload",
+          status: "ok",
+          path: written.path,
+          size: written.size,
+          username: (req.session && req.session.username) || "",
+        });
+      } catch (_err) {
+        /* ignore */
+      }
+
+      // Optional [Company] journal breadcrumb for weekly KS
+      try {
+        const journalDir = path.join(config.hub, "journal");
+        fs.mkdirSync(journalDir, { recursive: true });
+        const day = new Date().toISOString().slice(0, 10);
+        const jpath = path.join(journalDir, `${day}.md`);
+        const line = `- [Company] Uploaded \`company/${written.path}\` via control plane (${written.size} bytes)\n`;
+        if (!fs.existsSync(jpath)) {
+          fs.writeFileSync(jpath, `# ${day}\n\n${line}`, "utf8");
+        } else {
+          fs.appendFileSync(jpath, line, "utf8");
+        }
+      } catch (_err) {
+        /* journal is best-effort */
+      }
+
+      return send(res, 200, {
+        ok: true,
+        path: written.path,
+        size: written.size,
+        mtime: written.mtime,
+      });
+    } catch (err) {
+      const msg = err.message || "upload failed";
+      const status = /too large|not allowed|already exists|invalid|escape|empty/i.test(
+        msg,
+      )
+        ? 400
+        : 500;
+      return send(res, status, { error: msg });
+    }
+  }
+
+  // --- Library (operator-facing plans/specs; browser viewer) ---
+  if (url.pathname === "/api/library" && req.method === "GET") {
+    try {
+      ensureLibrary(config.hub);
+      return send(res, 200, {
+        ...listLibrary(config.hub),
+        max_bytes: LIBRARY_MAX_BYTES,
+      });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "list failed" });
+    }
+  }
+
+  if (url.pathname === "/api/library/file" && req.method === "GET") {
+    try {
+      const id = (url.searchParams.get("id") || url.searchParams.get("path") || "").trim();
+      if (!id) return send(res, 400, { error: "id required" });
+      const doc = getLibraryEntry(config.hub, id);
+      return send(res, 200, doc);
+    } catch (err) {
+      const msg = err.message || "not found";
+      const status = /not found|missing/i.test(msg) ? 404 : 400;
+      return send(res, status, { error: msg });
+    }
+  }
+
+  if (url.pathname === "/api/library" && req.method === "POST") {
+    try {
+      const ct = String(req.headers["content-type"] || "");
+      let title = "";
+      let filename = "";
+      let source = "upload";
+      let buffer;
+      let overwrite = false;
+      let tags = [];
+
+      if (ct.includes("multipart/form-data")) {
+        const raw = await readRequestBuffer(req);
+        const parsed = parseMultipart(raw, ct);
+        if (!parsed.file || !parsed.file.buffer) {
+          return send(res, 400, { error: "missing file field (use name=file)" });
+        }
+        filename = parsed.fields.filename || parsed.file.filename || "document.md";
+        title = parsed.fields.title || filename;
+        source = parsed.fields.source || "upload";
+        overwrite =
+          parsed.fields.overwrite === "1" ||
+          parsed.fields.overwrite === "true";
+        if (parsed.fields.tags) {
+          tags = String(parsed.fields.tags)
+            .split(",")
+            .map((t) => t.trim())
+            .filter(Boolean);
+        }
+        buffer = parsed.file.buffer;
+      } else {
+        const body = await parseBody(req);
+        title = body.title || body.filename || body.name || "Untitled";
+        filename = body.filename || "";
+        source = body.source || "upload";
+        overwrite = !!body.overwrite;
+        tags = Array.isArray(body.tags) ? body.tags : [];
+        if (body.content_base64 || body.contentBase64) {
+          buffer = Buffer.from(
+            body.content_base64 || body.contentBase64,
+            "base64",
+          );
+        } else if (typeof body.content === "string") {
+          buffer = Buffer.from(body.content, "utf8");
+        } else {
+          return send(res, 400, {
+            error: "provide content or content_base64",
+          });
+        }
+      }
+
+      const entry = addLibraryDocument(config.hub, {
+        title,
+        filename,
+        content: buffer,
+        source,
+        tags,
+        overwrite,
+      });
+
+      try {
+        logEvent(config.hub, {
+          event: "library_add",
+          status: "ok",
+          id: entry.id,
+          path: entry.path,
+          source: entry.source,
+          username: (req.session && req.session.username) || "",
+        });
+      } catch (_err) {
+        /* ignore */
+      }
+
+      return send(res, 200, { ok: true, entry });
+    } catch (err) {
+      const msg = err.message || "library add failed";
+      const status = /too large|not allowed|invalid|empty|escape/i.test(msg)
+        ? 400
+        : 500;
+      return send(res, status, { error: msg });
+    }
   }
 
   if (url.pathname === "/api/conversations" && req.method === "GET") {
