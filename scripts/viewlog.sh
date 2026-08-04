@@ -4,6 +4,7 @@
 # Usage:
 #   scripts/viewlog.sh              # follow the usual human-readable set
 #   scripts/viewlog.sh hub          # hub daemon + dispatch-hub.*
+#   scripts/viewlog.sh agent SLUG   # dispatch-<slug>.log + .stderr (e.g. bizagent)
 #   scripts/viewlog.sh cron         # nightly.log + weekly.log
 #   scripts/viewlog.sh all          # every non-empty *.log / *.stderr (skips structured.log)
 #   scripts/viewlog.sh -n 200       # last N lines then follow (default 50)

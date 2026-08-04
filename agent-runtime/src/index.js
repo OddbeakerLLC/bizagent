@@ -192,10 +192,10 @@ async function runAgent(userMessage) {
         }
       }
 
-      // Light progress on stderr so dispatch logs show activity without drowning stdout
-      if (process.env.BIZAGENT_AGENT_VERBOSE === '1') {
-        console.error(`[tool] ${name}`);
-      }
+      // Always show tool activity on stdout so dispatch-*.log is watchable even
+      // when the model emits tool_calls with no assistant prose ("thinking").
+      const progress = toolProgressLine(name, args);
+      console.log(progress);
 
       let result;
       try {
@@ -206,6 +206,17 @@ async function runAgent(userMessage) {
           error: err.message || String(err),
           hint: 'Fix the error or try a different approach; re-read files if paths were wrong.',
         };
+      }
+
+      const ok =
+        result &&
+        (result.success === true ||
+          (result.success !== false && !result.error));
+      if (!ok) {
+        const errMsg = (result && (result.error || result.message)) || 'failed';
+        console.log(`  ↳ fail: ${String(errMsg).slice(0, 200)}`);
+      } else if (process.env.BIZAGENT_AGENT_VERBOSE === '1') {
+        console.log('  ↳ ok');
       }
 
       messages.push({
