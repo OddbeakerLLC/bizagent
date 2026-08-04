@@ -103,6 +103,13 @@ const {
   MAX_UPLOAD_BYTES,
 } = require("./lib/company-files");
 const {
+  addLibraryDocument,
+  ensureLibrary,
+  getLibraryEntry,
+  listLibrary,
+  MAX_BYTES: LIBRARY_MAX_BYTES,
+} = require("./lib/library");
+const {
   conversationIdsFromSafetyResults,
   setOnConversationMutated,
 } = require("./lib/hub-turn-safety");
@@ -875,6 +882,114 @@ async function handleApi(config, req, res) {
       const status = /too large|not allowed|already exists|invalid|escape|empty/i.test(
         msg,
       )
+        ? 400
+        : 500;
+      return send(res, status, { error: msg });
+    }
+  }
+
+  // --- Library (operator-facing plans/specs; browser viewer) ---
+  if (url.pathname === "/api/library" && req.method === "GET") {
+    try {
+      ensureLibrary(config.hub);
+      return send(res, 200, {
+        ...listLibrary(config.hub),
+        max_bytes: LIBRARY_MAX_BYTES,
+      });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "list failed" });
+    }
+  }
+
+  if (url.pathname === "/api/library/file" && req.method === "GET") {
+    try {
+      const id = (url.searchParams.get("id") || url.searchParams.get("path") || "").trim();
+      if (!id) return send(res, 400, { error: "id required" });
+      const doc = getLibraryEntry(config.hub, id);
+      return send(res, 200, doc);
+    } catch (err) {
+      const msg = err.message || "not found";
+      const status = /not found|missing/i.test(msg) ? 404 : 400;
+      return send(res, status, { error: msg });
+    }
+  }
+
+  if (url.pathname === "/api/library" && req.method === "POST") {
+    try {
+      const ct = String(req.headers["content-type"] || "");
+      let title = "";
+      let filename = "";
+      let source = "upload";
+      let buffer;
+      let overwrite = false;
+      let tags = [];
+
+      if (ct.includes("multipart/form-data")) {
+        const raw = await readRequestBuffer(req);
+        const parsed = parseMultipart(raw, ct);
+        if (!parsed.file || !parsed.file.buffer) {
+          return send(res, 400, { error: "missing file field (use name=file)" });
+        }
+        filename = parsed.fields.filename || parsed.file.filename || "document.md";
+        title = parsed.fields.title || filename;
+        source = parsed.fields.source || "upload";
+        overwrite =
+          parsed.fields.overwrite === "1" ||
+          parsed.fields.overwrite === "true";
+        if (parsed.fields.tags) {
+          tags = String(parsed.fields.tags)
+            .split(",")
+            .map((t) => t.trim())
+            .filter(Boolean);
+        }
+        buffer = parsed.file.buffer;
+      } else {
+        const body = await parseBody(req);
+        title = body.title || body.filename || body.name || "Untitled";
+        filename = body.filename || "";
+        source = body.source || "upload";
+        overwrite = !!body.overwrite;
+        tags = Array.isArray(body.tags) ? body.tags : [];
+        if (body.content_base64 || body.contentBase64) {
+          buffer = Buffer.from(
+            body.content_base64 || body.contentBase64,
+            "base64",
+          );
+        } else if (typeof body.content === "string") {
+          buffer = Buffer.from(body.content, "utf8");
+        } else {
+          return send(res, 400, {
+            error: "provide content or content_base64",
+          });
+        }
+      }
+
+      const entry = addLibraryDocument(config.hub, {
+        title,
+        filename,
+        content: buffer,
+        source,
+        tags,
+        overwrite,
+      });
+
+      try {
+        logEvent(config.hub, {
+          event: "library_add",
+          status: "ok",
+          id: entry.id,
+          path: entry.path,
+          source: entry.source,
+          username: (req.session && req.session.username) || "",
+        });
+      } catch (_err) {
+        /* ignore */
+      }
+
+      return send(res, 200, { ok: true, entry });
+    } catch (err) {
+      const msg = err.message || "library add failed";
+      const status = /too large|not allowed|invalid|empty|escape/i.test(msg)
         ? 400
         : 500;
       return send(res, status, { error: msg });

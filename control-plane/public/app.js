@@ -56,9 +56,12 @@ function setAuthenticated(isAuthenticated, message) {
   document.getElementById('editDisplayName').hidden = !isAuthenticated;
   const companyBtn = document.getElementById('companyFilesBtn');
   if (companyBtn) companyBtn.hidden = !isAuthenticated;
+  const libraryBtn = document.getElementById('libraryBtn');
+  if (libraryBtn) libraryBtn.hidden = !isAuthenticated;
   if (!isAuthenticated) {
     document.getElementById('namePanel').hidden = true;
     hideCompanyModal();
+    hideLibraryModal();
   }
   setAuthStatus(message || (isAuthenticated ? 'Signed in' : 'Login required'), isAuthenticated ? 'ok' : 'warn');
 }
@@ -836,6 +839,135 @@ async function boot() {
   }
 }
 
+// --- Library (operator-facing plans/specs) ---
+function setLibraryStatus(message, kind = 'neutral') {
+  const status = document.getElementById('libraryStatus');
+  if (!status) return;
+  if (!message) {
+    status.hidden = true;
+    status.textContent = '';
+    return;
+  }
+  status.hidden = false;
+  status.textContent = message;
+  status.dataset.kind = kind;
+}
+
+function hideLibraryModal() {
+  const modal = document.getElementById('libraryModal');
+  if (modal) modal.hidden = true;
+  setLibraryStatus('');
+  const input = document.getElementById('libraryFileInput');
+  if (input) input.value = '';
+}
+
+async function openLibraryDoc(id) {
+  const titleEl = document.getElementById('libraryPreviewTitle');
+  const bodyEl = document.getElementById('libraryPreviewBody');
+  if (!bodyEl) return;
+  bodyEl.innerHTML = '<p class="company-file-empty">Loading…</p>';
+  try {
+    const doc = await api(`/api/library/file?id=${encodeURIComponent(id)}`);
+    if (titleEl) {
+      titleEl.textContent = doc.title || doc.path || id;
+    }
+    bodyEl.innerHTML = renderMarkdown(doc.content || '');
+    // highlight selected
+    document.querySelectorAll('.library-list-item').forEach((el) => {
+      el.classList.toggle('is-selected', el.dataset.id === id);
+    });
+  } catch (err) {
+    bodyEl.innerHTML = `<p class="company-file-empty">${escapeHtml(err.message || 'Failed to load')}</p>`;
+  }
+}
+
+async function refreshLibraryList(selectId) {
+  const list = document.getElementById('libraryList');
+  if (!list) return;
+  list.innerHTML = '<li class="company-file-empty">Loading…</li>';
+  try {
+    const data = await api('/api/library');
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    list.innerHTML = '';
+    if (entries.length === 0) {
+      list.innerHTML = '<li class="company-file-empty">Library is empty. Upload a .md or ask the hub to save a plan here.</li>';
+      return;
+    }
+    for (const e of entries) {
+      const li = document.createElement('li');
+      li.className = 'company-file-item library-list-item';
+      li.dataset.id = e.id;
+      const when = e.created_at ? new Date(e.created_at).toLocaleString() : '';
+      li.innerHTML = `<span class="company-file-path">${escapeHtml(e.title || e.path || e.id)}</span>`
+        + `<span class="company-file-meta">${escapeHtml(when)}</span>`;
+      li.addEventListener('click', () => openLibraryDoc(e.id));
+      list.appendChild(li);
+    }
+    const pick = selectId || (entries[0] && entries[0].id);
+    if (pick) await openLibraryDoc(pick);
+  } catch (err) {
+    list.innerHTML = '';
+    setLibraryStatus(err.message || 'Failed to list library', 'warn');
+  }
+}
+
+async function showLibraryModal() {
+  const modal = document.getElementById('libraryModal');
+  if (!modal) return;
+  modal.hidden = false;
+  setLibraryStatus('');
+  await refreshLibraryList();
+}
+
+async function uploadLibraryFile(file) {
+  if (!file) return;
+  setLibraryStatus(`Uploading ${file.name}…`, 'pending');
+  try {
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    fd.append('title', file.name.replace(/\.[^.]+$/, ''));
+    const res = await fetch('/api/library', {
+      method: 'POST',
+      body: fd,
+      credentials: 'same-origin',
+    });
+    const text = await res.text();
+    let body = {};
+    try { body = JSON.parse(text); } catch (_e) { body = { error: text }; }
+    if (!res.ok) throw new Error(body.error || `Upload failed (${res.status})`);
+    setLibraryStatus(`Added ${body.entry && body.entry.path}`, 'ok');
+    await refreshLibraryList(body.entry && body.entry.id);
+  } catch (err) {
+    setLibraryStatus(err.message || 'Upload failed', 'warn');
+  }
+}
+
+function bindLibraryModal() {
+  const modal = document.getElementById('libraryModal');
+  if (!modal || modal.dataset.bound === '1') return;
+  modal.dataset.bound = '1';
+  const openBtn = document.getElementById('libraryBtn');
+  if (openBtn) openBtn.addEventListener('click', () => showLibraryModal());
+  const close = () => hideLibraryModal();
+  const closeBtn = document.getElementById('libraryModalClose');
+  const doneBtn = document.getElementById('libraryModalDone');
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  if (doneBtn) doneBtn.addEventListener('click', close);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) close();
+  });
+  const refreshBtn = document.getElementById('libraryRefresh');
+  if (refreshBtn) refreshBtn.addEventListener('click', () => refreshLibraryList());
+  const fileInput = document.getElementById('libraryFileInput');
+  if (fileInput) {
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (file) await uploadLibraryFile(file);
+      fileInput.value = '';
+    });
+  }
+}
+
 // --- Company files (Knowledge Stack inputs on remote hubs) ---
 function setCompanyStatus(message, kind = 'neutral') {
   const status = document.getElementById('companyStatus');
@@ -962,6 +1094,7 @@ document.getElementById('logout').addEventListener('click', async () => {
   setAuthenticated(false, 'Signed out');
 });
 bindCompanyModal();
+bindLibraryModal();
 document.getElementById('newConversation').addEventListener('click', async () => {
   if (!displayName) {
     showNamePanel(true);
