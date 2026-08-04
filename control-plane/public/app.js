@@ -54,8 +54,11 @@ function setAuthenticated(isAuthenticated, message) {
   document.getElementById('authPanel').hidden = isAuthenticated;
   document.getElementById('logout').hidden = !isAuthenticated;
   document.getElementById('editDisplayName').hidden = !isAuthenticated;
+  const companyBtn = document.getElementById('companyFilesBtn');
+  if (companyBtn) companyBtn.hidden = !isAuthenticated;
   if (!isAuthenticated) {
     document.getElementById('namePanel').hidden = true;
+    hideCompanyModal();
   }
   setAuthStatus(message || (isAuthenticated ? 'Signed in' : 'Login required'), isAuthenticated ? 'ok' : 'warn');
 }
@@ -833,6 +836,123 @@ async function boot() {
   }
 }
 
+// --- Company files (Knowledge Stack inputs on remote hubs) ---
+function setCompanyStatus(message, kind = 'neutral') {
+  const status = document.getElementById('companyStatus');
+  if (!status) return;
+  if (!message) {
+    status.hidden = true;
+    status.textContent = '';
+    return;
+  }
+  status.hidden = false;
+  status.textContent = message;
+  status.dataset.kind = kind;
+}
+
+function hideCompanyModal() {
+  const modal = document.getElementById('companyModal');
+  if (modal) modal.hidden = true;
+  setCompanyStatus('');
+  const input = document.getElementById('companyFileInput');
+  if (input) input.value = '';
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function refreshCompanyFileList() {
+  const list = document.getElementById('companyFileList');
+  if (!list) return;
+  list.innerHTML = '<li class="company-file-empty">Loading…</li>';
+  try {
+    const data = await api('/api/company/files');
+    const files = Array.isArray(data.files) ? data.files : [];
+    list.innerHTML = '';
+    if (files.length === 0) {
+      list.innerHTML = '<li class="company-file-empty">No files in company/ yet.</li>';
+      return;
+    }
+    for (const f of files.slice(0, 100)) {
+      const li = document.createElement('li');
+      li.className = 'company-file-item';
+      const when = f.mtime ? new Date(f.mtime).toLocaleString() : '';
+      li.innerHTML = `<span class="company-file-path">${escapeHtml(f.path || f.name || '')}</span>`
+        + `<span class="company-file-meta">${formatBytes(f.size || 0)} · ${escapeHtml(when)}</span>`;
+      list.appendChild(li);
+    }
+  } catch (err) {
+    list.innerHTML = '';
+    setCompanyStatus(err.message || 'Failed to list files', 'warn');
+  }
+}
+
+async function showCompanyModal() {
+  const modal = document.getElementById('companyModal');
+  if (!modal) return;
+  modal.hidden = false;
+  setCompanyStatus('');
+  await refreshCompanyFileList();
+}
+
+async function uploadCompanyFile(file) {
+  if (!file) return;
+  const subdirEl = document.getElementById('companySubdir');
+  const overwriteEl = document.getElementById('companyOverwrite');
+  const subdir = subdirEl ? subdirEl.value : '';
+  const overwrite = overwriteEl ? overwriteEl.checked : false;
+  setCompanyStatus(`Uploading ${file.name}…`, 'pending');
+  try {
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    if (subdir) fd.append('subdir', subdir);
+    if (overwrite) fd.append('overwrite', 'true');
+    // Don't set Content-Type — browser sets multipart boundary.
+    const res = await fetch('/api/company/files', {
+      method: 'POST',
+      body: fd,
+      credentials: 'same-origin',
+    });
+    const text = await res.text();
+    let body = {};
+    try { body = JSON.parse(text); } catch (_e) { body = { error: text }; }
+    if (!res.ok) throw new Error(body.error || `Upload failed (${res.status})`);
+    setCompanyStatus(`Saved company/${body.path} (${formatBytes(body.size || file.size)})`, 'ok');
+    await refreshCompanyFileList();
+  } catch (err) {
+    setCompanyStatus(err.message || 'Upload failed', 'warn');
+  }
+}
+
+function bindCompanyModal() {
+  const modal = document.getElementById('companyModal');
+  if (!modal || modal.dataset.bound === '1') return;
+  modal.dataset.bound = '1';
+  const openBtn = document.getElementById('companyFilesBtn');
+  if (openBtn) openBtn.addEventListener('click', () => showCompanyModal());
+  const close = () => hideCompanyModal();
+  const closeBtn = document.getElementById('companyModalClose');
+  const doneBtn = document.getElementById('companyModalDone');
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  if (doneBtn) doneBtn.addEventListener('click', close);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) close();
+  });
+  const refreshBtn = document.getElementById('companyRefresh');
+  if (refreshBtn) refreshBtn.addEventListener('click', () => refreshCompanyFileList());
+  const fileInput = document.getElementById('companyFileInput');
+  if (fileInput) {
+    fileInput.addEventListener('change', async () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (file) await uploadCompanyFile(file);
+      fileInput.value = '';
+    });
+  }
+}
+
 document.getElementById('login').addEventListener('click', () => {
   if (needsSetup) setup();
   else login();
@@ -841,6 +961,7 @@ document.getElementById('logout').addEventListener('click', async () => {
   await api('/api/logout', { method: 'POST', body: '{}' }).catch(() => {});
   setAuthenticated(false, 'Signed out');
 });
+bindCompanyModal();
 document.getElementById('newConversation').addEventListener('click', async () => {
   if (!displayName) {
     showNamePanel(true);

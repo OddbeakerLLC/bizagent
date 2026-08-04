@@ -96,6 +96,13 @@ const {
   isAgentActive,
 } = require("./lib/dispatcher");
 const {
+  listCompanyFiles,
+  parseMultipart,
+  readRequestBuffer,
+  writeCompanyFile,
+  MAX_UPLOAD_BYTES,
+} = require("./lib/company-files");
+const {
   conversationIdsFromSafetyResults,
   setOnConversationMutated,
 } = require("./lib/hub-turn-safety");
@@ -763,6 +770,114 @@ async function handleApi(config, req, res) {
       return send(res, 200, setProfile(config.hub, body));
     } catch (err) {
       return send(res, 400, { error: err.message || "invalid profile" });
+    }
+  }
+
+  // --- Company files (Knowledge Stack inputs; for operators without hub FS access) ---
+  if (url.pathname === "/api/company/files" && req.method === "GET") {
+    try {
+      const subdir = (url.searchParams.get("subdir") || "").trim();
+      const files = listCompanyFiles(config.hub, { subdir });
+      return send(res, 200, {
+        root: "company/",
+        files,
+        max_upload_bytes: MAX_UPLOAD_BYTES,
+      });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "list failed" });
+    }
+  }
+
+  if (url.pathname === "/api/company/files" && req.method === "POST") {
+    try {
+      const ct = String(req.headers["content-type"] || "");
+      let filename = "";
+      let subdir = "";
+      let overwrite = false;
+      let buffer;
+
+      if (ct.includes("multipart/form-data")) {
+        const raw = await readRequestBuffer(req);
+        const parsed = parseMultipart(raw, ct);
+        if (!parsed.file || !parsed.file.buffer) {
+          return send(res, 400, { error: "missing file field (use name=file)" });
+        }
+        filename = parsed.fields.filename || parsed.file.filename || "upload.bin";
+        subdir = parsed.fields.subdir || "";
+        overwrite =
+          parsed.fields.overwrite === "1" ||
+          parsed.fields.overwrite === "true" ||
+          parsed.fields.overwrite === "yes";
+        buffer = parsed.file.buffer;
+      } else {
+        // JSON: { filename, subdir?, content_base64|content, overwrite? }
+        const body = await parseBody(req);
+        filename = body.filename || body.name || "";
+        subdir = body.subdir || body.dir || "";
+        overwrite = !!body.overwrite;
+        if (body.content_base64 || body.contentBase64) {
+          buffer = Buffer.from(
+            body.content_base64 || body.contentBase64,
+            "base64",
+          );
+        } else if (typeof body.content === "string") {
+          buffer = Buffer.from(body.content, "utf8");
+        } else {
+          return send(res, 400, {
+            error: "provide content_base64 or content (utf8 string)",
+          });
+        }
+      }
+
+      const written = writeCompanyFile(config.hub, {
+        filename,
+        subdir,
+        buffer,
+        overwrite,
+      });
+
+      try {
+        logEvent(config.hub, {
+          event: "company_upload",
+          status: "ok",
+          path: written.path,
+          size: written.size,
+          username: (req.session && req.session.username) || "",
+        });
+      } catch (_err) {
+        /* ignore */
+      }
+
+      // Optional [Company] journal breadcrumb for weekly KS
+      try {
+        const journalDir = path.join(config.hub, "journal");
+        fs.mkdirSync(journalDir, { recursive: true });
+        const day = new Date().toISOString().slice(0, 10);
+        const jpath = path.join(journalDir, `${day}.md`);
+        const line = `- [Company] Uploaded \`company/${written.path}\` via control plane (${written.size} bytes)\n`;
+        if (!fs.existsSync(jpath)) {
+          fs.writeFileSync(jpath, `# ${day}\n\n${line}`, "utf8");
+        } else {
+          fs.appendFileSync(jpath, line, "utf8");
+        }
+      } catch (_err) {
+        /* journal is best-effort */
+      }
+
+      return send(res, 200, {
+        ok: true,
+        path: written.path,
+        size: written.size,
+        mtime: written.mtime,
+      });
+    } catch (err) {
+      const msg = err.message || "upload failed";
+      const status = /too large|not allowed|already exists|invalid|escape|empty/i.test(
+        msg,
+      )
+        ? 400
+        : 500;
+      return send(res, status, { error: msg });
     }
   }
 

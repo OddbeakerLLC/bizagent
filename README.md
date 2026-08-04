@@ -152,6 +152,8 @@ your `registry.json`).
 - **Agent rail** — left sidebar: each agent with a status light, **`provider >> model`**
   (click to change LLM), expand for inbox / last dispatch / journal
 - **Agent detail panel** — expand a row for inbox count, last-dispatched time, journal snippet
+- **Company files** — topbar **Company** button uploads into hub `company/` (for Knowledge
+  Stack) when you cannot reach the hub disk over SSH/VPN; also `GET/POST /api/company/files`
 - **Dynamic page title** — browser tab reads `BizAgent — {org name}` from `registry.json`
 - **Push updates** — WebSocket feeds preferred; optional poll via `?poll=1`
 - **Hub session memory** — compact rolling markdown; older turns are summarized, not accumulated
