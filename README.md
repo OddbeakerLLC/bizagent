@@ -169,14 +169,17 @@ per provider. Configure providers in `cli.json` (`baseURL`, `keyEnv`, `models`);
 pick **provider + model** per hub/product in the UI or `registry.json`
 (`settings.hub_agent.provider` / `model`).
 
-| Provider key | Label | Key env (`.bizagent/env`) |
-|--------------|--------|---------------------------|
-| `grok` | Grok (xAI) | `XAI_API_KEY` |
-| `chatgpt` | ChatGPT | `OPENAI_API_KEY` |
-| `claude` | Claude | `ANTHROPIC_API_KEY` |
-| `gemini` | Gemini | `GEMINI_API_KEY` |
-| `venice` | Venice | `VENICE_API_KEY` |
-| `ollama` | Ollama (local) | optional |
+Create an API key in the provider’s console, then put it in `.bizagent/env`
+under the env name below (installer can prompt for this).
+
+| Provider key | Label | Key env (`.bizagent/env`) | Get API key |
+|--------------|--------|---------------------------|-------------|
+| `grok` | Grok (xAI) | `XAI_API_KEY` | [console.x.ai](https://console.x.ai/) |
+| `chatgpt` | ChatGPT | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) |
+| `claude` | Claude | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+| `gemini` | Gemini | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com/apikey) |
+| `venice` | Venice | `VENICE_API_KEY` | [venice.ai](https://venice.ai/settings/api) |
+| `ollama` | Ollama (local) | optional | local — [ollama.com](https://ollama.com/); no cloud key |
 
 ```sh
 # Local models via Ollama's OpenAI-compatible endpoint
