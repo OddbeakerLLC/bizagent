@@ -379,6 +379,16 @@ function main() {
       env_file_found: !!envInfo.found,
       env_keys_applied: envInfo.applied || 0,
     });
+    // Best-effort: reschedule/fire overdue deferred wakes after restart.
+    try {
+      const deferSh = path.join(HUB, 'scripts', 'defer.sh');
+      if (fs.existsSync(deferSh)) {
+        spawn('bash', [deferSh, '--reconcile', '--hub', HUB], {
+          detached: true,
+          stdio: 'ignore',
+        }).unref();
+      }
+    } catch (_e) { /* non-fatal */ }
     // eslint-disable-next-line no-console
     console.log(`${new Date().toISOString()} hub-daemon listening on ${SOCK} pid=${process.pid}`);
   });

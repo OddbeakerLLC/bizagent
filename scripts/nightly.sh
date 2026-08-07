@@ -49,6 +49,15 @@ elif [ -d "$HUB/.git" ]; then
   echo "hub: no git remote — local-only (set a private origin for nightly backup; see scripts/detach-framework-remote.sh)"
 fi
 
+# --- 0b. reconcile deferred wakes (overdue fire / dead timers) ------------
+if [ -x "$HUB/scripts/defer.sh" ]; then
+  echo "nightly: reconciling deferred wakes..."
+  bash "$HUB/scripts/defer.sh" --reconcile --hub "$HUB" \
+    || echo "nightly: defer reconcile failed (continuing)"
+else
+  echo "nightly: defer.sh missing — skip reconcile"
+fi
+
 # --- 1. route -------------------------------------------------------------
 "$HUB/scripts/router.sh"
 

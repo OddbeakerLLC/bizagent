@@ -188,15 +188,14 @@ function promptFileFor(hub, slug) {
 
 function ensureDispatchPrompt(hub, slug) {
   const target = promptFileFor(hub, slug);
-  if (fs.existsSync(target)) return target;
   const template = path.join(hub, 'templates', 'dispatch.md.template');
   if (!fs.existsSync(template)) throw new Error(`missing dispatch prompt template: ${template}`);
-  const agentDir = path.join(hub, 'agents', slug);
   const text = fs.readFileSync(template, 'utf8')
     .replace(/\{\{slug\}\}/g, slug)
     .replace(/\{\{agent_md\}\}/g, `agents/${slug}/agent.md`)
     .replace(/\{\{inbox\}\}/g, `agents/${slug}/inbox`)
     .replace(/\{\{outbox\}\}/g, `agents/${slug}/outbox`);
+  // Always refresh from template so ops blurb updates (e.g. defer-wake) reach agents.
   fs.writeFileSync(target, text);
   return target;
 }
