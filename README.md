@@ -244,8 +244,11 @@ scripts/viewlog.sh
 scripts/viewlog.sh hub          # warm hub + dispatch-hub.*
 
 # Nightly mechanical half + end-of-night backup push
-scripts/nightly.sh              # pull, route, archive, prune
+scripts/nightly.sh              # pull, route, archive, prune (+ defer reconcile)
 scripts/nightly.sh push         # commit/push product repos + hub (private remote)
+scripts/defer.sh --in 15m ...   # schedule one-shot wake mail (see docs/DEFERRED-WAKE.md)
+scripts/defer.sh --list         # pending deferred wakes
+scripts/defer.sh --cancel ID
 
 # After clone: drop public framework origin; ops gitignore; print private-remote advice
 scripts/detach-framework-remote.sh
@@ -323,6 +326,7 @@ bizagent/
 │   ├── prune-archives.sh      archive retention (15-day default, registry-driven)
 │   ├── viewlog.sh             tail -F control-plane / hub / structured logs
 │   ├── write-message.sh       canonical outbox helper (conversation stamping)
+│   ├── defer.sh               one-shot deferred wake mail (poll-after)
 │   ├── nightly.sh             route + prune + journal/sitemap housekeeping
 │   └── ...                    (router, run-agent, onboard, publish-check, etc.)
 ├── control-plane/
@@ -333,6 +337,7 @@ bizagent/
 ├── tests/                   shell test suite
 └── docs/
     ├── ARCHITECTURE.md
+    ├── DEFERRED-WAKE.md
     └── LATENCY-OPTIMIZATION-PLAN.md
 ```
 
