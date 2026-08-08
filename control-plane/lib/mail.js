@@ -121,8 +121,9 @@ function writeContentUnique(dir, basename, content) {
 }
 
 /**
- * For mail missing conversation_id: stamp originating hub turn, last-viewed
- * console chat (long TTL), or pending hub→agent work for fromSlug.
+ * For mail missing conversation_id: stamp via getStampConversationId.
+ * agent→hub (fromSlug set): pending hub→agent work for that slug, else last-viewed.
+ * hub→user / unscoped: in-flight originating hub turn, else last-viewed.
  * Never overwrites an existing conversation_id.
  * @param {string} [fromSlug] - product agent slug for agent→hub completions
  */
@@ -278,8 +279,18 @@ function routeOutboxes(hub) {
         deliveredFile = writeFileUnique(dest, base, file);
       }
       // Thread conversation_id: hub→agent dispatch remembers which console chat asked.
+      // Prefer conversation_id already on the hub→agent mail; else stamp heuristics.
       if (isHubToAgent && deliveredFile) {
-        const stampId = getStampConversationId(hub);
+        let stampId = '';
+        try {
+          const deliveredText = fs.existsSync(deliveredFile)
+            ? fs.readFileSync(deliveredFile, 'utf8')
+            : text;
+          stampId = frontmatterValue(deliveredText, 'conversation_id') || '';
+        } catch (_e) {
+          stampId = '';
+        }
+        if (!stampId) stampId = getStampConversationId(hub) || '';
         if (stampId) {
           try {
             recordPendingAgentWork(hub, to, stampId);

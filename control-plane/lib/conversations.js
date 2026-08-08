@@ -171,7 +171,7 @@ function saveConversation(hub, conv) {
 }
 
 /**
- * Append a message. Optional meta: { kind } (e.g. launch-ack, error, agent-completion).
+ * Append a message. Optional meta: { kind, attachments }.
  * Real hub replies and error statuses supersede transient status lines (launch-ack + agent-completion).
  */
 function appendMessage(hub, id, role, content, meta = {}) {
@@ -182,6 +182,14 @@ function appendMessage(hub, id, role, content, meta = {}) {
   }
   const msg = { role, content, created_at: new Date().toISOString() };
   if (meta.kind) msg.kind = meta.kind;
+  if (Array.isArray(meta.attachments) && meta.attachments.length) {
+    msg.attachments = meta.attachments.map((a) => ({
+      name: a.name || '',
+      path: a.path || '',
+      to: a.to || '',
+      size: a.size || undefined,
+    }));
+  }
   conv.messages.push(msg);
   return saveConversation(hub, conv);
 }
@@ -245,7 +253,14 @@ function postAgentCompletionNotice(hub, conversationId, slug) {
   return saveConversation(hub, conv);
 }
 
-function writeHubInboxMessage(hub, content, conversationId) {
+/**
+ * Write operator console message into hub inbox.
+ * @param {string} content
+ * @param {string} conversationId
+ * @param {object} [opts]
+ * @param {Array<{name?:string,path:string,to?:string}>} [opts.attachments]
+ */
+function writeHubInboxMessage(hub, content, conversationId, opts = {}) {
   const start = Date.now();
   const now = new Date();
   const date = now.toISOString().slice(0, 10);
@@ -260,11 +275,20 @@ function writeHubInboxMessage(hub, content, conversationId) {
     '---',
   ].filter((line) => line !== '').join('\n');
 
-  const result = writeFileUnique(path.join(hub, 'inbox'), `${date}-operator-console-message-${stamp}`, `${header}\n\n${content}\n`);
+  let body = String(content || '');
+  const attachments = Array.isArray(opts.attachments) ? opts.attachments : [];
+  if (attachments.length) {
+    // Lazy require avoids circular load at module init.
+    const { formatAttachmentsMarkdown } = require('./uploads');
+    body = `${body}${formatAttachmentsMarkdown(attachments)}`;
+  }
+
+  const result = writeFileUnique(path.join(hub, 'inbox'), `${date}-operator-console-message-${stamp}`, `${header}\n\n${body}\n`);
 
   logEvent(hub, {
     event: 'write_hub_inbox',
     conversation_id: conversationId,
+    attachment_count: attachments.length,
     duration_ms: Math.round((Date.now() - start) * 100) / 100
   });
 
@@ -342,29 +366,108 @@ function writePendingAgentWork(hub, bySlug) {
  * Remember which console conversation dispatched work to an agent slug.
  * Used to stamp agent→hub completions after the short UI presence window expires.
  */
+/**
+ * Remember which console conversation dispatched work to an agent slug.
+ * Stacks per slug so two chats using the same agent do not overwrite each other.
+ * Newest entry is preferred on lookup (LIFO).
+ */
 function recordPendingAgentWork(hub, slug, conversationId) {
   if (!slug || !conversationId || !getConversation(hub, conversationId)) return false;
   const bySlug = readPendingAgentWork(hub);
-  bySlug[String(slug)] = {
+  const key = String(slug);
+  const now = new Date().toISOString();
+  const entry = {
     conversationId: String(conversationId),
-    updatedAt: new Date().toISOString(),
+    updatedAt: now,
+  };
+  const prev = bySlug[key];
+  let stack = [];
+  if (Array.isArray(prev && prev.stack)) {
+    stack = prev.stack.filter(
+      (e) => e && e.conversationId && e.conversationId !== conversationId,
+    );
+  } else if (prev && prev.conversationId && prev.conversationId !== conversationId) {
+    stack = [{ conversationId: prev.conversationId, updatedAt: prev.updatedAt || now }];
+  }
+  stack.push(entry);
+  // Cap stack depth
+  if (stack.length > 12) stack = stack.slice(-12);
+  bySlug[key] = {
+    conversationId: entry.conversationId,
+    updatedAt: entry.updatedAt,
+    stack,
   };
   writePendingAgentWork(hub, bySlug);
   return true;
 }
 
-/**
- * Lookup conversation_id for a product agent that still has outstanding work.
- * Returns null when missing, expired, or conversation deleted.
- */
-function getPendingAgentWorkConversationId(hub, slug) {
-  if (!slug) return null;
-  const entry = readPendingAgentWork(hub)[String(slug)];
+function pendingEntryFresh(hub, entry) {
   if (!entry || !entry.conversationId || !entry.updatedAt) return null;
   const age = Date.now() - Date.parse(entry.updatedAt);
   if (!Number.isFinite(age) || age < 0 || age > PENDING_AGENT_WORK_MAX_AGE_MS) return null;
   if (!getConversation(hub, entry.conversationId)) return null;
   return entry.conversationId;
+}
+
+/**
+ * Lookup conversation_id for a product agent that still has outstanding work.
+ * Prefers newest stack entry. Returns null when missing, expired, or deleted.
+ */
+function getPendingAgentWorkConversationId(hub, slug) {
+  if (!slug) return null;
+  const data = readPendingAgentWork(hub)[String(slug)];
+  if (!data) return null;
+  if (Array.isArray(data.stack) && data.stack.length) {
+    for (let i = data.stack.length - 1; i >= 0; i -= 1) {
+      const id = pendingEntryFresh(hub, data.stack[i]);
+      if (id) return id;
+    }
+  }
+  return pendingEntryFresh(hub, data);
+}
+
+/** Drop pending-agent-work entries that point at a deleted conversation id. */
+function clearPendingAgentWorkForConversation(hub, conversationId) {
+  if (!conversationId) return false;
+  const bySlug = readPendingAgentWork(hub);
+  let changed = false;
+  for (const slug of Object.keys(bySlug)) {
+    const data = bySlug[slug];
+    if (!data) continue;
+    let stack = Array.isArray(data.stack) ? data.stack.slice() : null;
+    if (stack) {
+      const next = stack.filter((e) => e && e.conversationId !== conversationId);
+      if (next.length !== stack.length) {
+        changed = true;
+        stack = next;
+      }
+    }
+    if (data.conversationId === conversationId) {
+      changed = true;
+      if (stack && stack.length) {
+        const top = stack[stack.length - 1];
+        bySlug[slug] = {
+          conversationId: top.conversationId,
+          updatedAt: top.updatedAt,
+          stack,
+        };
+      } else {
+        delete bySlug[slug];
+      }
+    } else if (stack) {
+      if (stack.length === 0) delete bySlug[slug];
+      else {
+        const top = stack[stack.length - 1];
+        bySlug[slug] = {
+          conversationId: top.conversationId,
+          updatedAt: top.updatedAt,
+          stack,
+        };
+      }
+    }
+  }
+  if (changed) writePendingAgentWork(hub, bySlug);
+  return changed;
 }
 
 /**
@@ -519,16 +622,28 @@ function getOriginatingConversationId(hub) {
 
 /**
  * Id to stamp on mail missing conversation_id.
- * Order: in-flight originating hub turn → last-viewed console chat (long TTL)
- * → optional pending hub→agent work for a product slug (agent→hub completions).
+ *
+ * When fromSlug is set (agent→hub completions):
+ *   1. pending hub→agent work for that slug — the chat that dispatched the agent
+ *   2. last-viewed console chat (long TTL) — last resort only
+ *   Never use the in-flight hub turn: that is whichever chat the operator is
+ *   talking to *now*, and must not steal another product's completion mail.
+ *
+ * When fromSlug is absent (hub→user and other unscoped mail):
+ *   1. in-flight originating hub turn (never overridden by active UI chat)
+ *   2. last-viewed console chat (long TTL) — last resort only
+ *
  * @param {string} [fromSlug] - product agent slug when routing agent→hub mail
  */
 function getStampConversationId(hub, fromSlug) {
-  return (
-    getOriginatingConversationId(hub)
-    || getActiveConversationId(hub, STAMP_ACTIVE_MAX_AGE_MS)
-    || getPendingAgentWorkConversationId(hub, fromSlug)
-  );
+  if (fromSlug) {
+    const pending = getPendingAgentWorkConversationId(hub, fromSlug);
+    if (pending) return pending;
+    return getActiveConversationId(hub, STAMP_ACTIVE_MAX_AGE_MS);
+  }
+  const originating = getOriginatingConversationId(hub);
+  if (originating) return originating;
+  return getActiveConversationId(hub, STAMP_ACTIVE_MAX_AGE_MS);
 }
 
 function deleteConversation(hub, id) {
@@ -548,6 +663,17 @@ function deleteConversation(hub, id) {
       /* ignore */
     }
   }
+  try {
+    clearPendingAgentWorkForConversation(hub, id);
+  } catch (_err) {
+    /* non-fatal */
+  }
+  try {
+    const { gcConversationUploads } = require('./uploads');
+    gcConversationUploads(hub, id);
+  } catch (_err) {
+    /* non-fatal */
+  }
   return true;
 }
 
@@ -561,6 +687,7 @@ module.exports = {
   appendMessage,
   assertValidConversationId,
   conversationNameFromContent,
+  clearPendingAgentWorkForConversation,
   createConversation,
   deleteConversation,
   frontmatterValue,

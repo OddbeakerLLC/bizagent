@@ -1,7 +1,7 @@
-# Agent: Enterprise BizAgent
+# Agent: BizAgent
 
 - **Slug:** `bizagent`
-- **Agent name:** Agent E
+- **Agent name:** Agent BA
 - **Reports to:** `hub` (the Products Team Lead)
 - **Mailbox:** `agents/bizagent/inbox` · `agents/bizagent/outbox`
 
@@ -91,6 +91,29 @@ Blocking: <add this line only when on a critical path>
 ```
 
 Brevity: no preamble, recap, or signoff. One outbox file per logical completion.
+
+
+## Deferred wake (poll-after)
+
+When you need to check something later (long train job, external process) without blocking the turn, schedule a one-shot wake — do **not** hand-edit timer state under `.bizagent/`:
+
+```bash
+scripts/defer.sh \
+  --to bizagent \
+  --from bizagent \
+  --in 15m \
+  --once-key "bizagent:short-poll-name" \
+  --subject "wake: short reminder" \
+  --body "## Deferred wake
+Why / what to check / success vs fail.
+If still running: reschedule same once-key.
+If done or failed: mail hub; do not reschedule."
+```
+
+- You may `--to` **self** or **hub** only (not other product slugs).
+- On wake, inbox mail has `kind: defer-wake` — act, archive, optionally reschedule.
+- Cancel: `scripts/defer.sh --cancel <defer_id>`. List: `scripts/defer.sh --list --to bizagent`.
+- Min delay 1m; max 7d. Prefer `--once-key` so poll loops replace rather than stack.
 
 ## Journal format (per project)
 

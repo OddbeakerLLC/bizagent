@@ -1017,6 +1017,58 @@ if (frontmatterValue(agentHubText, 'conversation_id') !== workConv.id) {
   process.exit(37);
 }
 
+// Regression: in-flight hub turn for chat A must NOT steal agent→hub mail
+// for work dispatched from chat B (cross-conversation noise).
+const otherHubChat = createConversation(hub, 'Other Hub Chat');
+const agentWorkChat = createConversation(hub, 'Agent Owner Chat');
+const crossPendingFile = path.join(appDir(hub), 'pending-hub-turns.json');
+fs.writeFileSync(crossPendingFile, JSON.stringify({
+  turns: [{
+    conversationId: otherHubChat.id,
+    startedAt: new Date().toISOString(),
+    logByteOffset: 0,
+  }],
+}, null, 2));
+if (!recordPendingAgentWork(hub, agentSlug, agentWorkChat.id)) {
+  console.error('recordPendingAgentWork (cross-talk) failed');
+  process.exit(40);
+}
+if (getStampNow(hub) !== otherHubChat.id) {
+  console.error('hub→user stamp should still prefer originating turn', getStampNow(hub), otherHubChat.id);
+  process.exit(41);
+}
+if (getStampNow(hub, agentSlug) !== agentWorkChat.id) {
+  console.error(
+    'agent→hub stamp must prefer pending agent work over in-flight hub turn',
+    getStampNow(hub, agentSlug),
+    agentWorkChat.id,
+    otherHubChat.id,
+  );
+  process.exit(42);
+}
+fs.writeFileSync(path.join(hub, 'agents', agentSlug, 'outbox', '2026-07-24-shell-tools-cross.md'), `---
+from: shell-tools
+to: hub
+date: 2026-07-24
+subject: cross talk check
+---
+
+finished work for owner chat
+`);
+routed = routeOutboxes(hub);
+if (routed.delivered !== 1) {
+  console.error('expected cross-talk agent→hub deliver', routed);
+  process.exit(43);
+}
+const crossPath = path.join(hub, 'inbox', '2026-07-24-shell-tools-cross.md');
+const crossText = fs.readFileSync(crossPath, 'utf8');
+if (frontmatterValue(crossText, 'conversation_id') !== agentWorkChat.id) {
+  console.error('agent→hub stamped wrong conversation (cross-talk)', crossText);
+  process.exit(44);
+}
+try { fs.unlinkSync(crossPendingFile); } catch (_e) { /* ignore */ }
+try { fs.unlinkSync(crossPath); } catch (_e) { /* ignore */ }
+
 // hub→agent route records pending work from stamp id
 const dispatchConv = createConversation(hub, 'Dispatch Chat');
 fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
@@ -1519,6 +1571,10 @@ if (!archMail || !new RegExp(`conversation_id:\\s*${conv8.id}`).test(archMail)) 
 }
 
 // --- buildHubTurnPrompt injects reserved path for console mail ---
+// Clear leftover inbox so FIFO binds reserved path to this message (not older fixtures).
+for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
+  if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
+}
 const conv9 = createConversation(hub, 'TurnInject');
 fs.writeFileSync(path.join(hub, 'inbox', '2026-07-24-operator-turn-inject.md'), `---
 from: operator

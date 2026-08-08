@@ -103,12 +103,17 @@ const {
   MAX_UPLOAD_BYTES,
 } = require("./lib/company-files");
 const {
-  addLibraryDocument,
   ensureLibrary,
   getLibraryEntry,
   listLibrary,
+  resolveLibraryFile,
   MAX_BYTES: LIBRARY_MAX_BYTES,
 } = require("./lib/library");
+const {
+  writeUpload,
+  assertAllowedAttachmentPath,
+  MAX_UPLOAD_BYTES: UPLOAD_MAX_BYTES,
+} = require("./lib/uploads");
 const {
   conversationIdsFromSafetyResults,
   setOnConversationMutated,
@@ -905,7 +910,23 @@ async function handleApi(config, req, res) {
     try {
       const id = (url.searchParams.get("id") || url.searchParams.get("path") || "").trim();
       if (!id) return send(res, 400, { error: "id required" });
+      const wantDownload =
+        url.searchParams.get("download") === "1" ||
+        url.searchParams.get("download") === "true";
       const doc = getLibraryEntry(config.hub, id);
+      if (wantDownload) {
+        const { abs } = resolveLibraryFile(config.hub, doc.path);
+        const raw = fs.readFileSync(abs);
+        const filename = path.basename(doc.path || "document.md");
+        res.writeHead(200, {
+          "Content-Type": "text/markdown; charset=utf-8",
+          "Content-Length": raw.length,
+          "Content-Disposition": `attachment; filename="${filename.replace(/"/g, "")}"`,
+          "Cache-Control": "no-store",
+        });
+        res.end(raw);
+        return null;
+      }
       return send(res, 200, doc);
     } catch (err) {
       const msg = err.message || "not found";
@@ -914,82 +935,55 @@ async function handleApi(config, req, res) {
     }
   }
 
-  if (url.pathname === "/api/library" && req.method === "POST") {
+  // POST /api/library removed — library is write-via-hub/agents only.
+
+  // --- Chat uploads drop zone (.bizagent/uploads/ or company/) ---
+  if (url.pathname === "/api/uploads" && req.method === "POST") {
     try {
       const ct = String(req.headers["content-type"] || "");
-      let title = "";
-      let filename = "";
-      let source = "upload";
-      let buffer;
-      let overwrite = false;
-      let tags = [];
-
-      if (ct.includes("multipart/form-data")) {
-        const raw = await readRequestBuffer(req);
-        const parsed = parseMultipart(raw, ct);
-        if (!parsed.file || !parsed.file.buffer) {
-          return send(res, 400, { error: "missing file field (use name=file)" });
-        }
-        filename = parsed.fields.filename || parsed.file.filename || "document.md";
-        title = parsed.fields.title || filename;
-        source = parsed.fields.source || "upload";
-        overwrite =
-          parsed.fields.overwrite === "1" ||
-          parsed.fields.overwrite === "true";
-        if (parsed.fields.tags) {
-          tags = String(parsed.fields.tags)
-            .split(",")
-            .map((t) => t.trim())
-            .filter(Boolean);
-        }
-        buffer = parsed.file.buffer;
-      } else {
-        const body = await parseBody(req);
-        title = body.title || body.filename || body.name || "Untitled";
-        filename = body.filename || "";
-        source = body.source || "upload";
-        overwrite = !!body.overwrite;
-        tags = Array.isArray(body.tags) ? body.tags : [];
-        if (body.content_base64 || body.contentBase64) {
-          buffer = Buffer.from(
-            body.content_base64 || body.contentBase64,
-            "base64",
-          );
-        } else if (typeof body.content === "string") {
-          buffer = Buffer.from(body.content, "utf8");
-        } else {
-          return send(res, 400, {
-            error: "provide content or content_base64",
-          });
-        }
+      if (!ct.includes("multipart/form-data")) {
+        return send(res, 400, { error: "multipart/form-data required" });
       }
-
-      const entry = addLibraryDocument(config.hub, {
-        title,
+      const raw = await readRequestBuffer(req);
+      const parsed = parseMultipart(raw, ct);
+      if (!parsed.file || !parsed.file.buffer) {
+        return send(res, 400, { error: "missing file field (use name=file)" });
+      }
+      const to = (parsed.fields.to || "hub").trim();
+      const conversationId = (parsed.fields.conversation_id || "").trim();
+      const subdir = parsed.fields.subdir || "";
+      const filename = parsed.fields.filename || parsed.file.filename || "upload.bin";
+      const written = writeUpload(config.hub, {
+        to,
+        conversationId,
+        subdir,
         filename,
-        content: buffer,
-        source,
-        tags,
-        overwrite,
+        buffer: parsed.file.buffer,
+        overwrite:
+          parsed.fields.overwrite === "1" ||
+          parsed.fields.overwrite === "true",
       });
-
       try {
         logEvent(config.hub, {
-          event: "library_add",
+          event: "chat_upload",
           status: "ok",
-          id: entry.id,
-          path: entry.path,
-          source: entry.source,
+          to: written.to,
+          path: written.path,
+          size: written.size,
+          conversation_id: conversationId || "",
           username: (req.session && req.session.username) || "",
         });
       } catch (_err) {
         /* ignore */
       }
-
-      return send(res, 200, { ok: true, entry });
+      return send(res, 200, {
+        ok: true,
+        ...written,
+        max_upload_bytes: UPLOAD_MAX_BYTES,
+      });
     } catch (err) {
-      const msg = err.message || "library add failed";
-      const status = /too large|not allowed|invalid|empty|escape/i.test(msg)
+      const msg = err.message || "upload failed";
+      const status = /too large|not allowed|invalid|empty|escape|missing/i.test(msg)
         ? 400
         : 500;
       return send(res, status, { error: msg });
@@ -1108,14 +1102,34 @@ async function handleApi(config, req, res) {
     const id = shouldStartNewConversation(content)
       ? createConversation(config.hub, conversationNameFromContent(content)).id
       : decodeURIComponent(messageMatch[1]);
-    writeHubInboxMessage(config.hub, content, id);
-    const conv = appendMessage(config.hub, id, "user", content);
+
+    // Optional attachments: paths must already exist under uploads/ or company/.
+    let attachments = [];
+    if (Array.isArray(body.attachments) && body.attachments.length) {
+      try {
+        attachments = body.attachments.map((a) => {
+          const rel = assertAllowedAttachmentPath(config.hub, a.path || a);
+          return {
+            name: a.name || path.basename(rel),
+            path: rel,
+            to: a.to || "",
+            size: a.size || undefined,
+          };
+        });
+      } catch (err) {
+        return send(res, 400, { error: err.message || "invalid attachments" });
+      }
+    }
+
+    writeHubInboxMessage(config.hub, content, id, { attachments });
+    const conv = appendMessage(config.hub, id, "user", content, { attachments });
     setActiveConversation(config.hub, id);
 
     logEvent(config.hub, {
       event: 'user_message_received',
       conversation_id: id,
       content_length: content.length,
+      attachment_count: attachments.length,
       duration_ms: Math.round((Date.now() - start) * 100) / 100
     });
 

@@ -107,16 +107,16 @@ function nowIso() {
 /**
  * Get conversation_id for hub dispatch.
  * ALWAYS returns a valid conversation_id — never null.
- * Falls back to active conversation or creates a "System" conversation.
+ * Prefer the oldest pending inbox message with an explicit id (FIFO),
+ * not the newest file — avoids mis-binding when multiple messages queue.
  */
 function getHubConversationId(hub) {
-  // First: check pending hub inbox mail for explicit conversation_id
+  // First: oldest pending hub inbox mail with explicit conversation_id (FIFO)
   const inboxDir = path.join(hub, 'inbox');
   try {
     const files = fs.readdirSync(inboxDir)
       .filter(f => f.endsWith('.md') && !f.startsWith('.'))
-      .sort()
-      .reverse();
+      .sort(); // ascending = oldest first
     for (const name of files) {
       const content = fs.readFileSync(path.join(inboxDir, name), 'utf8');
       const match = content.match(/^conversation_id:\s*(.+?)$/m);
@@ -126,11 +126,20 @@ function getHubConversationId(hub) {
     /* ignore */
   }
 
-  // Second: use active conversation (longer TTL for stamping)
+  // Second: in-flight originating turn (if any)
+  try {
+    const { getOriginatingConversationId } = require('./conversations');
+    const originating = getOriginatingConversationId(hub);
+    if (originating) return originating;
+  } catch (_err) {
+    /* ignore */
+  }
+
+  // Third: active conversation (longer TTL)
   const activeId = getActiveConversationId(hub, 24 * 60 * 60 * 1000); // 24h TTL
   if (activeId) return activeId;
 
-  // Third: create a System conversation (always-warm guarantee)
+  // Fourth: System conversation (always-warm guarantee)
   const sysConv = createConversation(hub, 'System');
   return sysConv.id;
 }
@@ -363,15 +372,14 @@ function promptFileFor(hub, slug) {
 
 function ensureDispatchPrompt(hub, slug) {
   const target = promptFileFor(hub, slug);
-  if (fs.existsSync(target)) return target;
   const template = path.join(hub, 'templates', 'dispatch.md.template');
   if (!fs.existsSync(template)) throw new Error(`missing dispatch prompt template: ${template}`);
-  const agentDir = path.join(hub, 'agents', slug);
   const text = fs.readFileSync(template, 'utf8')
     .replace(/\{\{slug\}\}/g, slug)
     .replace(/\{\{agent_md\}\}/g, `agents/${slug}/agent.md`)
     .replace(/\{\{inbox\}\}/g, `agents/${slug}/inbox`)
     .replace(/\{\{outbox\}\}/g, `agents/${slug}/outbox`);
+  // Always refresh from template so ops blurb updates (e.g. defer-wake) reach agents.
   fs.writeFileSync(target, text);
   return target;
 }

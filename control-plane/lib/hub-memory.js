@@ -127,6 +127,10 @@ function deriveHubRuntimePrompt(hub) {
     '',
     '**Interim messages** only for unbounded delays (dispatch, URL fetch): brief write-message first, full reply second, same `conversation_id`. Skip interims for quick synthesis.',
     '',
+    '### Deferred wake',
+    '',
+    '`scripts/defer.sh --to <slug|hub> --in 15m --body "…"` → inbox `kind: defer-wake`.',
+    '',
     '## Runtime Memory (CP-owned)',
     '',
     `\`${sessionRel}\` is current session memory (rolling summary + recent turns). The control plane already compacted it.`,
@@ -301,8 +305,9 @@ function buildHubTurnPrompt(hub) {
     ].join('\n');
   });
 
+  // FIFO: first pending inbox message with a conversation_id wins (matches dispatch).
   const convId = conversationIds.length
-    ? conversationIds[conversationIds.length - 1]
+    ? conversationIds[0]
     : '';
 
   // ALWAYS-WARM: conversation_id is guaranteed by dispatcher.getHubConversationId()
