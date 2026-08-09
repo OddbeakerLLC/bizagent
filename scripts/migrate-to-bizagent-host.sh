@@ -7,6 +7,10 @@
 #   scripts/migrate-to-bizagent-host.sh --apply
 #   scripts/migrate-to-bizagent-host.sh --apply --target tmanso@bizagent
 #
+# Projects: git clone/fetch on the target when a remote is known (avoids
+# node_modules and other bulky untracked trees). Rsync only for path-only
+# projects with no remote.
+#
 # Does NOT stop the source control plane. Cut over manually after verify.
 set -euo pipefail
 
@@ -24,12 +28,15 @@ usage() {
   cat <<'EOF'
 Usage: migrate-to-bizagent-host.sh [--dry-run|--apply] [options]
 
-  --dry-run              rsync -n only (default)
-  --apply                perform copy + remote bootstrap
+  --dry-run              plan only (default)
+  --apply                perform copy/clone + remote bootstrap
   --target USER@HOST     default: tmanso@bizagent
   --skip-projects        hub runtime only
   --no-bootstrap         skip remote npm/install-control-plane
   -h, --help             this help
+
+Projects with a git remote are cloned (or fetched) on the target.
+Projects without a remote fall back to rsync (still excluding node_modules, models, etc.).
 EOF
 }
 
@@ -106,12 +113,13 @@ rsync "${RSYNC_FLAGS[@]}" \
   --exclude 'agents/*/.lock/' \
   "$HUB/" "$TARGET:~/$TARGET_HUB_REL/" </dev/null
 
-# --- Projects ---
+# --- Projects (prefer git clone on target; rsync only when no remote) ---
 if [ "$SKIP_PROJECTS" -eq 0 ]; then
-  log "Rsync registry projects → $TARGET:~/$TARGET_DEV_REL"
+  log "Seed registry projects on $TARGET:~/$TARGET_DEV_REL (clone-first)"
   PROJECT_LIST="$(mktemp)"
   python3 - "$HUB" >"$PROJECT_LIST" <<'PY'
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -124,6 +132,7 @@ for p in r.get("products", []):
     for proj in p.get("projects", []):
         path = (proj.get("path") or "").strip()
         name = proj.get("name") or ""
+        remote = (proj.get("remote") or "").strip()
         if not path or not name:
             continue
         if path.startswith("~/"):
@@ -134,7 +143,16 @@ for p in r.get("products", []):
         if key in seen:
             continue
         seen.add(key)
-        if not ap.exists():
+        if not remote and ap.exists() and (ap / ".git").exists():
+            try:
+                remote = subprocess.check_output(
+                    ["git", "-C", str(ap), "remote", "get-url", "origin"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+            except Exception:
+                remote = ""
+        if not ap.exists() and not remote:
             print(f"MISSING\t{name}\t{ap}", file=sys.stderr)
             continue
         rel = None
@@ -147,19 +165,50 @@ for p in r.get("products", []):
                 rel = str(ap.relative_to(home / "dev"))
             except ValueError:
                 rel = name
-        print(f"{name}\t{ap}\t{rel}")
+        print(f"{name}\t{ap}\t{rel}\t{remote}")
 PY
 
   # Use FD 3 for the project list so ssh/rsync cannot consume remaining lines on stdin.
-  while IFS=$'\t' read -r name ap rel <&3; do
+  while IFS=$'\t' read -r name ap rel remote <&3; do
     [ -n "${name:-}" ] || continue
-    [ -d "$ap" ] || { log "SKIP missing $name ($ap)"; continue; }
-    log "  project $name → ~/dev/$rel"
+    log "  project $name → ~/dev/$rel (remote=${remote:-none})"
     ssh "$TARGET" "mkdir -p ~/${TARGET_DEV_REL}/$(dirname -- "$rel")" </dev/null
-    # shellcheck disable=SC2086
-    # Continue on partial transfer (code 23) so one sticky file cannot abort the rest.
-    set +e
-    rsync "${RSYNC_FLAGS[@]}" \
+
+    if [ -n "${remote:-}" ]; then
+      if [ "$DRY_RUN" -eq 1 ]; then
+        log "  [dry-run] would git clone/fetch $remote → ~/$TARGET_DEV_REL/$rel"
+        continue
+      fi
+      if ! ssh "$TARGET" bash -s -- "$remote" "$TARGET_DEV_REL/$rel" <<'REMOTE_GIT'
+set -euo pipefail
+remote="$1"
+rel="$2"
+dest="$HOME/$rel"
+if [ -d "$dest/.git" ]; then
+  git -C "$dest" remote set-url origin "$remote" 2>/dev/null || true
+  git -C "$dest" fetch --all --prune || true
+  # Stay on current branch; do not force-reset (preserve any local target work)
+  echo "FETCH_OK $dest"
+  exit 0
+fi
+if [ -e "$dest" ] && [ ! -d "$dest/.git" ]; then
+  echo "EXISTS_NOT_GIT $dest — leaving in place" >&2
+  exit 0
+fi
+parent="$(dirname -- "$dest")"
+mkdir -p "$parent"
+git clone -- "$remote" "$dest"
+echo "CLONE_OK $dest"
+REMOTE_GIT
+      then
+        log "WARN: git clone/fetch failed for $name (continuing)"
+      fi
+      continue
+    fi
+
+    # No remote: fall back to rsync of source tree (still exclude bulky dirs)
+    [ -d "$ap" ] || { log "SKIP missing $name ($ap) and no remote"; continue; }
+    if ! rsync "${RSYNC_FLAGS[@]}" \
       -e "$RSYNC_RSH" \
       --exclude 'node_modules/' \
       --exclude '.venv/' \
@@ -177,10 +226,8 @@ PY
       --exclude 'tmp/' \
       --exclude 'logs/' \
       --exclude '.mypy_cache/' \
-      "$ap/" "$TARGET:~/$TARGET_DEV_REL/$rel/" </dev/null
-    rc=$?
-    set -e
-    if [ "$rc" -ne 0 ]; then
+      "$ap/" "$TARGET:~/$TARGET_DEV_REL/$rel/" </dev/null; then
+      rc=$?
       log "WARN: rsync exit $rc for project $name (continuing)"
     fi
   done 3<"$PROJECT_LIST"
