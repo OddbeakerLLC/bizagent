@@ -12,7 +12,7 @@
       <div class="rail-title">Agents</div>
       <div id="agents"></div>
     </aside>
-    <section class="chat-shell">
+    <section class="chat-shell" id="chatShell">
       <header class="topbar">
         <div id="conversationMenu" class="conversation-menu">
           <label for="conversationSelect">Conversation</label>
@@ -43,9 +43,54 @@
 
       <div id="messages" class="messages" aria-live="polite"></div>
       <form id="composer" class="fixed-composer">
-        <textarea id="messageInput" rows="2" placeholder="Message the hub"></textarea>
-        <button type="submit">Send</button>
+        <div class="composer-main">
+          <div id="attachChips" class="attach-chips" hidden></div>
+          <div class="composer-row">
+            <label class="attach-btn btn-secondary" title="Attach files">
+              📎
+              <input id="attachInput" type="file" multiple hidden>
+            </label>
+            <select id="attachRecipient" class="attach-recipient" title="Who receives attachments" hidden>
+              <option value="hub">This chat (Hub)</option>
+              <option value="company">Company / KS</option>
+            </select>
+            <textarea id="messageInput" rows="2" placeholder="Message the hub"></textarea>
+            <button type="submit">Send</button>
+          </div>
+        </div>
       </form>
+    </section>
+
+    <section class="library-shell" id="libraryShell" hidden>
+      <header class="topbar library-topbar">
+        <div class="library-topbar-left">
+          <button id="libraryBackBtn" type="button" class="btn-secondary" title="Back to chat">← Chat</button>
+          <h2 class="library-page-title">Library</h2>
+        </div>
+        <div class="auth-controls">
+          <button id="libraryRefresh" type="button" class="btn-secondary">Refresh</button>
+          <button id="libraryDownloadBtn" type="button" class="btn-secondary" disabled title="Download selected document">Download</button>
+        </div>
+      </header>
+      <div class="library-page-body">
+        <p class="company-help library-help">
+          Plans, specs, and other markdown written for you on the hub.
+          Agents and the hub save deliverables under <code>library/</code>.
+        </p>
+        <div class="library-layout">
+          <div class="library-sidebar">
+            <input id="libraryFilter" type="search" class="library-filter" placeholder="Filter by title…" autocomplete="off">
+            <ul id="libraryList" class="company-file-list library-list"></ul>
+          </div>
+          <div class="library-preview">
+            <div id="libraryPreviewTitle" class="library-preview-title">Select a document</div>
+            <div id="libraryPreviewBody" class="library-preview-body message-body">
+              <p class="company-file-empty">Nothing selected.</p>
+            </div>
+          </div>
+        </div>
+        <p id="libraryStatus" class="modal-status auth-status" hidden></p>
+      </div>
     </section>
   </main>
 
@@ -65,43 +110,6 @@
       <div class="modal-footer">
         <button id="modalCancel" type="button" class="btn-secondary">Cancel</button>
         <button id="modalSave" type="button">Save</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="libraryModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="libraryModalTitle">
-    <div class="modal-content modal-content--wide modal-content--library">
-      <div class="modal-header">
-        <h3 id="libraryModalTitle">Library</h3>
-        <button id="libraryModalClose" type="button" class="modal-close" aria-label="Close">&times;</button>
-      </div>
-      <div class="modal-body library-body">
-        <p class="company-help">
-          Plans, specs, and other markdown written for you on the hub.
-          Agents should save deliverables under <code>library/</code> so you can open them here without SSH.
-        </p>
-        <div class="library-layout">
-          <div class="library-sidebar">
-            <div class="company-upload-row">
-              <label class="company-file-label btn-secondary">
-                Upload
-                <input id="libraryFileInput" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden>
-              </label>
-              <button id="libraryRefresh" type="button" class="btn-secondary">Refresh</button>
-            </div>
-            <ul id="libraryList" class="company-file-list library-list"></ul>
-          </div>
-          <div class="library-preview">
-            <div id="libraryPreviewTitle" class="library-preview-title">Select a document</div>
-            <div id="libraryPreviewBody" class="library-preview-body message-body">
-              <p class="company-file-empty">Nothing selected.</p>
-            </div>
-          </div>
-        </div>
-        <p id="libraryStatus" class="modal-status auth-status" hidden></p>
-      </div>
-      <div class="modal-footer">
-        <button id="libraryModalDone" type="button">Done</button>
       </div>
     </div>
   </div>
@@ -144,7 +152,7 @@
     </div>
   </div>
 
-  <script src="/app.js"></script>
   <script src="/enterprise/enterprise-panel.js" onerror="/* enterprise optional */"></script>
+  <script src="/app.js"></script>
 </body>
 </html>

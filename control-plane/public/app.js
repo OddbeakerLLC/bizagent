@@ -14,6 +14,15 @@ let ws = null;
 let wsReady = false;
 let subscribedAgents = false;
 let subscribedConv = null; // conv id we are currently subscribed to over WS
+/** SPA route: 'chat' | 'library' */
+let currentRoute = 'chat';
+/** Library list cache + selection */
+let libraryEntriesCache = [];
+let librarySelectedId = '';
+/** Pending composer attachments (File objects before upload). */
+let pendingAttachFiles = [];
+/** Last agents snapshot for recipient dropdown. */
+let lastAgentsList = [];
 
 // UI polling gate for push test. Polling for /api/state and conversation history is OFF by default.
 // WS subscribe/push is the preferred and only driver when this flag is off (default).
@@ -60,8 +69,8 @@ function setAuthenticated(isAuthenticated, message) {
   if (libraryBtn) libraryBtn.hidden = !isAuthenticated;
   if (!isAuthenticated) {
     document.getElementById('namePanel').hidden = true;
-    if (typeof hideCompanyModal === 'function') hideCompanyModal();
-    if (typeof hideLibraryModal === 'function') hideLibraryModal();
+    hideCompanyModal();
+    if (currentRoute === 'library') navigateRoute('chat');
   }
   setAuthStatus(message || (isAuthenticated ? 'Signed in' : 'Login required'), isAuthenticated ? 'ok' : 'warn');
 }
@@ -357,6 +366,8 @@ function renderAgentProjects(detail, projects) {
 function renderAgents(agents) {
   const root = document.getElementById('agents');
   root.innerHTML = '';
+  lastAgentsList = Array.isArray(agents) ? agents : [];
+  updateAttachRecipientOptions();
   // Sort agents alphabetically by agentName, keeping PTL first
   const sorted = [...agents].sort((a, b) => {
     const aIsPTL = a.agentName === 'Agent PTL' || a.slug === 'hub';
@@ -652,6 +663,20 @@ function renderMessages(messages) {
     body.className = 'message-body';
     body.innerHTML = renderMarkdown(msg.content);
     el.appendChild(body);
+    if (Array.isArray(msg.attachments) && msg.attachments.length) {
+      const row = document.createElement('div');
+      row.className = 'message-attachments';
+      msg.attachments.forEach((a) => {
+        const chip = document.createElement('span');
+        chip.className = 'message-attach-chip';
+        const name = a.name || (a.path && a.path.split('/').pop()) || 'file';
+        const to = a.to ? ` → ${a.to}` : '';
+        chip.textContent = `${name}${to}`;
+        chip.title = a.path || name;
+        row.appendChild(chip);
+      });
+      el.appendChild(row);
+    }
     root.appendChild(el);
   });
   root.scrollTop = root.scrollHeight;
@@ -840,6 +865,38 @@ async function boot() {
   }
 }
 
+// --- SPA routing (chat | library) ---
+function parseRoute() {
+  const h = String((__loc.hash || '').replace(/^#/, '')).replace(/^\/+/, '');
+  if (h === 'library' || h.startsWith('library/')) return 'library';
+  return 'chat';
+}
+
+function navigateRoute(route, { push = true } = {}) {
+  const next = route === 'library' ? 'library' : 'chat';
+  if (push) {
+    const want = next === 'library' ? '#/library' : '#/chat';
+    if ((__loc.hash || '') !== want && typeof history !== 'undefined') {
+      history.pushState(null, '', want);
+    } else if (typeof location !== 'undefined') {
+      location.hash = want;
+    }
+  }
+  applyRoute(next);
+}
+
+function applyRoute(route) {
+  currentRoute = route === 'library' ? 'library' : 'chat';
+  const chat = document.getElementById('chatShell');
+  const lib = document.getElementById('libraryShell');
+  if (chat) chat.hidden = currentRoute !== 'chat';
+  if (lib) lib.hidden = currentRoute !== 'library';
+  if (currentRoute === 'library') {
+    refreshLibraryList(librarySelectedId).catch(() => {});
+  }
+}
+
+// --- Library page (operator-facing plans/specs) ---
 function setLibraryStatus(message, kind = 'neutral') {
   const status = document.getElementById('libraryStatus');
   if (!status) return;
@@ -853,29 +910,73 @@ function setLibraryStatus(message, kind = 'neutral') {
   status.dataset.kind = kind;
 }
 
-function hideLibraryModal() {
-  const modal = document.getElementById('libraryModal');
-  if (modal) modal.hidden = true;
-  setLibraryStatus('');
-  const input = document.getElementById('libraryFileInput');
-  if (input) input.value = '';
+function libraryFilterQuery() {
+  const el = document.getElementById('libraryFilter');
+  return ((el && el.value) || '').trim().toLowerCase();
+}
+
+function entryMatchesFilter(e, q) {
+  if (!q) return true;
+  const title = String(e.title || '').toLowerCase();
+  const p = String(e.path || '').toLowerCase();
+  const tags = Array.isArray(e.tags) ? e.tags.join(' ').toLowerCase() : '';
+  return title.includes(q) || p.includes(q) || tags.includes(q);
+}
+
+function renderLibraryList(selectId) {
+  const list = document.getElementById('libraryList');
+  if (!list) return;
+  const q = libraryFilterQuery();
+  const entries = libraryEntriesCache.filter((e) => entryMatchesFilter(e, q));
+  list.innerHTML = '';
+  if (libraryEntriesCache.length === 0) {
+    list.innerHTML = '<li class="company-file-empty">Library is empty. Ask the hub or an agent to save a plan under library/.</li>';
+    setLibraryDownloadEnabled(false);
+    return;
+  }
+  if (entries.length === 0) {
+    list.innerHTML = '<li class="company-file-empty">No documents match this filter.</li>';
+    setLibraryDownloadEnabled(false);
+    return;
+  }
+  for (const e of entries) {
+    const li = document.createElement('li');
+    li.className = 'company-file-item library-list-item';
+    li.dataset.id = e.id;
+    const when = e.created_at ? new Date(e.created_at).toLocaleString() : '';
+    li.innerHTML = `<span class="company-file-path">${escapeHtml(e.title || e.path || e.id)}</span>`
+      + `<span class="company-file-meta">${escapeHtml(when)}</span>`;
+    li.addEventListener('click', () => openLibraryDoc(e.id));
+    list.appendChild(li);
+  }
+  const pick = selectId && entries.some((e) => e.id === selectId)
+    ? selectId
+    : (entries[0] && entries[0].id);
+  if (pick) openLibraryDoc(pick);
+}
+
+function setLibraryDownloadEnabled(on) {
+  const btn = document.getElementById('libraryDownloadBtn');
+  if (btn) btn.disabled = !on;
 }
 
 async function openLibraryDoc(id) {
   const titleEl = document.getElementById('libraryPreviewTitle');
   const bodyEl = document.getElementById('libraryPreviewBody');
   if (!bodyEl) return;
+  librarySelectedId = id;
   bodyEl.innerHTML = '<p class="company-file-empty">Loading…</p>';
+  setLibraryDownloadEnabled(false);
   try {
     const doc = await api(`/api/library/file?id=${encodeURIComponent(id)}`);
     if (titleEl) {
       titleEl.textContent = doc.title || doc.path || id;
     }
     bodyEl.innerHTML = renderMarkdown(doc.content || '');
-    // highlight selected
     document.querySelectorAll('.library-list-item').forEach((el) => {
       el.classList.toggle('is-selected', el.dataset.id === id);
     });
+    setLibraryDownloadEnabled(true);
   } catch (err) {
     bodyEl.innerHTML = `<p class="company-file-empty">${escapeHtml(err.message || 'Failed to load')}</p>`;
   }
@@ -885,87 +986,165 @@ async function refreshLibraryList(selectId) {
   const list = document.getElementById('libraryList');
   if (!list) return;
   list.innerHTML = '<li class="company-file-empty">Loading…</li>';
+  setLibraryStatus('');
   try {
     const data = await api('/api/library');
-    const entries = Array.isArray(data.entries) ? data.entries : [];
-    list.innerHTML = '';
-    if (entries.length === 0) {
-      list.innerHTML = '<li class="company-file-empty">Library is empty. Upload a .md or ask the hub to save a plan here.</li>';
-      return;
-    }
-    for (const e of entries) {
-      const li = document.createElement('li');
-      li.className = 'company-file-item library-list-item';
-      li.dataset.id = e.id;
-      const when = e.created_at ? new Date(e.created_at).toLocaleString() : '';
-      li.innerHTML = `<span class="company-file-path">${escapeHtml(e.title || e.path || e.id)}</span>`
-        + `<span class="company-file-meta">${escapeHtml(when)}</span>`;
-      li.addEventListener('click', () => openLibraryDoc(e.id));
-      list.appendChild(li);
-    }
-    const pick = selectId || (entries[0] && entries[0].id);
-    if (pick) await openLibraryDoc(pick);
+    libraryEntriesCache = Array.isArray(data.entries) ? data.entries : [];
+    renderLibraryList(selectId || librarySelectedId);
   } catch (err) {
     list.innerHTML = '';
+    libraryEntriesCache = [];
     setLibraryStatus(err.message || 'Failed to list library', 'warn');
   }
 }
 
-async function showLibraryModal() {
-  const modal = document.getElementById('libraryModal');
-  if (!modal) return;
-  modal.hidden = false;
-  setLibraryStatus('');
-  await refreshLibraryList();
+function downloadLibraryDoc() {
+  if (!librarySelectedId) return;
+  const a = document.createElement('a');
+  a.href = `/api/library/file?id=${encodeURIComponent(librarySelectedId)}&download=1`;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
-async function uploadLibraryFile(file) {
-  if (!file) return;
-  setLibraryStatus(`Uploading ${file.name}…`, 'pending');
-  try {
-    const fd = new FormData();
-    fd.append('file', file, file.name);
-    fd.append('title', file.name.replace(/\.[^.]+$/, ''));
-    const res = await fetch('/api/library', {
-      method: 'POST',
-      body: fd,
-      credentials: 'same-origin',
-    });
-    const text = await res.text();
-    let body = {};
-    try { body = JSON.parse(text); } catch (_e) { body = { error: text }; }
-    if (!res.ok) throw new Error(body.error || `Upload failed (${res.status})`);
-    setLibraryStatus(`Added ${body.entry && body.entry.path}`, 'ok');
-    await refreshLibraryList(body.entry && body.entry.id);
-  } catch (err) {
-    setLibraryStatus(err.message || 'Upload failed', 'warn');
-  }
-}
-
-function bindLibraryModal() {
-  const modal = document.getElementById('libraryModal');
-  if (!modal || modal.dataset.bound === '1') return;
-  modal.dataset.bound = '1';
+function bindLibraryPage() {
   const openBtn = document.getElementById('libraryBtn');
-  if (openBtn) openBtn.addEventListener('click', () => showLibraryModal());
-  const close = () => hideLibraryModal();
-  const closeBtn = document.getElementById('libraryModalClose');
-  const doneBtn = document.getElementById('libraryModalDone');
-  if (closeBtn) closeBtn.addEventListener('click', close);
-  if (doneBtn) doneBtn.addEventListener('click', close);
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) close();
-  });
+  if (openBtn && openBtn.dataset.bound !== '1') {
+    openBtn.dataset.bound = '1';
+    openBtn.addEventListener('click', () => navigateRoute('library'));
+  }
+  const backBtn = document.getElementById('libraryBackBtn');
+  if (backBtn && backBtn.dataset.bound !== '1') {
+    backBtn.dataset.bound = '1';
+    backBtn.addEventListener('click', () => navigateRoute('chat'));
+  }
   const refreshBtn = document.getElementById('libraryRefresh');
-  if (refreshBtn) refreshBtn.addEventListener('click', () => refreshLibraryList());
-  const fileInput = document.getElementById('libraryFileInput');
-  if (fileInput) {
-    fileInput.addEventListener('change', async () => {
-      const file = fileInput.files && fileInput.files[0];
-      if (file) await uploadLibraryFile(file);
-      fileInput.value = '';
+  if (refreshBtn && refreshBtn.dataset.bound !== '1') {
+    refreshBtn.dataset.bound = '1';
+    refreshBtn.addEventListener('click', () => refreshLibraryList(librarySelectedId));
+  }
+  const dlBtn = document.getElementById('libraryDownloadBtn');
+  if (dlBtn && dlBtn.dataset.bound !== '1') {
+    dlBtn.dataset.bound = '1';
+    dlBtn.addEventListener('click', () => downloadLibraryDoc());
+  }
+  const filter = document.getElementById('libraryFilter');
+  if (filter && filter.dataset.bound !== '1') {
+    filter.dataset.bound = '1';
+    let t = null;
+    filter.addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(() => renderLibraryList(librarySelectedId), 120);
     });
   }
+  if (typeof window !== 'undefined' && !window.__bizagentHashBound) {
+    window.__bizagentHashBound = true;
+    window.addEventListener('hashchange', () => applyRoute(parseRoute()));
+    window.addEventListener('popstate', () => applyRoute(parseRoute()));
+  }
+}
+
+// --- Composer attachments ---
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function updateAttachRecipientOptions() {
+  const sel = document.getElementById('attachRecipient');
+  if (!sel) return;
+  const prev = sel.value || 'hub';
+  const agents = (lastAgentsList || []).filter((a) => a && a.slug && a.slug !== 'hub');
+  sel.innerHTML = '';
+  const opts = [
+    { value: 'hub', label: 'This chat (Hub)' },
+    ...agents.map((a) => ({
+      value: a.slug,
+      label: a.agentName || a.agent_name || a.name || a.slug,
+    })),
+    { value: 'company', label: 'Company / KS' },
+  ];
+  for (const o of opts) {
+    const opt = document.createElement('option');
+    opt.value = o.value;
+    opt.textContent = o.label;
+    sel.appendChild(opt);
+  }
+  sel.value = opts.some((o) => o.value === prev) ? prev : 'hub';
+}
+
+function renderAttachChips() {
+  const row = document.getElementById('attachChips');
+  const sel = document.getElementById('attachRecipient');
+  if (!row) return;
+  row.innerHTML = '';
+  if (!pendingAttachFiles.length) {
+    row.hidden = true;
+    if (sel) sel.hidden = true;
+    return;
+  }
+  row.hidden = false;
+  if (sel) sel.hidden = false;
+  pendingAttachFiles.forEach((file, idx) => {
+    const chip = document.createElement('span');
+    chip.className = 'attach-chip';
+    const name = document.createElement('span');
+    name.className = 'attach-chip-name';
+    name.textContent = `${file.name} (${formatBytes(file.size || 0)})`;
+    name.title = file.name;
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'attach-chip-remove';
+    rm.setAttribute('aria-label', 'Remove');
+    rm.textContent = '×';
+    rm.addEventListener('click', () => {
+      pendingAttachFiles.splice(idx, 1);
+      renderAttachChips();
+    });
+    chip.appendChild(name);
+    chip.appendChild(rm);
+    row.appendChild(chip);
+  });
+}
+
+async function uploadOneAttachment(file, to, conversationId) {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  fd.append('to', to || 'hub');
+  if (conversationId) fd.append('conversation_id', conversationId);
+  if (to === 'company') fd.append('subdir', 'uploads');
+  const res = await fetch('/api/uploads', {
+    method: 'POST',
+    body: fd,
+    credentials: 'same-origin',
+  });
+  const text = await res.text();
+  let body = {};
+  try { body = JSON.parse(text); } catch (_e) { body = { error: text }; }
+  if (!res.ok) throw new Error(body.error || `Upload failed (${res.status})`);
+  return {
+    name: body.name || file.name,
+    path: body.path,
+    to: body.to || to,
+    size: body.size || file.size,
+  };
+}
+
+function bindComposerAttachments() {
+  const input = document.getElementById('attachInput');
+  if (!input || input.dataset.bound === '1') return;
+  input.dataset.bound = '1';
+  input.addEventListener('change', () => {
+    const files = input.files ? Array.from(input.files) : [];
+    for (const f of files) {
+      if (pendingAttachFiles.length >= 8) break;
+      pendingAttachFiles.push(f);
+    }
+    input.value = '';
+    renderAttachChips();
+  });
 }
 
 // --- Company files (Knowledge Stack inputs on remote hubs) ---
@@ -988,12 +1167,6 @@ function hideCompanyModal() {
   setCompanyStatus('');
   const input = document.getElementById('companyFileInput');
   if (input) input.value = '';
-}
-
-function formatBytes(n) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 async function refreshCompanyFileList() {
@@ -1094,7 +1267,9 @@ document.getElementById('logout').addEventListener('click', async () => {
   setAuthenticated(false, 'Signed out');
 });
 bindCompanyModal();
-bindLibraryModal();
+bindLibraryPage();
+bindComposerAttachments();
+applyRoute(parseRoute());
 document.getElementById('newConversation').addEventListener('click', async () => {
   if (!displayName) {
     showNamePanel(true);
@@ -1139,11 +1314,34 @@ document.getElementById('composer').addEventListener('submit', async (event) => 
   }
   const input = document.getElementById('messageInput');
   const content = input.value.trim();
-  if (!content || !currentConversation) return;
+  const hasFiles = pendingAttachFiles.length > 0;
+  if ((!content && !hasFiles) || !currentConversation) return;
+  const text = content || (hasFiles ? '(attachments)' : '');
   input.value = '';
+  let attachments = [];
+  if (hasFiles) {
+    const sel = document.getElementById('attachRecipient');
+    const to = (sel && sel.value) || 'hub';
+    const files = pendingAttachFiles.slice();
+    pendingAttachFiles = [];
+    renderAttachChips();
+    try {
+      for (const file of files) {
+        const uploaded = await uploadOneAttachment(file, to, currentConversation);
+        attachments.push(uploaded);
+      }
+    } catch (err) {
+      setAuthStatus(err.message || 'Attachment upload failed', 'warn');
+      // restore unsent files
+      pendingAttachFiles = files;
+      renderAttachChips();
+      input.value = content;
+      return;
+    }
+  }
   const conv = await api(`/api/conversations/${encodeURIComponent(currentConversation)}/messages`, {
     method: 'POST',
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content: text, attachments }),
   });
   currentConversation = conv.id;
   await loadConversations();
@@ -1156,7 +1354,7 @@ document.getElementById('messageInput').addEventListener('keydown', (event) => {
   }
 });
 
-
+// --- Single-channel helpers ---
 function closeAllSse() {
   try { if (stateSource) { stateSource.close(); } } catch (_) {}
   try { if (convSource) { convSource.close(); } } catch (_) {}
@@ -1287,16 +1485,15 @@ setInterval(() => {
   const noPush = !wsReady && !convSource && currentConversation;
   if (FORCE_POLL || noPush) pollConversation().catch(() => {});
 }, 2000);
-
-boot();
-
-
 // Optional Enterprise additive UI (served when plugin active).
 function loadEnterprisePanel() {
-  if (document.getElementById('enterprise-panel-script')) return;
-  const s = document.createElement('script');
-  s.id = 'enterprise-panel-script';
-  s.src = '/enterprise/enterprise-panel.js';
+  if (document.getElementById("enterprise-panel-script")) return;
+  const s = document.createElement("script");
+  s.id = "enterprise-panel-script";
+  s.src = "/enterprise/enterprise-panel.js";
   s.onerror = function () { try { s.remove(); } catch (_) {} };
   document.head.appendChild(s);
 }
+
+
+boot();

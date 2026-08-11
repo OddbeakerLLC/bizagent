@@ -343,8 +343,9 @@ function buildHubTurnPrompt(hub) {
     ].join('\n');
   });
 
+  // FIFO: first pending inbox message with a conversation_id wins (matches dispatch).
   const convId = conversationIds.length
-    ? conversationIds[conversationIds.length - 1]
+    ? conversationIds[0]
     : '';
 
   // ALWAYS-WARM: conversation_id is guaranteed by dispatcher.getHubConversationId()

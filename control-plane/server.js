@@ -103,12 +103,17 @@ const {
   MAX_UPLOAD_BYTES,
 } = require("./lib/company-files");
 const {
-  addLibraryDocument,
   ensureLibrary,
   getLibraryEntry,
   listLibrary,
+  resolveLibraryFile,
   MAX_BYTES: LIBRARY_MAX_BYTES,
 } = require("./lib/library");
+const {
+  writeUpload,
+  assertAllowedAttachmentPath,
+  MAX_UPLOAD_BYTES: UPLOAD_MAX_BYTES,
+} = require("./lib/uploads");
 const {
   conversationIdsFromSafetyResults,
   setOnConversationMutated,
@@ -436,20 +441,7 @@ function currentState(config, session) {
   });
   // Enterprise hook: filter roster by seat/ownership (identity when plugin off).
   agents = applyFilterAgents(config.enterprise, agents, session || null);
-  const out = { agents, org: config.registry.org || "" };
-  if (
-    config.enterprise &&
-    config.enterprise.active &&
-    session
-  ) {
-    out.enterprise = {
-      enabled: true,
-      user_id: session.user_id || null,
-      role: session.role || null,
-      username: session.username || null,
-    };
-  }
-  return out;
+  return { agents, org: config.registry.org || "" };
 }
 
 function getAgentDetail(hub, slug) {
@@ -507,20 +499,19 @@ function getAgentDetail(hub, slug) {
 function syncUserInbox(config) {
   // Returns numeric relayed count. Also push the specific convs that were relayed
   // (prefer updated conv id over only the active file).
-  const { listHumanInboxes } = require('./lib/conversations');
+  const inbox = path.join(config.hub, 'user', 'inbox');
   let preIds = [];
   try {
-    for (const { inboxDir } of listHumanInboxes(config.hub)) {
-      try {
-        for (const f of fs.readdirSync(inboxDir).filter((n) => n.endsWith('.md'))) {
-          try {
-            const t = fs.readFileSync(path.join(inboxDir, f), 'utf8');
-            const m = t.match(/^conversation_id:\s*(\S+)/m);
-            if (m) preIds.push(m[1]);
-          } catch (_) {}
-        }
-      } catch (_) {}
-    }
+    preIds = fs.readdirSync(inbox)
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => {
+        try {
+          const t = fs.readFileSync(path.join(inbox, f), 'utf8');
+          const m = t.match(/^conversation_id:\s*(\S+)/m);
+          return m ? m[1] : null;
+        } catch (_) { return null; }
+      })
+      .filter(Boolean);
   } catch (_) {}
   const result = readUserInboxMessages(config.hub);
   const count = typeof result === 'number' ? result : Number((result && result.relayed) || 0);
@@ -694,8 +685,7 @@ async function handleApi(config, req, res) {
   );
   if (pluginRoute && pluginRoute.auth === false) {
     try {
-      req.params = pluginRoute.params || {};
-      return await pluginRoute.handler(req, res, config, pluginRoute.params || {});
+      return await pluginRoute.handler(req, res, config);
     } catch (err) {
       return send(res, 500, { error: err.message || "plugin route error" });
     }
@@ -705,8 +695,7 @@ async function handleApi(config, req, res) {
 
   if (pluginRoute) {
     try {
-      req.params = pluginRoute.params || {};
-      return await pluginRoute.handler(req, res, config, pluginRoute.params || {});
+      return await pluginRoute.handler(req, res, config);
     } catch (err) {
       return send(res, 500, { error: err.message || "plugin route error" });
     }
@@ -772,6 +761,28 @@ async function handleApi(config, req, res) {
         last_tick: recentEvents.find(e => e.event === "control_plane_tick")
       }
     });
+  }
+
+  if (url.pathname === "/api/conversations" && req.method === "GET") {
+    return send(res, 200, listConversations(config.hub));
+  }
+
+  if (url.pathname === "/api/conversations" && req.method === "POST") {
+    const body = await parseBody(req);
+    return send(res, 200, createConversation(config.hub, body.name));
+  }
+
+  if (url.pathname === "/api/profile" && req.method === "GET") {
+    return send(res, 200, getProfile(config.hub));
+  }
+
+  if (url.pathname === "/api/profile" && req.method === "PUT") {
+    const body = await parseBody(req);
+    try {
+      return send(res, 200, setProfile(config.hub, body));
+    } catch (err) {
+      return send(res, 400, { error: err.message || "invalid profile" });
+    }
   }
 
   // --- Company files (Knowledge Stack inputs; for operators without hub FS access) ---
@@ -899,7 +910,23 @@ async function handleApi(config, req, res) {
     try {
       const id = (url.searchParams.get("id") || url.searchParams.get("path") || "").trim();
       if (!id) return send(res, 400, { error: "id required" });
+      const wantDownload =
+        url.searchParams.get("download") === "1" ||
+        url.searchParams.get("download") === "true";
       const doc = getLibraryEntry(config.hub, id);
+      if (wantDownload) {
+        const { abs } = resolveLibraryFile(config.hub, doc.path);
+        const raw = fs.readFileSync(abs);
+        const filename = path.basename(doc.path || "document.md");
+        res.writeHead(200, {
+          "Content-Type": "text/markdown; charset=utf-8",
+          "Content-Length": raw.length,
+          "Content-Disposition": `attachment; filename="${filename.replace(/"/g, "")}"`,
+          "Cache-Control": "no-store",
+        });
+        res.end(raw);
+        return null;
+      }
       return send(res, 200, doc);
     } catch (err) {
       const msg = err.message || "not found";
@@ -908,107 +935,58 @@ async function handleApi(config, req, res) {
     }
   }
 
-  if (url.pathname === "/api/library" && req.method === "POST") {
+  // POST /api/library removed — library is write-via-hub/agents only.
+
+  // --- Chat uploads drop zone (.bizagent/uploads/ or company/) ---
+  if (url.pathname === "/api/uploads" && req.method === "POST") {
     try {
       const ct = String(req.headers["content-type"] || "");
-      let title = "";
-      let filename = "";
-      let source = "upload";
-      let buffer;
-      let overwrite = false;
-      let tags = [];
-
-      if (ct.includes("multipart/form-data")) {
-        const raw = await readRequestBuffer(req);
-        const parsed = parseMultipart(raw, ct);
-        if (!parsed.file || !parsed.file.buffer) {
-          return send(res, 400, { error: "missing file field (use name=file)" });
-        }
-        filename = parsed.fields.filename || parsed.file.filename || "document.md";
-        title = parsed.fields.title || filename;
-        source = parsed.fields.source || "upload";
-        overwrite =
-          parsed.fields.overwrite === "1" ||
-          parsed.fields.overwrite === "true";
-        if (parsed.fields.tags) {
-          tags = String(parsed.fields.tags)
-            .split(",")
-            .map((t) => t.trim())
-            .filter(Boolean);
-        }
-        buffer = parsed.file.buffer;
-      } else {
-        const body = await parseBody(req);
-        title = body.title || body.filename || body.name || "Untitled";
-        filename = body.filename || "";
-        source = body.source || "upload";
-        overwrite = !!body.overwrite;
-        tags = Array.isArray(body.tags) ? body.tags : [];
-        if (body.content_base64 || body.contentBase64) {
-          buffer = Buffer.from(
-            body.content_base64 || body.contentBase64,
-            "base64",
-          );
-        } else if (typeof body.content === "string") {
-          buffer = Buffer.from(body.content, "utf8");
-        } else {
-          return send(res, 400, {
-            error: "provide content or content_base64",
-          });
-        }
+      if (!ct.includes("multipart/form-data")) {
+        return send(res, 400, { error: "multipart/form-data required" });
       }
-
-      const entry = addLibraryDocument(config.hub, {
-        title,
+      const raw = await readRequestBuffer(req);
+      const parsed = parseMultipart(raw, ct);
+      if (!parsed.file || !parsed.file.buffer) {
+        return send(res, 400, { error: "missing file field (use name=file)" });
+      }
+      const to = (parsed.fields.to || "hub").trim();
+      const conversationId = (parsed.fields.conversation_id || "").trim();
+      const subdir = parsed.fields.subdir || "";
+      const filename = parsed.fields.filename || parsed.file.filename || "upload.bin";
+      const written = writeUpload(config.hub, {
+        to,
+        conversationId,
+        subdir,
         filename,
-        content: buffer,
-        source,
-        tags,
-        overwrite,
+        buffer: parsed.file.buffer,
+        overwrite:
+          parsed.fields.overwrite === "1" ||
+          parsed.fields.overwrite === "true",
       });
-
       try {
         logEvent(config.hub, {
-          event: "library_add",
+          event: "chat_upload",
           status: "ok",
-          id: entry.id,
-          path: entry.path,
-          source: entry.source,
+          to: written.to,
+          path: written.path,
+          size: written.size,
+          conversation_id: conversationId || "",
           username: (req.session && req.session.username) || "",
         });
       } catch (_err) {
         /* ignore */
       }
-
-      return send(res, 200, { ok: true, entry });
+      return send(res, 200, {
+        ok: true,
+        ...written,
+        max_upload_bytes: UPLOAD_MAX_BYTES,
+      });
     } catch (err) {
-      const msg = err.message || "library add failed";
-      const status = /too large|not allowed|invalid|empty|escape/i.test(msg)
+      const msg = err.message || "upload failed";
+      const status = /too large|not allowed|invalid|empty|escape|missing/i.test(msg)
         ? 400
         : 500;
       return send(res, status, { error: msg });
-    }
-  }
-
-  if (url.pathname === "/api/conversations" && req.method === "GET") {
-    return send(res, 200, listConversations(config.hub, req.session));
-  }
-
-  if (url.pathname === "/api/conversations" && req.method === "POST") {
-    const body = await parseBody(req);
-    return send(res, 200, createConversation(config.hub, body.name, req.session));
-  }
-
-  if (url.pathname === "/api/profile" && req.method === "GET") {
-    return send(res, 200, getProfile(config.hub));
-  }
-
-  if (url.pathname === "/api/profile" && req.method === "PUT") {
-    const body = await parseBody(req);
-    try {
-      return send(res, 200, setProfile(config.hub, body));
-    } catch (err) {
-      return send(res, 400, { error: err.message || "invalid profile" });
     }
   }
 
@@ -1073,11 +1051,11 @@ async function handleApi(config, req, res) {
   );
   if (conversationMatch && req.method === "GET") {
     const id = decodeURIComponent(conversationMatch[1]);
-    const conv = getConversation(config.hub, id, req.session);
+    const conv = getConversation(config.hub, id);
     if (!conv) return send(res, 404, { error: "conversation not found" });
     // Console poll / open: keep this conversation active so hub→user mail
     // missing conversation_id can be stamped on route and relay into chat.
-    setActiveConversation(config.hub, id, req.session);
+    setActiveConversation(config.hub, id);
     return send(res, 200, conv);
   }
 
@@ -1087,9 +1065,9 @@ async function handleApi(config, req, res) {
   );
   if (convStreamMatch && req.method === "GET") {
     const id = decodeURIComponent(convStreamMatch[1]);
-    const conv = getConversation(config.hub, id, req.session);
+    const conv = getConversation(config.hub, id);
     if (!conv) return send(res, 404, { error: "conversation not found" });
-    setActiveConversation(config.hub, id, req.session);
+    setActiveConversation(config.hub, id);
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -1104,10 +1082,10 @@ async function handleApi(config, req, res) {
 
   if (conversationMatch && req.method === "DELETE") {
     const id = decodeURIComponent(conversationMatch[1]);
-    if (!getConversation(config.hub, id, req.session)) {
+    if (!getConversation(config.hub, id)) {
       return send(res, 404, { error: "conversation not found" });
     }
-    if (!deleteConversation(config.hub, id, req.session)) {
+    if (!deleteConversation(config.hub, id)) {
       return send(res, 500, { error: "could not delete conversation" });
     }
     didChangeState();
@@ -1121,21 +1099,37 @@ async function handleApi(config, req, res) {
     const start = Date.now();
     const body = await parseBody(req);
     const content = body.content || "";
-    // PTL-only: browser may only write hub inbox via this path (never agents/*/inbox).
     const id = shouldStartNewConversation(content)
-      ? createConversation(config.hub, conversationNameFromContent(content), req.session).id
+      ? createConversation(config.hub, conversationNameFromContent(content)).id
       : decodeURIComponent(messageMatch[1]);
-    if (!getConversation(config.hub, id, req.session) && !shouldStartNewConversation(content)) {
-      return send(res, 404, { error: "conversation not found" });
+
+    // Optional attachments: paths must already exist under uploads/ or company/.
+    let attachments = [];
+    if (Array.isArray(body.attachments) && body.attachments.length) {
+      try {
+        attachments = body.attachments.map((a) => {
+          const rel = assertAllowedAttachmentPath(config.hub, a.path || a);
+          return {
+            name: a.name || path.basename(rel),
+            path: rel,
+            to: a.to || "",
+            size: a.size || undefined,
+          };
+        });
+      } catch (err) {
+        return send(res, 400, { error: err.message || "invalid attachments" });
+      }
     }
-    writeHubInboxMessage(config.hub, content, id, req.session);
-    const conv = appendMessage(config.hub, id, "user", content);
-    setActiveConversation(config.hub, id, req.session);
+
+    writeHubInboxMessage(config.hub, content, id, { attachments });
+    const conv = appendMessage(config.hub, id, "user", content, { attachments });
+    setActiveConversation(config.hub, id);
 
     logEvent(config.hub, {
       event: 'user_message_received',
       conversation_id: id,
       content_length: content.length,
+      attachment_count: attachments.length,
       duration_ms: Math.round((Date.now() - start) * 100) / 100
     });
 
@@ -1202,33 +1196,6 @@ function createServer(config) {
       );
       return;
     }
-    // Enterprise package static assets (additive panels) under /enterprise/*
-    if (
-      req.url.startsWith('/enterprise/') &&
-      config.enterprise &&
-      config.enterprise.active &&
-      config.enterprise.module
-    ) {
-      try {
-        const entRoot =
-          (config.registry.settings.enterprise &&
-            config.registry.settings.enterprise.package_path) ||
-          process.env.BIZAGENT_ENTERPRISE_PATH ||
-          '';
-        if (entRoot) {
-          const rel = decodeURIComponent(req.url.split('?')[0].replace(/^\/enterprise\//, ''));
-          const file = path.resolve(path.join(entRoot, 'ui', rel));
-          const uiRoot = path.resolve(path.join(entRoot, 'ui'));
-          if (file.startsWith(uiRoot + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
-            const ext = path.extname(file).toLowerCase();
-            const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.svg': 'image/svg+xml' };
-            res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream' });
-            fs.createReadStream(file).pipe(res);
-            return;
-          }
-        }
-      } catch (_) {}
-    }
     if (!serveStatic(req, res)) send(res, 404, "not found");
   });
 
@@ -1247,28 +1214,19 @@ function createServer(config) {
         return;
       }
       // Cookie/session auth identical to requireAuth (no body parsing here).
-      const provider = authProvider(config);
-      const has =
-        provider && typeof provider.hasAuth === 'function'
-          ? provider.hasAuth(config.hub)
-          : hasAuth(config.hub);
-      if (!has) {
+      if (!hasAuth(config.hub)) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
       }
       const cookies = parseCookies(req.headers.cookie);
-      const session =
-        provider && typeof provider.getSession === 'function'
-          ? provider.getSession(config.hub, cookies.bizagent_session)
-          : getSession(config.hub, cookies.bizagent_session);
+      const session = getSession(config.hub, cookies.bizagent_session);
       if (!session) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
       }
       const username = session.username || 'operator';
-      const sessionFull = { id: cookies.bizagent_session, ...session };
 
       wss.handleUpgrade(req, socket, head, (ws) => {
         const meta = getClientMeta(ws);
@@ -1283,12 +1241,12 @@ function createServer(config) {
               meta.subscribed.add('agents');
               addWsAgentsClient(ws);
               // Immediate snapshot on subscribe (and reconnect)
-              try { wsSend(ws, { feed: 'agents', snapshot: currentState(config, sessionFull) }); } catch (_) {}
+              try { wsSend(ws, { feed: 'agents', snapshot: currentState(config) }); } catch (_) {}
             } else if (feed.startsWith('conversation:')) {
               const id = feed.slice('conversation:'.length);
               // Conversation visibility gate (OSS = any existing conv; Enterprise = ownership/ACL).
               // We validate the conv exists for this hub; per-user scoping is a documented hook.
-              const conv = getConversation(config.hub, id, sessionFull);
+              const conv = getConversation(config.hub, id);
               if (!conv) {
                 wsSend(ws, { feed, error: 'not found' });
                 return;
