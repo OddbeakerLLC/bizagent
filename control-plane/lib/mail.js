@@ -9,12 +9,6 @@ const {
   stampConversationId,
   userInbox,
 } = require('./conversations');
-const {
-  applyResolveUserInbox,
-  getActiveEnterpriseHooks,
-  getActiveEnterpriseState,
-  isActiveEnterprise,
-} = require('./enterprise-plugin');
 const { logEvent, appendLog } = require('./log');
 
 function frontmatterValue(text, key) {
@@ -22,17 +16,8 @@ function frontmatterValue(text, key) {
   return match ? match[1].trim() : '';
 }
 
-function inboxFor(hub, slug, frontmatter = null) {
-  if (slug === 'user') {
-    if (isActiveEnterprise()) {
-      const ent = getActiveEnterpriseState();
-      const fm = frontmatter && typeof frontmatter === 'object' ? frontmatter : {};
-      const resolved = applyResolveUserInbox(ent, hub, fm, null);
-      if (resolved === null) return null; // signal quarantine
-      if (resolved) return resolved;
-    }
-    return userInbox(hub);
-  }
+function inboxFor(hub, slug) {
+  if (slug === 'user') return userInbox(hub);
   return slug === 'hub' ? path.join(hub, 'inbox') : path.join(hub, 'agents', slug, 'inbox');
 }
 
@@ -40,12 +25,10 @@ function recipientSlugs(hub) {
   return new Set(['hub', 'user', ...agentsFromRegistry(loadRegistry(hub)).map((agent) => agent.slug)]);
 }
 
-function safeInboxFor(hub, slug, frontmatter = null) {
+function safeInboxFor(hub, slug) {
   if (!recipientSlugs(hub).has(slug)) return null;
   const hubRoot = path.resolve(hub);
-  const raw = inboxFor(hub, slug, frontmatter);
-  if (raw === null) return null;
-  const inbox = path.resolve(raw);
+  const inbox = path.resolve(inboxFor(hub, slug));
   if (inbox !== path.join(hubRoot, 'inbox') && !inbox.startsWith(`${hubRoot}${path.sep}`)) {
     throw new Error(`invalid inbox path for ${slug}`);
   }
@@ -138,8 +121,9 @@ function writeContentUnique(dir, basename, content) {
 }
 
 /**
- * For mail missing conversation_id: stamp originating hub turn, last-viewed
- * console chat (long TTL), or pending hub→agent work for fromSlug.
+ * For mail missing conversation_id: stamp via getStampConversationId.
+ * agent→hub (fromSlug set): pending hub→agent work for that slug, else last-viewed.
+ * hub→user / unscoped: in-flight originating hub turn, else last-viewed.
  * Never overwrites an existing conversation_id.
  * @param {string} [fromSlug] - product agent slug for agent→hub completions
  */
@@ -258,25 +242,7 @@ function routeOutboxes(hub) {
         });
         continue;
       }
-
-      // Enterprise: hub→user requires user_id (quarantine if missing — never mis-deliver).
-      const fm = {
-        to,
-        from,
-        user_id: frontmatterValue(text, 'user_id'),
-        conversation_id: frontmatterValue(text, 'conversation_id'),
-      };
-      if (to === 'user' && isActiveEnterprise()) {
-        const uid = (fm.user_id || '').trim();
-        if (!uid) {
-          quarantineOutboxFile(hub, file, 'missing-user_id');
-          quarantined += 1;
-          warnings += 1;
-          continue;
-        }
-      }
-
-      const dest = safeInboxFor(hub, to, fm);
+      const dest = safeInboxFor(hub, to);
       if (!dest || !fs.existsSync(dest)) {
         if (to === 'user' && dest) fs.mkdirSync(dest, { recursive: true });
       }
@@ -313,8 +279,18 @@ function routeOutboxes(hub) {
         deliveredFile = writeFileUnique(dest, base, file);
       }
       // Thread conversation_id: hub→agent dispatch remembers which console chat asked.
+      // Prefer conversation_id already on the hub→agent mail; else stamp heuristics.
       if (isHubToAgent && deliveredFile) {
-        const stampId = getStampConversationId(hub);
+        let stampId = '';
+        try {
+          const deliveredText = fs.existsSync(deliveredFile)
+            ? fs.readFileSync(deliveredFile, 'utf8')
+            : text;
+          stampId = frontmatterValue(deliveredText, 'conversation_id') || '';
+        } catch (_e) {
+          stampId = '';
+        }
+        if (!stampId) stampId = getStampConversationId(hub) || '';
         if (stampId) {
           try {
             recordPendingAgentWork(hub, to, stampId);
@@ -408,9 +384,6 @@ function writeOutboxMessage(hub, opts = {}) {
   const conversationId = opts.conversationId != null
     ? String(opts.conversationId).trim()
     : '';
-  const userId = opts.userId != null
-    ? String(opts.userId).trim()
-    : (opts.user_id != null ? String(opts.user_id).trim() : '');
 
   if (!from || !VALID_SLUG.test(from)) {
     throw new Error('writeOutboxMessage: invalid or missing from slug');
@@ -433,7 +406,6 @@ function writeOutboxMessage(hub, opts = {}) {
     `date: ${date}`,
     `subject: ${subject}`,
     conversationId ? `conversation_id: ${conversationId}` : '',
-    userId ? `user_id: ${userId}` : '',
     '---',
   ].filter((line) => line !== '').join('\n');
 

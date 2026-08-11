@@ -12,7 +12,17 @@ const {
 } = require('./hub-memory');
 const { pendingMail } = require('./mail');
 const { logEvent, logLatency, logError, appendLog } = require('./log');
-const { postLaunchAck, postAgentCompletionNotice, writeFileUnique } = require('./conversations');
+const {
+  appendMessage,
+  createConversation,
+  getActiveConversationId,
+  getConversation,
+  listConversations,
+  postLaunchAck,
+  postAgentCompletionNotice,
+  STATUS_ERROR_KIND,
+  writeFileUnique,
+} = require('./conversations');
 const {
   drainPendingHubTurns,
   notifyConversationMutated,
@@ -22,6 +32,10 @@ const {
   recordPendingHubTurn,
   reservedReplyBodyPath,
 } = require('./hub-turn-safety');
+const {
+  classifyProviderError,
+  formatProviderFailureMessage,
+} = require('./provider-errors');
 
 function hubDaemonSock(hub) {
   return path.join(hub, '.bizagent', 'hub.sock');
@@ -93,16 +107,16 @@ function nowIso() {
 /**
  * Get conversation_id for hub dispatch.
  * ALWAYS returns a valid conversation_id — never null.
- * Falls back to active conversation or creates a "System" conversation.
+ * Prefer the oldest pending inbox message with an explicit id (FIFO),
+ * not the newest file — avoids mis-binding when multiple messages queue.
  */
 function getHubConversationId(hub) {
-  // First: check pending hub inbox mail for explicit conversation_id
+  // First: oldest pending hub inbox mail with explicit conversation_id (FIFO)
   const inboxDir = path.join(hub, 'inbox');
   try {
     const files = fs.readdirSync(inboxDir)
       .filter(f => f.endsWith('.md') && !f.startsWith('.'))
-      .sort()
-      .reverse();
+      .sort(); // ascending = oldest first
     for (const name of files) {
       const content = fs.readFileSync(path.join(inboxDir, name), 'utf8');
       const match = content.match(/^conversation_id:\s*(.+?)$/m);
@@ -112,12 +126,20 @@ function getHubConversationId(hub) {
     /* ignore */
   }
 
-  // Second: use active conversation (longer TTL for stamping)
-  const { getActiveConversationId, createConversation } = require('./conversations');
+  // Second: in-flight originating turn (if any)
+  try {
+    const { getOriginatingConversationId } = require('./conversations');
+    const originating = getOriginatingConversationId(hub);
+    if (originating) return originating;
+  } catch (_err) {
+    /* ignore */
+  }
+
+  // Third: active conversation (longer TTL)
   const activeId = getActiveConversationId(hub, 24 * 60 * 60 * 1000); // 24h TTL
   if (activeId) return activeId;
 
-  // Third: create a System conversation (always-warm guarantee)
+  // Fourth: System conversation (always-warm guarantee)
   const sysConv = createConversation(hub, 'System');
   return sysConv.id;
 }
@@ -136,50 +158,212 @@ function logByteOffset(file) {
   }
 }
 
-function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
-  const errorMsg = `Agent \`${slug}\` failed with exit code ${exitCode}.\n\nStderr:\n\`\`\`\n${stderrTail}\n\`\`\``;
-
-  if (conversationId) {
-    const inboxDir = path.join(hub, 'user', 'inbox');
-    writeFileUnique(inboxDir, `${new Date().toISOString().slice(0, 10)}-cp-agent-error`, [
-      '---',
-      'from: hub',
-      'to: user',
-      `date: ${new Date().toISOString().slice(0, 10)}`,
-      'subject: agent error',
-      `conversation_id: ${conversationId}`,
-      '---',
-      '',
-      errorMsg,
-    ].join('\n'));
-  } else {
-    const journalDir = path.join(appDir(hub), 'incidents');
-    fs.mkdirSync(journalDir, { recursive: true });
-    const dateStr = new Date().toISOString().slice(0, 10);
-    const journalFile = path.join(journalDir, `${dateStr}.md`);
-    const incident = `\n## [Incident] ${slug} exit code ${exitCode}\n${stderrTail.slice(0, 200)}\n`;
-    try {
-      fs.appendFileSync(journalFile, incident);
-    } catch (_err) {
-      fs.writeFileSync(journalFile, `# Incidents\n${incident}`);
-    }
-  }
-}
-
-function readStderrTail(stderrFile, maxBytes = 500) {
+function readLogTail(file, maxBytes = 2500) {
   try {
-    if (!fs.existsSync(stderrFile)) return '';
-    const stat = fs.statSync(stderrFile);
+    if (!fs.existsSync(file)) return '';
+    const stat = fs.statSync(file);
     const size = stat.size;
     if (size === 0) return '';
     const buffer = Buffer.alloc(Math.min(maxBytes, size));
-    const fd = fs.openSync(stderrFile, 'r');
+    const fd = fs.openSync(file, 'r');
     fs.readSync(fd, buffer, 0, buffer.length, Math.max(0, size - maxBytes));
     fs.closeSync(fd);
     return buffer.toString('utf8').trim();
   } catch (_err) {
     return '';
   }
+}
+
+function readStderrTail(stderrFile, maxBytes = 2500) {
+  return readLogTail(stderrFile, maxBytes);
+}
+
+/**
+ * Resolve a conversation to show operator-facing agent failures.
+ * Prefer explicit id → active chat → most recently updated conversation.
+ */
+function resolveAlertConversationId(hub, conversationId) {
+  if (conversationId && getConversation(hub, conversationId)) return conversationId;
+  try {
+    const active = getActiveConversationId(hub, 24 * 60 * 60 * 1000);
+    if (active && getConversation(hub, active)) return active;
+  } catch (_err) {
+    /* ignore */
+  }
+  try {
+    const list = listConversations(hub) || [];
+    if (list.length) {
+      const sorted = [...list].sort((a, b) =>
+        String(b.updated_at || b.created_at || '').localeCompare(
+          String(a.updated_at || a.created_at || ''),
+        ),
+      );
+      if (sorted[0] && sorted[0].id) return sorted[0].id;
+    }
+  } catch (_err) {
+    /* ignore */
+  }
+  return null;
+}
+
+/** Shell EXIT + Node child.exit can both fire — suppress duplicate alerts. */
+function shouldSkipDuplicateAgentError(hub, slug, exitCode, kind) {
+  const stampPath = path.join(hub, '.bizagent', 'last-agent-error.json');
+  const now = Date.now();
+  try {
+    if (fs.existsSync(stampPath)) {
+      const prev = JSON.parse(fs.readFileSync(stampPath, 'utf8'));
+      if (
+        prev &&
+        prev.slug === slug &&
+        Number(prev.exitCode) === Number(exitCode) &&
+        prev.kind === kind &&
+        now - Number(prev.ts || 0) < 45000
+      ) {
+        return true;
+      }
+    }
+  } catch (_err) {
+    /* ignore */
+  }
+  try {
+    fs.mkdirSync(path.dirname(stampPath), { recursive: true });
+    fs.writeFileSync(
+      stampPath,
+      `${JSON.stringify({ slug, exitCode, kind, ts: now })}\n`,
+      'utf8',
+    );
+  } catch (_err) {
+    /* ignore */
+  }
+  return false;
+}
+
+/**
+ * Notify the operator in the web console when an agent (or hub cold path) fails.
+ * Posts a status error into the active chat so credit/quota failures are never log-only.
+ */
+function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
+  const stdoutTail = readLogTail(
+    path.join(hub, 'logs', `dispatch-${slug}.log`),
+    2500,
+  );
+  const combined = [stderrTail, stdoutTail].filter(Boolean).join('\n');
+  const classified = classifyProviderError(combined);
+  const kind = classified ? classified.kind : 'error';
+  if (shouldSkipDuplicateAgentError(hub, slug, exitCode, kind)) return;
+
+  const errorMsg = formatProviderFailureMessage({
+    slug,
+    exitCode,
+    text: combined,
+    classified,
+  });
+
+  const cid = resolveAlertConversationId(hub, conversationId);
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const subject = classified
+    ? classified.kind === 'credits'
+      ? 'LLM credits exhausted'
+      : classified.title.slice(0, 60)
+    : 'agent error';
+
+  // Primary: status error in the console conversation (visible immediately on poll).
+  let postedToChat = false;
+  if (cid) {
+    try {
+      appendMessage(hub, cid, 'status', errorMsg, { kind: STATUS_ERROR_KIND });
+      postedToChat = true;
+      try {
+        notifyConversationMutated(hub, cid);
+      } catch (_err) {
+        /* detached shell has no WS push — poll still picks it up */
+      }
+    } catch (_err) {
+      postedToChat = false;
+    }
+  }
+
+  // Backup path: user inbox (relayed on next CP tick) if direct append failed.
+  if (cid && !postedToChat) {
+    try {
+      writeFileUnique(path.join(hub, 'user', 'inbox'), `${dateStr}-cp-agent-error`, [
+        '---',
+        'from: hub',
+        'to: user',
+        `date: ${dateStr}`,
+        `subject: ${subject}`,
+        `conversation_id: ${cid}`,
+        '---',
+        '',
+        errorMsg,
+      ].join('\n'));
+    } catch (_err) {
+      /* ignore */
+    }
+  }
+
+  // No chat at all: queue for hub so PTL can relay once operator is back.
+  if (!cid) {
+    try {
+      writeFileUnique(path.join(hub, 'inbox'), `${dateStr}-cp-agent-error-${slug}`, [
+        '---',
+        'from: control-plane',
+        'to: hub',
+        `date: ${dateStr}`,
+        `subject: ${subject}`,
+        '---',
+        '',
+        errorMsg,
+        '',
+        'Relay a short notice to the operator if appropriate.',
+      ].join('\n'));
+    } catch (_err) {
+      /* ignore */
+    }
+  }
+
+  // Always journal for ops trail
+  try {
+    const journalDir = path.join(hub, 'journal');
+    fs.mkdirSync(journalDir, { recursive: true });
+    const journalFile = path.join(journalDir, `${dateStr}.md`);
+    const incident = `- [Incident] agent \`${slug}\` exit ${exitCode} (${kind}): ${
+      classified ? classified.title : 'see dispatch logs'
+    }\n`;
+    if (!fs.existsSync(journalFile)) {
+      fs.writeFileSync(journalFile, `# ${dateStr}\n\n${incident}`, 'utf8');
+    } else {
+      fs.appendFileSync(journalFile, incident, 'utf8');
+    }
+  } catch (_err) {
+    /* ignore */
+  }
+
+  try {
+    logEvent(hub, {
+      event: 'agent_error',
+      status: 'error',
+      slug,
+      exit_code: exitCode,
+      kind,
+      conversation_id: cid || '',
+      message: classified ? classified.title : `exit ${exitCode}`,
+    });
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
+/**
+ * CLI helper for shell wrappers after non-zero agent exit (detached children
+ * do not always deliver Node 'exit' to the long-lived control plane).
+ */
+function notifyAgentExitFromLogs(hub, slug, exitCode) {
+  const stderrTail = readStderrTail(
+    path.join(hub, 'logs', `dispatch-${slug}.stderr`),
+  );
+  recordAgentError(hub, slug, exitCode, stderrTail, null);
 }
 
 function promptFileFor(hub, slug) {
@@ -447,6 +631,10 @@ function launchAgent(config, slug, model = '', cliName = '') {
     'printf "%s === dispatch end slug=%s code=%s duration_ms=%s ===\\n" "$(ts)" "$slug" "$code" "$dur" >> "$agentlog"',
     'printf "%s === dispatch end slug=%s code=%s duration_ms=%s ===\\n" "$(ts)" "$slug" "$code" "$dur" >> "$stderrlog"',
     'printf "%s control-plane: cli_exit slug=%s code=%s duration_ms=%s t=%s\\n" "$(ts)" "$slug" "$code" "$dur" "$(ts)" >> "$cplog"',
+    // Detached CP may miss Node 'exit'; notify operator (credits/auth/etc.) from logs.
+    'if [ "$code" -ne 0 ] && command -v node >/dev/null 2>&1; then',
+    '  node -e "try{require(process.argv[1]).notifyAgentExitFromLogs(process.argv[2],process.argv[3],Number(process.argv[4]))}catch(e){}" "$HUB/control-plane/lib/dispatcher.js" "$HUB" "$slug" "$code" >>"$cplog" 2>&1 || true',
+    'fi',
     'exit "$code"',
   ].join('\n');
 
@@ -733,6 +921,9 @@ function launchHubCold(config, ctx) {
     'printf "%s === dispatch end slug=hub code=%s duration_ms=%s ===\\n" "$(ts)" "$code" "$dur" >> "$agentlog"',
     'printf "%s === dispatch end slug=hub code=%s duration_ms=%s ===\\n" "$(ts)" "$code" "$dur" >> "$stderrlog"',
     'printf "%s control-plane: cli_exit slug=hub code=%s duration_ms=%s t=%s\\n" "$(ts)" "$code" "$dur" "$(ts)" >> "$cplog"',
+    'if [ "$code" -ne 0 ] && command -v node >/dev/null 2>&1; then',
+    '  node -e "try{require(process.argv[1]).notifyAgentExitFromLogs(process.argv[2],process.argv[3],Number(process.argv[4]))}catch(e){}" "$HUB/control-plane/lib/dispatcher.js" "$HUB" hub "$code" >>"$cplog" 2>&1 || true',
+    'fi',
     'exit "$code"',
   ].join('\n');
 
@@ -877,6 +1068,7 @@ module.exports = {
   liveHubCount,
   liveRunCount,
   markMailDispatched,
+  notifyAgentExitFromLogs,
   pendingUndispatchedMail,
   preferWarmDaemon,
   promptFileFor,

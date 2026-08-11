@@ -1,8 +1,9 @@
 # bizagent-agent
 
-OpenAI-compatible tool-calling agent runtime for BizAgent (Phase A).
+OpenAI-compatible tool-calling agent runtime for BizAgent.
 
-Lifted from the venice-code pattern: fixed local tools + multi-provider HTTP backend.
+Local tools (list/glob/grep/read/edit/shell/fetch) + multi-provider HTTP backend.
+Defaults: temperature `0.2`, up to `50` tool iterations (`BIZAGENT_AGENT_MAX_ITERATIONS`).
 
 ## Providers
 

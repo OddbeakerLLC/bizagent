@@ -73,6 +73,8 @@ if [[ -f "$HUB/.gitignore" ]]; then
 !company/**
 !knowledge-stack/
 !knowledge-stack/**
+!library/
+!library/**
 !agents/
 !agents/**
 # Still never commit live mail or lock noise under agents/

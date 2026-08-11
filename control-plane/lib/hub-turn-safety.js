@@ -432,13 +432,30 @@ function hardFailMessage(turn) {
       'Fix: set `settings.hub_agent.model` in registry.json to a model from `grok models` (or your CLI), then restart the control plane.',
     ].filter(Boolean).join(' ');
   }
-  if (err && /usage balance exhausted|402 Payment Required/i.test(err)) {
+  if (
+    err &&
+    /usage balance exhausted|402 Payment Required|used all available credits|spending limit|purchase more credits|insufficient.?credit/i.test(
+      err,
+    )
+  ) {
     return [
-      'Hub CLI API quota/balance exhausted.',
+      'LLM API credits / spending limit exhausted.',
       exitBit,
       err,
-      'Fix: top up the provider account or switch models in registry.json.',
-    ].filter(Boolean).join(' ');
+      'Fix: top up or raise the limit at the provider console, or switch provider/model in the agent rail, then retry.',
+    ]
+      .filter(Boolean)
+      .join(' ');
+  }
+  if (err && /403/.test(err) && /credit|spending limit|quota/i.test(err)) {
+    return [
+      'LLM API credits / spending limit exhausted (HTTP 403).',
+      exitBit,
+      err,
+      'Fix: top up or raise the limit at the provider console, or switch provider/model in the agent rail, then retry.',
+    ]
+      .filter(Boolean)
+      .join(' ');
   }
 
   const parts = [

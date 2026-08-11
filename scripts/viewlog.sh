@@ -4,6 +4,7 @@
 # Usage:
 #   scripts/viewlog.sh              # follow the usual human-readable set
 #   scripts/viewlog.sh hub          # hub daemon + dispatch-hub.*
+#   scripts/viewlog.sh agent SLUG   # dispatch-<slug>.log + .stderr (e.g. bizagent)
 #   scripts/viewlog.sh cron         # nightly.log + weekly.log
 #   scripts/viewlog.sh all          # every non-empty *.log / *.stderr (skips structured.log)
 #   scripts/viewlog.sh -n 200       # last N lines then follow (default 50)
@@ -28,7 +29,7 @@ usage() {
   cat <<'EOF' >&2
 usage: scripts/viewlog.sh [mode] [-n LINES]
 
-  mode     default | hub | cp | cron | all
+  mode     default | hub | cp | cron | agent | all
   -n N     show last N lines before following (default 50)
 
   default  control-plane.log, control-plane-server.log,
@@ -37,11 +38,16 @@ usage: scripts/viewlog.sh [mode] [-n LINES]
   hub      hub-daemon.log + dispatch-hub.*
   cp       control-plane.log + control-plane-server.log
   cron     nightly.log + weekly.log
+  agent S  dispatch-S.log + dispatch-S.stderr  (product slug, e.g. bizagent)
   all      every non-empty *.log / *.stderr under logs/ (never structured.log)
+
+  Tip: product agents do NOT write to dispatch-hub.log — use:
+    scripts/viewlog.sh agent bizagent
 EOF
   exit 2
 }
 
+AGENT_SLUG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage ;;
@@ -53,6 +59,15 @@ while [[ $# -gt 0 ]]; do
     default|hub|cp|cron|all)
       MODE="$1"
       shift
+      ;;
+    agent)
+      MODE="agent"
+      AGENT_SLUG="${2:-}"
+      if [[ -z "$AGENT_SLUG" || "$AGENT_SLUG" == -* ]]; then
+        echo "viewlog: agent mode requires a slug (e.g. bizagent)" >&2
+        exit 2
+      fi
+      shift 2
       ;;
     *)
       echo "viewlog: unknown argument: $1" >&2
@@ -101,6 +116,16 @@ case "$MODE" in
     mapfile -t FILES < <(pick_existing \
       "$LOG_DIR/nightly.log" \
       "$LOG_DIR/weekly.log")
+    ;;
+  agent)
+    # Sanitize slug for filename
+    if [[ ! "$AGENT_SLUG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+      echo "viewlog: invalid agent slug: $AGENT_SLUG" >&2
+      exit 2
+    fi
+    mapfile -t FILES < <(pick_existing \
+      "$LOG_DIR/dispatch-${AGENT_SLUG}.log" \
+      "$LOG_DIR/dispatch-${AGENT_SLUG}.stderr")
     ;;
   all)
     # Human-readable logs only — structured.log is JSON for tooling/APIs.

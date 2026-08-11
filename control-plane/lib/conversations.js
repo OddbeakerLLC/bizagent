@@ -2,10 +2,6 @@ const fs = require('fs');
 const path = require('path');
 const { appDir, ensureDir, readJson } = require('./config');
 const { compactHubSession, resetHubSession } = require('./hub-memory');
-const {
-  getActiveEnterpriseHooks,
-  isActiveEnterprise,
-} = require('./enterprise-plugin');
 const { logEvent } = require('./log');
 
 const MAX_STORED_MESSAGES = 48;
@@ -20,41 +16,6 @@ function conversationsDir(hub) {
 
 function userInbox(hub) {
   return path.join(hub, 'user', 'inbox');
-}
-
-/** Optional user scope for enterprise per-seat conversation dirs. */
-function conversationsDirForUser(hub, userId) {
-  if (!userId) return conversationsDir(hub);
-  return path.join(conversationsDir(hub), 'by-user', String(userId));
-}
-
-function safeConversationFileForUser(hub, id, userId) {
-  assertValidConversationId(id);
-  const dir = path.resolve(conversationsDirForUser(hub, userId));
-  ensureDir(dir);
-  const file = path.resolve(dir, `${id}.json`);
-  if (!file.startsWith(`${dir}${path.sep}`)) {
-    throw new Error('invalid conversation path');
-  }
-  return file;
-}
-
-function activeConversationFileForUser(hub, userId) {
-  if (!userId || !isActiveEnterprise()) return activeConversationFile(hub);
-  const dir = path.join(appDir(hub), 'enterprise', 'active-conversation');
-  ensureDir(dir);
-  return path.join(dir, `${userId}.json`);
-}
-
-/**
- * Resolve acting user id from session-like object or enterprise hooks.
- */
-function resolveUserId(sessionOrUserId) {
-  if (!sessionOrUserId) return null;
-  if (typeof sessionOrUserId === 'string') return sessionOrUserId;
-  if (sessionOrUserId.user_id) return sessionOrUserId.user_id;
-  if (sessionOrUserId.userId) return sessionOrUserId.userId;
-  return null;
 }
 
 function slugify(value) {
@@ -125,71 +86,36 @@ function writeFileUnique(dir, basename, content) {
   throw new Error('could not allocate unique hub inbox filename');
 }
 
-function listConversations(hub, sessionOrUserId) {
-  const userId = isActiveEnterprise() ? resolveUserId(sessionOrUserId) : null;
-  const dir = conversationsDirForUser(hub, userId);
-  ensureDir(dir);
-  return fs.readdirSync(dir)
+function listConversations(hub) {
+  ensureDir(conversationsDir(hub));
+  return fs.readdirSync(conversationsDir(hub))
     .filter((name) => name.endsWith('.json'))
-    .map((name) => readJson(path.join(dir, name), null))
+    .map((name) => readJson(path.join(conversationsDir(hub), name), null))
     .filter(Boolean)
     .map((conv) => ({ id: conv.id, name: conv.name, updated_at: conv.updated_at }))
     .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
 }
 
-function createConversation(hub, name, sessionOrUserId) {
-  const userId = isActiveEnterprise() ? resolveUserId(sessionOrUserId) : null;
-  const dir = conversationsDirForUser(hub, userId);
-  ensureDir(dir);
+function createConversation(hub, name) {
+  ensureDir(conversationsDir(hub));
   const now = new Date().toISOString();
   const id = `${now.slice(0, 10)}-${slugify(name)}-${Math.random().toString(16).slice(2, 8)}`;
   const conv = { id, name: name || 'Conversation', created_at: now, updated_at: now, summary: '', messages: [] };
-  if (userId) conv.user_id = userId;
-  const file = userId ? safeConversationFileForUser(hub, id, userId) : safeConversationFile(hub, id);
-  fs.writeFileSync(file, `${JSON.stringify(conv, null, 2)}\n`);
-  resetHubSession(hub, conv, userId);
+  fs.writeFileSync(safeConversationFile(hub, id), `${JSON.stringify(conv, null, 2)}\n`);
+  resetHubSession(hub, conv);
   return conv;
 }
 
-function getConversation(hub, id, sessionOrUserId) {
-  const userId = isActiveEnterprise() ? resolveUserId(sessionOrUserId) : null;
+function getConversation(hub, id) {
   let file;
   try {
-    if (userId) {
-      file = safeConversationFileForUser(hub, id, userId);
-    } else if (isActiveEnterprise()) {
-      // Enterprise without session: search by-user dirs (relay/stamp paths).
-      file = findConversationFileAnyUser(hub, id);
-      if (!file) return null;
-    } else {
-      file = safeConversationFile(hub, id);
-    }
+    file = safeConversationFile(hub, id);
   } catch (_err) {
     return null;
   }
-  if (!fs.existsSync(file)) return null;
   const conv = readJson(file, null);
-  if (conv) compactHubSession(hub, conv, conv.user_id || userId || null);
+  if (conv) compactHubSession(hub, conv);
   return conv;
-}
-
-function findConversationFileAnyUser(hub, id) {
-  try {
-    assertValidConversationId(id);
-  } catch (_e) {
-    return null;
-  }
-  const root = conversationsDir(hub);
-  // Flat (pre-migration leftover)
-  const flat = path.join(root, `${id}.json`);
-  if (fs.existsSync(flat)) return flat;
-  const byUser = path.join(root, 'by-user');
-  if (!fs.existsSync(byUser)) return null;
-  for (const uid of fs.readdirSync(byUser)) {
-    const f = path.join(byUser, uid, `${id}.json`);
-    if (fs.existsSync(f)) return f;
-  }
-  return null;
 }
 
 /** Deterministic CP launch ack — no model. Superseded when a real hub reply arrives. */
@@ -239,22 +165,13 @@ function saveConversation(hub, conv) {
   }
   conv.updated_at = next;
   compactConversation(conv);
-  const userId = conv && conv.user_id ? conv.user_id : null;
-  let file;
-  if (userId && isActiveEnterprise()) {
-    file = safeConversationFileForUser(hub, conv.id, userId);
-  } else if (isActiveEnterprise()) {
-    file = findConversationFileAnyUser(hub, conv.id) || safeConversationFile(hub, conv.id);
-  } else {
-    file = safeConversationFile(hub, conv.id);
-  }
-  fs.writeFileSync(file, `${JSON.stringify(conv, null, 2)}\n`);
-  compactHubSession(hub, conv, userId);
+  fs.writeFileSync(safeConversationFile(hub, conv.id), `${JSON.stringify(conv, null, 2)}\n`);
+  compactHubSession(hub, conv);
   return conv;
 }
 
 /**
- * Append a message. Optional meta: { kind } (e.g. launch-ack, error, agent-completion).
+ * Append a message. Optional meta: { kind, attachments }.
  * Real hub replies and error statuses supersede transient status lines (launch-ack + agent-completion).
  */
 function appendMessage(hub, id, role, content, meta = {}) {
@@ -265,6 +182,14 @@ function appendMessage(hub, id, role, content, meta = {}) {
   }
   const msg = { role, content, created_at: new Date().toISOString() };
   if (meta.kind) msg.kind = meta.kind;
+  if (Array.isArray(meta.attachments) && meta.attachments.length) {
+    msg.attachments = meta.attachments.map((a) => ({
+      name: a.name || '',
+      path: a.path || '',
+      to: a.to || '',
+      size: a.size || undefined,
+    }));
+  }
   conv.messages.push(msg);
   return saveConversation(hub, conv);
 }
@@ -328,29 +253,42 @@ function postAgentCompletionNotice(hub, conversationId, slug) {
   return saveConversation(hub, conv);
 }
 
-function writeHubInboxMessage(hub, content, conversationId, sessionOrUserId) {
+/**
+ * Write operator console message into hub inbox.
+ * @param {string} content
+ * @param {string} conversationId
+ * @param {object} [opts]
+ * @param {Array<{name?:string,path:string,to?:string}>} [opts.attachments]
+ */
+function writeHubInboxMessage(hub, content, conversationId, opts = {}) {
   const start = Date.now();
   const now = new Date();
   const date = now.toISOString().slice(0, 10);
   const stamp = now.toISOString().replace(/[-:TZ.]/g, '').slice(0, 17);
-  const userId = isActiveEnterprise() ? resolveUserId(sessionOrUserId) : null;
   const header = [
     '---',
-    'from: user',
+    'from: operator',
     'to: hub',
     `date: ${date}`,
-    'subject: console-message',
+    'subject: console message',
     conversationId ? `conversation_id: ${conversationId}` : '',
-    userId ? `user_id: ${userId}` : '',
     '---',
   ].filter((line) => line !== '').join('\n');
 
-  const result = writeFileUnique(path.join(hub, 'inbox'), `${date}-operator-console-message-${stamp}`, `${header}\n\n${content}\n`);
+  let body = String(content || '');
+  const attachments = Array.isArray(opts.attachments) ? opts.attachments : [];
+  if (attachments.length) {
+    // Lazy require avoids circular load at module init.
+    const { formatAttachmentsMarkdown } = require('./uploads');
+    body = `${body}${formatAttachmentsMarkdown(attachments)}`;
+  }
+
+  const result = writeFileUnique(path.join(hub, 'inbox'), `${date}-operator-console-message-${stamp}`, `${header}\n\n${body}\n`);
 
   logEvent(hub, {
     event: 'write_hub_inbox',
     conversation_id: conversationId,
-    user_id: userId || '',
+    attachment_count: attachments.length,
     duration_ms: Math.round((Date.now() - start) * 100) / 100
   });
 
@@ -387,14 +325,12 @@ function pendingAgentWorkFile(hub) {
  * Mark a conversation as the open console chat. Called when the web UI
  * loads, posts, or opens a stream/WS subscription for a conversation.
  */
-function setActiveConversation(hub, id, sessionOrUserId) {
-  const userId = isActiveEnterprise() ? resolveUserId(sessionOrUserId) : null;
-  if (!id || !getConversation(hub, id, userId || sessionOrUserId)) return false;
+function setActiveConversation(hub, id) {
+  if (!id || !getConversation(hub, id)) return false;
   ensureDir(appDir(hub));
-  const file = activeConversationFileForUser(hub, userId);
   fs.writeFileSync(
-    file,
-    `${JSON.stringify({ id, user_id: userId || undefined, updated_at: new Date().toISOString() }, null, 2)}\n`,
+    activeConversationFile(hub),
+    `${JSON.stringify({ id, updated_at: new Date().toISOString() }, null, 2)}\n`,
   );
   return true;
 }
@@ -403,31 +339,12 @@ function setActiveConversation(hub, id, sessionOrUserId) {
  * Return the open console conversation id, or null if none / stale / invalid.
  * @param {number} [maxAgeMs] - override staleness window (default 30s presence)
  */
-function getActiveConversationId(hub, maxAgeMs = ACTIVE_CONVERSATION_MAX_AGE_MS, sessionOrUserId) {
-  const userId = isActiveEnterprise() ? resolveUserId(sessionOrUserId) : null;
-  let data = null;
-  if (userId) {
-    data = readJson(activeConversationFileForUser(hub, userId), null);
-  } else if (isActiveEnterprise()) {
-    // Prefer most recent per-user active pointer when no session (stamp path).
-    const dir = path.join(appDir(hub), 'enterprise', 'active-conversation');
-    if (fs.existsSync(dir)) {
-      let best = null;
-      for (const name of fs.readdirSync(dir).filter((n) => n.endsWith('.json'))) {
-        const d = readJson(path.join(dir, name), null);
-        if (!d || !d.updated_at) continue;
-        if (!best || String(d.updated_at) > String(best.updated_at)) best = d;
-      }
-      data = best;
-    }
-    if (!data) data = readJson(activeConversationFile(hub), null);
-  } else {
-    data = readJson(activeConversationFile(hub), null);
-  }
+function getActiveConversationId(hub, maxAgeMs = ACTIVE_CONVERSATION_MAX_AGE_MS) {
+  const data = readJson(activeConversationFile(hub), null);
   if (!data || !data.id || !data.updated_at) return null;
   const age = Date.now() - Date.parse(data.updated_at);
   if (!Number.isFinite(age) || age < 0 || age > maxAgeMs) return null;
-  if (!getConversation(hub, data.id, data.user_id || userId || null)) return null;
+  if (!getConversation(hub, data.id)) return null;
   return data.id;
 }
 
@@ -449,29 +366,108 @@ function writePendingAgentWork(hub, bySlug) {
  * Remember which console conversation dispatched work to an agent slug.
  * Used to stamp agent→hub completions after the short UI presence window expires.
  */
+/**
+ * Remember which console conversation dispatched work to an agent slug.
+ * Stacks per slug so two chats using the same agent do not overwrite each other.
+ * Newest entry is preferred on lookup (LIFO).
+ */
 function recordPendingAgentWork(hub, slug, conversationId) {
   if (!slug || !conversationId || !getConversation(hub, conversationId)) return false;
   const bySlug = readPendingAgentWork(hub);
-  bySlug[String(slug)] = {
+  const key = String(slug);
+  const now = new Date().toISOString();
+  const entry = {
     conversationId: String(conversationId),
-    updatedAt: new Date().toISOString(),
+    updatedAt: now,
+  };
+  const prev = bySlug[key];
+  let stack = [];
+  if (Array.isArray(prev && prev.stack)) {
+    stack = prev.stack.filter(
+      (e) => e && e.conversationId && e.conversationId !== conversationId,
+    );
+  } else if (prev && prev.conversationId && prev.conversationId !== conversationId) {
+    stack = [{ conversationId: prev.conversationId, updatedAt: prev.updatedAt || now }];
+  }
+  stack.push(entry);
+  // Cap stack depth
+  if (stack.length > 12) stack = stack.slice(-12);
+  bySlug[key] = {
+    conversationId: entry.conversationId,
+    updatedAt: entry.updatedAt,
+    stack,
   };
   writePendingAgentWork(hub, bySlug);
   return true;
 }
 
-/**
- * Lookup conversation_id for a product agent that still has outstanding work.
- * Returns null when missing, expired, or conversation deleted.
- */
-function getPendingAgentWorkConversationId(hub, slug) {
-  if (!slug) return null;
-  const entry = readPendingAgentWork(hub)[String(slug)];
+function pendingEntryFresh(hub, entry) {
   if (!entry || !entry.conversationId || !entry.updatedAt) return null;
   const age = Date.now() - Date.parse(entry.updatedAt);
   if (!Number.isFinite(age) || age < 0 || age > PENDING_AGENT_WORK_MAX_AGE_MS) return null;
   if (!getConversation(hub, entry.conversationId)) return null;
   return entry.conversationId;
+}
+
+/**
+ * Lookup conversation_id for a product agent that still has outstanding work.
+ * Prefers newest stack entry. Returns null when missing, expired, or deleted.
+ */
+function getPendingAgentWorkConversationId(hub, slug) {
+  if (!slug) return null;
+  const data = readPendingAgentWork(hub)[String(slug)];
+  if (!data) return null;
+  if (Array.isArray(data.stack) && data.stack.length) {
+    for (let i = data.stack.length - 1; i >= 0; i -= 1) {
+      const id = pendingEntryFresh(hub, data.stack[i]);
+      if (id) return id;
+    }
+  }
+  return pendingEntryFresh(hub, data);
+}
+
+/** Drop pending-agent-work entries that point at a deleted conversation id. */
+function clearPendingAgentWorkForConversation(hub, conversationId) {
+  if (!conversationId) return false;
+  const bySlug = readPendingAgentWork(hub);
+  let changed = false;
+  for (const slug of Object.keys(bySlug)) {
+    const data = bySlug[slug];
+    if (!data) continue;
+    let stack = Array.isArray(data.stack) ? data.stack.slice() : null;
+    if (stack) {
+      const next = stack.filter((e) => e && e.conversationId !== conversationId);
+      if (next.length !== stack.length) {
+        changed = true;
+        stack = next;
+      }
+    }
+    if (data.conversationId === conversationId) {
+      changed = true;
+      if (stack && stack.length) {
+        const top = stack[stack.length - 1];
+        bySlug[slug] = {
+          conversationId: top.conversationId,
+          updatedAt: top.updatedAt,
+          stack,
+        };
+      } else {
+        delete bySlug[slug];
+      }
+    } else if (stack) {
+      if (stack.length === 0) delete bySlug[slug];
+      else {
+        const top = stack[stack.length - 1];
+        bySlug[slug] = {
+          conversationId: top.conversationId,
+          updatedAt: top.updatedAt,
+          stack,
+        };
+      }
+    }
+  }
+  if (changed) writePendingAgentWork(hub, bySlug);
+  return changed;
 }
 
 /**
@@ -574,73 +570,32 @@ function isNearDuplicateHubReply(messages, body, windowMs = 5 * 60 * 1000) {
  * Returns { relayed, ids } so the main CP process can push those convs over WS/SSE.
  * (Numeric-only return was insufficient: callers need the conversation ids.)
  */
-function listHumanInboxes(hub) {
-  const hooks = getActiveEnterpriseHooks();
-  if (isActiveEnterprise() && typeof hooks.listUserInboxes === 'function') {
-    try {
-      const list = hooks.listUserInboxes(hub);
-      if (Array.isArray(list) && list.length) {
-        return list.map((item) => ({
-          userId: item.userId || item.user_id || null,
-          inboxDir: item.inboxDir || item.inbox || item,
-        }));
-      }
-    } catch (_err) {
-      /* fall through */
-    }
-  }
-  if (isActiveEnterprise()) {
-    const userRoot = path.join(hub, 'user');
-    const out = [];
-    try {
-      for (const name of fs.readdirSync(userRoot)) {
-        if (name === 'inbox' || name.startsWith('.')) continue;
-        const inboxDir = path.join(userRoot, name, 'inbox');
-        if (fs.existsSync(inboxDir)) out.push({ userId: name, inboxDir });
-      }
-    } catch (_err) {
-      /* ignore */
-    }
-    if (out.length) return out;
-  }
-  return [{ userId: null, inboxDir: userInbox(hub) }];
-}
-
-function archiveUserInboxMessageAt(file) {
-  const inbox = path.dirname(file);
-  const archive = path.join(inbox, 'archive');
-  ensureDir(archive);
-  fs.renameSync(file, path.join(archive, path.basename(file)));
-}
-
 function readUserInboxMessages(hub) {
+  const inbox = userInbox(hub);
+  ensureDir(inbox);
+  ensureDir(path.join(inbox, 'archive'));
   let relayed = 0;
   const ids = [];
-  for (const { userId, inboxDir } of listHumanInboxes(hub)) {
-    const inbox = inboxDir;
-    ensureDir(inbox);
-    ensureDir(path.join(inbox, 'archive'));
-    for (const name of fs.readdirSync(inbox).filter((entry) => entry.endsWith('.md')).sort()) {
-      const file = path.join(inbox, name);
-      const text = fs.readFileSync(file, 'utf8');
-      const from = frontmatterValue(text, 'from');
-      const conversationId = frontmatterValue(text, 'conversation_id');
-      const fmUser = frontmatterValue(text, 'user_id') || userId;
-      if (!wasUserInboxDelivered(hub, file) || from !== 'hub' || !conversationId || !getConversation(hub, conversationId, fmUser)) {
-        archiveUserInboxMessageAt(file);
-        continue;
-      }
-      const body = markdownBody(text);
-      const conv = getConversation(hub, conversationId, fmUser);
-      if (conv && isNearDuplicateHubReply(conv.messages, body)) {
-        archiveUserInboxMessageAt(file);
-        continue;
-      }
-      appendMessage(hub, conversationId, 'hub', body);
-      archiveUserInboxMessageAt(file);
-      relayed += 1;
-      ids.push(conversationId);
+  for (const name of fs.readdirSync(inbox).filter((entry) => entry.endsWith('.md')).sort()) {
+    const file = path.join(inbox, name);
+    const text = fs.readFileSync(file, 'utf8');
+    const from = frontmatterValue(text, 'from');
+    const conversationId = frontmatterValue(text, 'conversation_id');
+    if (!wasUserInboxDelivered(hub, file) || from !== 'hub' || !conversationId || !getConversation(hub, conversationId)) {
+      archiveUserInboxMessage(hub, file);
+      continue;
     }
+    const body = markdownBody(text);
+    const conv = getConversation(hub, conversationId);
+    if (conv && isNearDuplicateHubReply(conv.messages, body)) {
+      // Near-duplicate within window — drop instead of appending a second paraphrased reply.
+      archiveUserInboxMessage(hub, file);
+      continue;
+    }
+    appendMessage(hub, conversationId, 'hub', body);
+    archiveUserInboxMessage(hub, file);
+    relayed += 1;
+    ids.push(conversationId);
   }
   return { relayed, ids: [...new Set(ids)] };
 }
@@ -667,38 +622,57 @@ function getOriginatingConversationId(hub) {
 
 /**
  * Id to stamp on mail missing conversation_id.
- * Order: in-flight originating hub turn → last-viewed console chat (long TTL)
- * → optional pending hub→agent work for a product slug (agent→hub completions).
+ *
+ * When fromSlug is set (agent→hub completions):
+ *   1. pending hub→agent work for that slug — the chat that dispatched the agent
+ *   2. last-viewed console chat (long TTL) — last resort only
+ *   Never use the in-flight hub turn: that is whichever chat the operator is
+ *   talking to *now*, and must not steal another product's completion mail.
+ *
+ * When fromSlug is absent (hub→user and other unscoped mail):
+ *   1. in-flight originating hub turn (never overridden by active UI chat)
+ *   2. last-viewed console chat (long TTL) — last resort only
+ *
  * @param {string} [fromSlug] - product agent slug when routing agent→hub mail
  */
 function getStampConversationId(hub, fromSlug) {
-  return (
-    getOriginatingConversationId(hub)
-    || getActiveConversationId(hub, STAMP_ACTIVE_MAX_AGE_MS)
-    || getPendingAgentWorkConversationId(hub, fromSlug)
-  );
+  if (fromSlug) {
+    const pending = getPendingAgentWorkConversationId(hub, fromSlug);
+    if (pending) return pending;
+    return getActiveConversationId(hub, STAMP_ACTIVE_MAX_AGE_MS);
+  }
+  const originating = getOriginatingConversationId(hub);
+  if (originating) return originating;
+  return getActiveConversationId(hub, STAMP_ACTIVE_MAX_AGE_MS);
 }
 
-function deleteConversation(hub, id, sessionOrUserId) {
-  const userId = isActiveEnterprise() ? resolveUserId(sessionOrUserId) : null;
+function deleteConversation(hub, id) {
   let file;
   try {
-    if (userId) file = safeConversationFileForUser(hub, id, userId);
-    else if (isActiveEnterprise()) file = findConversationFileAnyUser(hub, id);
-    else file = safeConversationFile(hub, id);
+    file = safeConversationFile(hub, id);
   } catch (_err) {
     return false;
   }
-  if (!file || !fs.existsSync(file)) return false;
+  if (!fs.existsSync(file)) return false;
   fs.unlinkSync(file);
-  const activeFile = activeConversationFileForUser(hub, userId);
-  const active = readJson(activeFile, null);
+  const active = readJson(activeConversationFile(hub), null);
   if (active && active.id === id) {
     try {
-      fs.unlinkSync(activeFile);
+      fs.unlinkSync(activeConversationFile(hub));
     } catch (_err) {
       /* ignore */
     }
+  }
+  try {
+    clearPendingAgentWorkForConversation(hub, id);
+  } catch (_err) {
+    /* non-fatal */
+  }
+  try {
+    const { gcConversationUploads } = require('./uploads');
+    gcConversationUploads(hub, id);
+  } catch (_err) {
+    /* non-fatal */
   }
   return true;
 }
@@ -710,14 +684,12 @@ module.exports = {
   AGENT_COMPLETION_KIND,
   AGENT_COMPLETION_TEXT,
   activeConversationFile,
-  activeConversationFileForUser,
   appendMessage,
   assertValidConversationId,
   conversationNameFromContent,
-  conversationsDirForUser,
+  clearPendingAgentWorkForConversation,
   createConversation,
   deleteConversation,
-  findConversationFileAnyUser,
   frontmatterValue,
   getActiveConversationId,
   getConversation,
@@ -734,18 +706,15 @@ module.exports = {
   LAUNCH_ACK_KIND,
   LAUNCH_ACK_TEXT,
   listConversations,
-  listHumanInboxes,
   pendingAgentWorkFile,
   postAgentCompletionNotice,
   postLaunchAck,
   readUserInboxMessages,
   recordPendingAgentWork,
   recordUserInboxDelivery,
-  resolveUserId,
   setActiveConversation,
   shouldStartNewConversation,
   safeConversationFile,
-  safeConversationFileForUser,
   stampConversationId,
   STATUS_ERROR_KIND,
   stripLaunchAcks,

@@ -225,35 +225,62 @@ body {
   font-style: italic;
 }
 
-/* Library viewer */
-.modal-content--library {
-  width: min(920px, 96vw);
-  height: min(80vh, 720px);
+/* Library page (full pane, not modal) */
+.library-shell {
+  position: relative;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: #f4f6f8;
 }
-.library-body {
+.library-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.library-page-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #172033;
+}
+.library-page-body {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  padding: 12px 16px 16px;
+  gap: 10px;
+}
+.library-help {
+  margin: 0;
 }
 .library-layout {
   display: flex;
   gap: 12px;
   flex: 1;
-  min-height: 280px;
-  max-height: 55vh;
+  min-height: 0;
 }
 .library-sidebar {
-  width: 280px;
+  width: 300px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-height: 0;
 }
+.library-filter {
+  width: 100%;
+}
 .library-list {
   flex: 1;
   max-height: none;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
 }
 .library-list-item {
   cursor: pointer;
@@ -272,7 +299,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: #fafafa;
+  background: #fff;
 }
 .library-preview-title {
   padding: 10px 12px;
@@ -288,6 +315,106 @@ body {
   font-size: 14px;
   line-height: 1.5;
   background: #fff;
+}
+.library-preview-body h1,
+.library-preview-body h2,
+.library-preview-body h3 {
+  margin-top: 1em;
+  margin-bottom: 0.4em;
+}
+.library-preview-body pre {
+  overflow: auto;
+  background: #f3f4f6;
+  padding: 8px;
+  border-radius: 4px;
+}
+
+/* Composer attachments */
+.composer-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.composer-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  width: 100%;
+  min-width: 0;
+}
+.attach-btn {
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  user-select: none;
+  background: #ffffff;
+  color: #172033;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 16px;
+  line-height: 1;
+}
+.attach-btn:hover {
+  background: #f3f4f6;
+}
+.attach-recipient {
+  flex: 0 0 auto;
+  max-width: 180px;
+  min-height: 42px;
+}
+.attach-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #1e3a8a;
+  max-width: 100%;
+}
+.attach-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.attach-chip-remove {
+  border: 0;
+  background: transparent;
+  color: #1d4ed8;
+  padding: 0 2px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.message-attach-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #475569;
 }
 .modal-header {
   display: flex;
@@ -545,28 +672,6 @@ button {
   border-style: solid;
 }
 
-/* Observability tab */
-#observabilityTab {
-  padding: 20px;
-}
-
-.observability-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 10px;
-}
-
-.observability-table th,
-.observability-table td {
-  padding: 8px 12px;
-  text-align: left;
-  border-bottom: 1px solid #e5e7eb;
-}
-
-.observability-table th {
-  background: #f8fafc;
-  font-weight: 600;
-}
 .fixed-composer {
   position: fixed;
   left: 248px;
@@ -580,8 +685,14 @@ button {
 }
 .fixed-composer textarea {
   resize: none;
+  flex: 1;
   width: 100%;
   min-height: 54px;
+  min-width: 0;
+}
+.fixed-composer .composer-row > button[type="submit"] {
+  flex: 0 0 auto;
+  min-height: 42px;
 }
 @media (max-width: 760px) {
   .app-shell { grid-template-columns: 1fr; }
