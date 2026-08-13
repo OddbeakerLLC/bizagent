@@ -59,6 +59,7 @@ function markdownFiles(dir) {
 }
 
 function writeFileUnique(dir, basename, source) {
+  ensureDir(dir);
   const ext = path.extname(basename);
   const stem = basename.slice(0, basename.length - ext.length);
   for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -243,9 +244,9 @@ function routeOutboxes(hub) {
         continue;
       }
       const dest = safeInboxFor(hub, to);
-      if (!dest || !fs.existsSync(dest)) {
-        if (to === 'user' && dest) fs.mkdirSync(dest, { recursive: true });
-      }
+      // Create the destination inbox (and any parent dirs) for every valid
+      // recipient before writing, so delivery never fails on a missing dir.
+      if (dest) ensureDir(dest);
       if (!dest || !fs.existsSync(dest)) {
         // Unknown single recipient: leave in place + WARN (operator may fix `to:`
         // or add the product). Multi-to / missing / invalid already quarantined.
