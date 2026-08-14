@@ -167,11 +167,15 @@ once exposed an operator's private data publicly — don't repeat it.)
 
 ```
 <min> <hr> * * *      <HUB_ABS_PATH>/scripts/run-agent.sh "Follow NIGHTLY.md exactly." >> <HUB_ABS_PATH>/logs/nightly.log 2>&1
-<wmin> <whr> * * <dow> <HUB_ABS_PATH>/scripts/run-agent.sh "Follow WEEKLY.md exactly."  >> <HUB_ABS_PATH>/logs/weekly.log  2>&1
+<wmin> <whr> * * <dow> <HUB_ABS_PATH>/scripts/weekly-refresh.sh >> <HUB_ABS_PATH>/logs/weekly.log 2>&1
 ```
 
 `scripts/run-agent.sh` resolves the hub CLI from `registry.json` +
 `cli.json` (same as the control plane; legacy `.cli` is name-only fallback).
+`scripts/weekly-refresh.sh` orchestrates the Knowledge Stack refresh with
+minimal LLM usage — only the two judgment steps (company synthesis and
+per-agent update decisions) invoke LLM, avoiding the MAX_ITERATIONS limit
+that the previous `run-agent.sh "Follow WEEKLY.md exactly."` approach could hit.
 `<dow>` is the day-of-week from `knowledge_stack.refresh_day` (0–6,
 Sunday = 0). This modifies the user's crontab — a side effect outside
 this directory. Show the operator the exact lines and confirm before

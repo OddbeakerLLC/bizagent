@@ -2,47 +2,87 @@
 
 Run the weekly Knowledge Stack refresh for this `bizagent` hub.
 
-Do exactly what **AGENT.md § 3 — Operating → Knowledge Stack → Refresh flow**
-specifies, and nothing more.
+**This file describes the full refresh flow. The mechanical steps are now
+implemented in `scripts/weekly-refresh.sh`, which orchestrates the process
+with minimal LLM usage. Only the two judgment steps invoke LLM:**
 
-1. Run `scripts/weekly.sh`. It checks `knowledge_stack.enabled` in
-   `registry.json` and removes orphaned slug files from `knowledge-stack/`.
-   If the script reports "disabled," stop here too — the rest of this pass
-   does not apply.
+1. **PTL company synthesis** — when company files or `[Company]` journal
+   bullets have changed since the last refresh.
+2. **Each product agent's decision** — whether to update their contribution
+   or report "no update".
 
-2. Read the header of `knowledge-stack/MANIFEST.md` to get the **last
-   refresh timestamp**. If the file does not exist, this is the first
-   refresh — treat "last refresh" as the epoch (everything counts as new).
+---
 
-3. **PTL company contribution.** Check `company/` for files with mtime
-   newer than the last refresh and scan `journal/` for `[Company]` bullets
-   since the last refresh. If both are empty, leave existing
-   `00-company-*.md` files in `knowledge-stack/` untouched. Otherwise
-   synthesize the company docs (`00-company-overview.md` plus topical files
-   like `00-company-mission.md`, `00-company-news.md`) and overwrite prior
-   versions.
+## How the refresh works
 
-4. **Per agent.** For each product in `registry.json`, write a message to
-   the agent's outbox addressed to the agent (so the router moves it to
-   that agent's inbox): subject `"Refresh your Knowledge Stack
-   contribution. Last refresh: YYYY-MM-DD."` Run `scripts/router.sh`, spawn
-   the agent, collect its reply.
-   - If the reply is `no update`, leave the agent's existing `<slug>-*.md`
-     files in the stack untouched.
-   - Otherwise, write `<slug>-overview.md` from the overview body and
-     byte-copy each listed source doc as `<slug>-<basename>.<ext>`.
-     Overwrite prior versions.
+The weekly cron runs `scripts/weekly-refresh.sh`, which:
 
-5. Write a fresh `knowledge-stack/MANIFEST.md`:
-   - Header: this run's timestamp.
-   - Then one line per file currently in the stack: owner (slug or `hub`),
-     source path (for copied source docs) or `synthesized`, last refresh
-     date for that file (older than the run timestamp if the file was
-     carried forward via "no update").
+1. **Enablement check** — reads `knowledge_stack.enabled` from `registry.json`
+   and exits cleanly if disabled.
 
-6. Append a `[Maintenance]` bullet to `journal/YYYY-MM-DD.md` summarising
-   the run, e.g. `[Maintenance] Refreshed Knowledge Stack. Updated: W, P.
-   No update: T.`
+2. **Orphan cleanup** — runs `scripts/weekly.sh` to remove slug files from
+   `knowledge-stack/` that no longer match any product in the registry.
 
-This pass is maintenance only. It must never start product work or anything
-that blocks the operator.
+3. **Timestamp read** — reads the last refresh timestamp from
+   `knowledge-stack/MANIFEST.md` (epoch if missing).
+
+4. **Company change detection** — checks `company/` for files newer than the
+   last refresh and scans `journal/` for `[Company]` bullets since then.
+
+5. **Company synthesis (if changes)** — writes a request to the hub inbox
+   and spawns the PTL agent to synthesize `00-company-*.md` files.
+
+6. **Per-agent refresh** — for each product in `registry.json`:
+   - Writes a request to the agent's inbox
+   - Runs the router
+   - Spawns the agent
+   - Collects the reply (update or "no update")
+   - Archives the request
+
+7. **Manifest write** — writes a fresh `knowledge-stack/MANIFEST.md` with
+   this run's timestamp and all current files.
+
+8. **Journal bullet** — appends a `[Maintenance]` bullet to `journal/YYYY-MM-DD.md`.
+
+---
+
+## Agent responsibilities
+
+### Hub agent (PTL)
+
+When spawned for company synthesis:
+
+- Read `company/` for files newer than the last refresh
+- Scan `journal/` for `[Company]` bullets since the last refresh
+- If changes exist:
+  - Write `00-company-overview.md` to `knowledge-stack/`
+  - Write topical files (`00-company-mission.md`, `00-company-news.md`, etc.)
+  - Overwrite prior versions
+- If no changes, leave existing `00-company-*.md` files untouched
+- Archive the synthesis request message
+
+### Product agents
+
+When spawned for Knowledge Stack refresh:
+
+- Review your project(s) for changes since the last refresh
+- If meaningful updates:
+  - Write `<slug>-overview.md` to `knowledge-stack/`
+  - Copy source documents as `<slug>-<basename>.<ext>`
+- If no meaningful updates, reply with "no update"
+- Archive the refresh request message
+
+---
+
+## Cron line
+
+The weekly cron should invoke the script directly:
+
+```
+<wmin> <whr> * * <dow> <HUB_ABS_PATH>/scripts/weekly-refresh.sh >> <HUB_ABS_PATH>/logs/weekly.log 2>&1
+```
+
+Where `<dow>` is the day-of-week from `knowledge_stack.refresh_day` (0–6, Sunday = 0).
+
+This replaces the previous approach of running `run-agent.sh "Follow WEEKLY.md exactly."`,
+which could exceed `MAX_ITERATIONS` with many products.
