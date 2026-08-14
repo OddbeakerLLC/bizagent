@@ -88,12 +88,14 @@ const {
   readUserInboxMessages,
   setActiveConversation,
   shouldStartNewConversation,
+  STATUS_ERROR_KIND,
   writeHubInboxMessage,
 } = require("./lib/conversations");
 const {
   dispatchPendingAgents,
   drainHubTurnSafety,
   isAgentActive,
+  stopAgentTurn,
 } = require("./lib/dispatcher");
 const {
   listCompanyFiles,
@@ -122,6 +124,10 @@ const { ensureHubRuntimePrompt } = require("./lib/hub-memory");
 const { agentMailStatus, routeOutboxes } = require("./lib/mail");
 const { getProfile, setProfile } = require("./lib/profile");
 const { logEvent, logHubTurn, logError, appendLog } = require("./lib/log");
+const {
+  clearThinking,
+  getThinking,
+} = require("./lib/thinking");
 
 const PUBLIC_DIR = path.join(__dirname, "public");
 
@@ -738,6 +744,79 @@ async function handleApi(config, req, res) {
     addStateClient(res);
     req.on("close", () => removeStateClient(res));
     return null; // keep open
+  }
+
+  // --- Live "thinking" log (streams an in-flight turn's dispatch stdout) ---
+  if (url.pathname === "/api/thinking/stream" && req.method === "GET") {
+    const convId = (url.searchParams.get("conv") || "").trim();
+    const thinking = convId ? getThinking(config.hub, convId) : null;
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+    const sendEvent = (obj) => {
+      try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (_err) { /* client gone */ }
+    };
+    if (!thinking || !thinking.logFile) {
+      sendEvent({ done: true });
+      try { res.end(); } catch (_err) { /* ignore */ }
+      return null;
+    }
+    const { slug, logFile } = thinking;
+    let offset = 0;
+    const sendTail = () => {
+      try {
+        if (!fs.existsSync(logFile)) return;
+        const stat = fs.statSync(logFile);
+        if (stat.size > offset) {
+          const length = stat.size - offset;
+          const buffer = Buffer.alloc(length);
+          const fd = fs.openSync(logFile, "r");
+          fs.readSync(fd, buffer, 0, length, offset);
+          fs.closeSync(fd);
+          offset = stat.size;
+          const text = buffer.toString("utf8");
+          if (text) sendEvent({ text });
+        }
+      } catch (_err) { /* ignore */ }
+    };
+    sendTail();
+    const iv = setInterval(() => {
+      if (!isAgentActive(config.hub, slug, config.lockLeaseSecs)) {
+        clearInterval(iv);
+        clearThinking(config.hub, convId);
+        sendEvent({ done: true });
+        try { res.end(); } catch (_err) { /* ignore */ }
+        return;
+      }
+      sendTail();
+    }, 500);
+    req.on("close", () => clearInterval(iv));
+    return null;
+  }
+
+  // --- Hard-stop an in-flight turn (operator pressed Escape) ---
+  if (url.pathname === "/api/thinking/stop" && req.method === "POST") {
+    const body = await parseBody(req);
+    const convId = (body.conversationId || "").trim();
+    const thinking = convId ? getThinking(config.hub, convId) : null;
+    if (thinking && thinking.slug) {
+      try { stopAgentTurn(config.hub, thinking.slug); } catch (_err) { /* ignore */ }
+      clearThinking(config.hub, convId);
+      try {
+        appendMessage(
+          config.hub,
+          convId,
+          "status",
+          "Stopped by operator (Escape).",
+          { kind: STATUS_ERROR_KIND },
+        );
+      } catch (_err) { /* ignore */ }
+      didChangeState();
+      try { pushConv(config, convId); } catch (_err) { /* ignore */ }
+    }
+    return send(res, 200, { ok: true });
   }
 
   if (url.pathname === "/api/observability" && req.method === "GET") {

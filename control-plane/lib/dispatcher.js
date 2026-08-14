@@ -17,6 +17,7 @@ const {
   createConversation,
   getActiveConversationId,
   getConversation,
+  getPendingAgentWorkConversationId,
   listConversations,
   postLaunchAck,
   postAgentCompletionNotice,
@@ -36,6 +37,10 @@ const {
   classifyProviderError,
   formatProviderFailureMessage,
 } = require('./provider-errors');
+const {
+  clearThinking,
+  recordThinking,
+} = require('./thinking');
 
 function hubDaemonSock(hub) {
   return path.join(hub, '.bizagent', 'hub.sock');
@@ -529,6 +534,35 @@ function isAgentActive(hub, slug, leaseSecs) {
   return pidAlive(pid) && lockAgeSecs(lock) < leaseSecs;
 }
 
+/**
+ * Hard-stop an in-flight turn (operator pressed Escape in the web UI).
+ * Kills the detached process group (bash wrapper + CLI child) and drops the
+ * lock so the dispatcher can re-dispatch. Returns true if a live pid was found.
+ */
+function stopAgentTurn(hub, slug) {
+  const lock = lockDir(hub, slug);
+  let pid = '';
+  try {
+    pid = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim();
+  } catch (_err) {
+    pid = '';
+  }
+  let killed = false;
+  if (pid && /^[0-9]+$/.test(pid)) {
+    const n = Number(pid);
+    try {
+      // Negative pid targets the whole process group (spawn used detached:true).
+      process.kill(-n, 'SIGKILL');
+      killed = true;
+    } catch (_err) {
+      try { process.kill(n, 'SIGKILL'); killed = true; } catch (_err2) { /* gone */ }
+    }
+  }
+  // SIGKILL cannot be trapped, so the shell EXIT trap won't clean the lock.
+  fs.rmSync(lock, { recursive: true, force: true });
+  return killed;
+}
+
 function buildArgs(extraArgs, modelOverride) {
   if (!modelOverride) return extraArgs;
   if (!/^[A-Za-z0-9._:/-]+$/.test(modelOverride)) {
@@ -651,6 +685,16 @@ function launchAgent(config, slug, model = '', cliName = '') {
     }
   });
 
+  // Track the in-flight turn so the UI can stream this agent's thinking live.
+  try {
+    const cid =
+      getPendingAgentWorkConversationId(hub, slug) ||
+      getActiveConversationId(hub, 24 * 60 * 60 * 1000);
+    if (cid) recordThinking(hub, cid, slug, agentLog);
+  } catch (_err) {
+    /* best-effort */
+  }
+
   child.unref();
   logEvent(hub, {
     event: 'cli_launched',
@@ -690,6 +734,8 @@ function launchHub(config) {
     try {
       postLaunchAck(hub, conversationId);
       logEvent(hub, { event: 'launch_ack', conversation_id: conversationId, t: startedAt });
+      // Track the in-flight turn so the UI can stream its thinking live.
+      recordThinking(hub, conversationId, 'hub', agentLog);
       // Push "Working. Stand by..." over WS/SSE (hook no-ops outside main CP process).
       notifyConversationMutated(hub, conversationId);
     } catch (err) {
@@ -1075,5 +1121,6 @@ module.exports = {
   readStderrTail,
   recordAgentError,
   requestWarmHubTurn,
+  stopAgentTurn,
   tryLock,
 };

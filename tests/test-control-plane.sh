@@ -279,6 +279,40 @@ grep -q "Working. Stand by" "$ROOT/control-plane/lib/conversations.js" \
   || fail "launch-ack text is not 'Working. Stand by...'"
 ! grep -q "PTL on it" "$ROOT/control-plane/lib/conversations.js" \
   || fail "stale 'PTL on it' launch-ack text still present"
+
+# --- Approved Web UI + Installer plan (2026-08-14) ---
+# 1. Live thinking log: stream in place of the static launch-ack.
+grep -q "/api/thinking/stream" "$ROOT/control-plane/server.js" \
+  || fail "server missing live thinking stream endpoint"
+grep -q "/api/thinking/stop" "$ROOT/control-plane/server.js" \
+  || fail "server missing thinking stop endpoint"
+grep -q "recordThinking" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher does not record in-flight thinking"
+grep -q "stopAgentTurn" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing hard-stop helper"
+grep -q "thinking-log" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing live thinking log rendering"
+grep -q "thinking-log" "$ROOT/control-plane/public/styles.css" \
+  || fail "UI missing thinking log styles"
+# 2. Products list: header + three-line rows (product name / agent name / model).
+grep -q "Products" "$ROOT/control-plane/public/index.html" \
+  || fail "rail header is not 'Products'"
+grep -q "agent-product" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing product-name line in rail rows"
+grep -q "agent-name" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing agent-name line in rail rows"
+grep -q "agent-cli-line" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing model line in rail rows"
+# Interrupt: pressing Escape hard-stops the in-flight thinking.
+grep -q "thinkingActive" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing thinking-active guard for Escape interrupt"
+grep -q "stopThinking" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing Escape stop-thinking handler"
+# 4. Preview: built pages surface as clickable links opening in a new tab (no iframe).
+grep -q 'target="_blank"' "$ROOT/control-plane/public/app.js" \
+  || fail "UI does not open preview links in a new tab"
+! grep -q "iframe" "$ROOT/control-plane/public/app.js" \
+  || fail "UI embeds preview in an iframe (should be a plain link)"
 grep -q "getStampConversationId" "$ROOT/control-plane/lib/conversations.js" \
   || fail "missing originating-conversation stamp helper"
 grep -q "getStampConversationId" "$ROOT/control-plane/lib/mail.js" \
@@ -1792,7 +1826,7 @@ const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(`${root}/control-plane/public/app.js`, 'utf8');
 const sandbox = {
-  document: { getElementById: () => ({ addEventListener: () => {}, textContent: '', dataset: {}, value: '' }) },
+  document: { getElementById: () => ({ addEventListener: () => {}, textContent: '', dataset: {}, value: '' }), addEventListener: () => {} },
   setInterval: () => 0,
   fetch: () => Promise.reject(new Error('no network in test')),
   EventSource: function() { this.onmessage = null; this.onerror = null; this.close = () => {}; },

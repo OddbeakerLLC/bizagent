@@ -286,6 +286,42 @@ api_key_var_for_cli() {
   esac
 }
 
+# Provider → OpenAI-compatible endpoint + a cheap model for the hello check.
+provider_hello_endpoint() {
+  case "$1" in
+    grok|xai)        echo "https://api.x.ai/v1|grok-4.3" ;;
+    chatgpt|openai|codex) echo "https://api.openai.com/v1|gpt-5.4-mini" ;;
+    claude)          echo "https://api.anthropic.com/v1/|claude-haiku-4-5-20251001" ;;
+    openrouter)      echo "https://openrouter.ai/api/v1|anthropic/claude-sonnet-4" ;;
+    gemini|agy)      echo "https://generativelanguage.googleapis.com/v1beta/openai/|gemini-2.5-flash-lite" ;;
+    venice)          echo "https://api.venice.ai/api/v1|deepseek-v4-flash-0731" ;;
+    ollama)          echo "http://127.0.0.1:11434/v1|llama3.2" ;;
+    *)               echo "" ;;
+  esac
+}
+
+# Send a tiny 'hello' prompt to the LLM to confirm the API key works before
+# proceeding. Returns 0 on success, 1 on failure. Skips (returns 0) when the
+# provider endpoint is unknown or curl is unavailable — never blocks install.
+validate_api_key() {
+  local provider="$1" key="$2"
+  local ep base model code
+  ep="$(provider_hello_endpoint "$provider")"
+  [[ -z "$ep" ]] && return 0
+  base="${ep%%|*}"; model="${ep#*|}"
+  base="${base%/}"
+  if ! have curl; then
+    warn "curl not found — skipping API key validation"
+    return 0
+  fi
+  code="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "$base/chat/completions" \
+    -H "Authorization: Bearer $key" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":1}" 2>/dev/null)"
+  [[ "$code" == "200" ]]
+}
+
 prompt_api_key() {
   SELECTED_API_KEY_VAR="$(api_key_var_for_cli "${SELECTED_PROVIDER:-grok}")"
   SELECTED_API_KEY=""
@@ -297,6 +333,9 @@ prompt_api_key() {
     fi
     SELECTED_API_KEY="$BIZAGENT_API_KEY"
     ok "Using BIZAGENT_API_KEY for $SELECTED_API_KEY_VAR (will write .bizagent/env)"
+    if ! validate_api_key "$SELECTED_PROVIDER" "$SELECTED_API_KEY"; then
+      warn "BIZAGENT_API_KEY was rejected by the provider — installation may fail until it is corrected."
+    fi
     return
   fi
 
@@ -321,20 +360,28 @@ prompt_api_key() {
   fi
 
   printf "\n${BOLD}API key for provider %s${NC}\n" "${SELECTED_PROVIDER:-grok}"
+  warn "An incorrectly entered API key will prevent completing the installation."
   note "Hub turns need $SELECTED_API_KEY_VAR in .bizagent/env (sourced by control-plane + hub-daemon)."
-  note "Paste the key (input hidden). Leave blank to skip — chat will fail until you add it."
-  local key
+  note "Paste the key (input hidden). It is required — installation cannot finish without it."
+  local key=""
   # -r: raw; -s: silent. Read from /dev/tty so curl|bash still works.
-  read -r -s -p "  $SELECTED_API_KEY_VAR: " key </dev/tty
-  printf "\n"
-  if [[ -n "$key" ]]; then
-    SELECTED_API_KEY="$key"
-    ok "$SELECTED_API_KEY_VAR will be written to .bizagent/env (mode 600)"
-  else
-    warn "No key entered. Create .bizagent/env before expecting hub replies:"
-    note "  echo '$SELECTED_API_KEY_VAR=...' > $INSTALL_DIR/.bizagent/env && chmod 600 $INSTALL_DIR/.bizagent/env"
-    note "  then: scripts/hub-daemon.sh restart && scripts/control-plane.sh restart"
-  fi
+  # Loop until a non-empty key that passes a live 'hello' check is entered
+  # (required for the hub to run turns — keeps the install error-free).
+  while true; do
+    read -r -s -p "  $SELECTED_API_KEY_VAR (required): " key </dev/tty
+    printf "\n"
+    if [[ -z "$key" ]]; then
+      warn "API key is required — an empty or incorrect key will prevent completing the installation. Please enter it."
+      continue
+    fi
+    if validate_api_key "$SELECTED_PROVIDER" "$key"; then
+      break
+    fi
+    warn "That API key was rejected by the provider. Please re-enter it."
+    key=""
+  done
+  SELECTED_API_KEY="$key"
+  ok "$SELECTED_API_KEY_VAR validated and will be written to .bizagent/env (mode 600)"
 }
 
 # Seed cli.json (LLM provider catalog + fixed _runtime). Runtime is always bizagent-agent.

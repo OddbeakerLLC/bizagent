@@ -80,6 +80,28 @@ grep -q 'ANTHROPIC_API_KEY' "$ROOT/install.sh" \
   || fail "install.sh does not map claude → ANTHROPIC_API_KEY"
 grep -q 'BIZAGENT_API_KEY' "$ROOT/install.sh" \
   || fail "install.sh missing non-interactive BIZAGENT_API_KEY support"
+# API key is required (non-empty) at the CLI-choice step, with a clear warning.
+grep -q 'incorrectly entered API key will prevent completing the installation' "$ROOT/install.sh" \
+  || fail "install.sh does not warn about an incorrect API key"
+grep -q '\[\[ -z "\$key" \]\]' "$ROOT/install.sh" \
+  || fail "install.sh does not require a non-empty API key"
+grep -q 'incorrectly entered API key will prevent completing the installation' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not warn about an incorrect API key"
+grep -q '\[\[ -z "\$typed_key" \]\]' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not require a non-empty API key"
+# API key is validated with a tiny 'hello' prompt before proceeding (re-prompt on failure).
+grep -q 'validate_api_key' "$ROOT/install.sh" \
+  || fail "install.sh missing API key validation helper"
+grep -q 'chat/completions' "$ROOT/install.sh" \
+  || fail "install.sh validation does not send a hello prompt to the LLM"
+grep -q 'rejected by the provider' "$ROOT/install.sh" \
+  || fail "install.sh does not re-prompt after a failed API key validation"
+grep -q 'validate_api_key' "$ROOT/install/install.sh" \
+  || fail "install/install.sh missing API key validation helper"
+grep -q 'chat/completions' "$ROOT/install/install.sh" \
+  || fail "install/install.sh validation does not send a hello prompt to the LLM"
+grep -q 'rejected by the provider' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not re-prompt after a failed API key validation"
 grep -qE 'api_key_var_for_provider|api_key_var_for_cli' "$ROOT/install/install.sh" \
   || fail "install/install.sh missing API key → .bizagent/env step"
 grep -q 'check-hub-ready' "$ROOT/install/install.sh" \
