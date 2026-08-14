@@ -1,0 +1,56 @@
+@startuml
+autonumber
+skinparam ParticipantPadding 20
+skinparam BoxPadding 10
+
+actor User
+box "Control Plane" #f9f9f9
+    participant CP as "CP / Orchestrator"
+end box
+
+box "Hub" #e1f5fe
+    participant Hub as "Hub Agent (PTL)"
+    database HubMail as "Hub Inbox/Outbox"
+end box
+
+box "Product Spoke" #fff3e0
+    participant PA as "Product Agent"
+    database PAMail as "Agent Inbox/Outbox"
+    database Project as "Project Repo"
+end box
+
+User -> CP: Send Prompt / Request
+activate CP
+
+CP -> Hub: Launch with Runtime Prompt\n(Session Memory + Pending Mail)
+activate Hub
+
+Hub -> Hub: Analyze Request
+
+alt Direct Answer (Hub can handle)
+    Hub -> CP: Write to RESERVED_REPLY_BODY
+else Delegation Required
+    Hub -> PAMail: write-message.sh --to <slug>
+    Hub -> CP: Signal delegation / Wait
+    
+    CP -> PA: Wake up Product Agent\n(Runtime Prompt + Inbox)
+    activate PA
+    
+    PA -> PAMail: Read Request
+    PA -> Project: Perform Work\n(Read/Write Files, Execute Shell)
+    PA -> HubMail: write-message.sh --to hub
+    
+    PA -> CP: Terminate / Idle
+    deactivate PA
+    
+    CP -> Hub: Re-launch Hub with new mail
+    Hub -> HubMail: Read Product Agent's reply
+end
+
+Hub -> CP: Write final synthesis to\nRESERVED_REPLY_BODY
+deactivate Hub
+
+CP -> User: Deliver Response
+deactivate CP
+
+@enduml
