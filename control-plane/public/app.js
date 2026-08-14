@@ -733,6 +733,8 @@ function openThinkingStream(convId) {
       const el = thinkingLogEl();
       if (!el) { closeThinkingStream(); return; }
       el.textContent += msg.text;
+      // Auto-scroll the thinking log itself (it has its own overflow area).
+      el.scrollTop = el.scrollHeight;
       const root = document.getElementById('messages');
       if (root) root.scrollTop = root.scrollHeight;
     }

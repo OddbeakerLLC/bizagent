@@ -690,7 +690,7 @@ function launchAgent(config, slug, model = '', cliName = '') {
     const cid =
       getPendingAgentWorkConversationId(hub, slug) ||
       getActiveConversationId(hub, 24 * 60 * 60 * 1000);
-    if (cid) recordThinking(hub, cid, slug, agentLog);
+    if (cid) recordThinking(hub, cid, slug, agentLog, logByteOffset(agentLog));
   } catch (_err) {
     /* best-effort */
   }
@@ -735,7 +735,7 @@ function launchHub(config) {
       postLaunchAck(hub, conversationId);
       logEvent(hub, { event: 'launch_ack', conversation_id: conversationId, t: startedAt });
       // Track the in-flight turn so the UI can stream its thinking live.
-      recordThinking(hub, conversationId, 'hub', agentLog);
+      recordThinking(hub, conversationId, 'hub', agentLog, logOffset);
       // Push "Working. Stand by..." over WS/SSE (hook no-ops outside main CP process).
       notifyConversationMutated(hub, conversationId);
     } catch (err) {
