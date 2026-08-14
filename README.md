@@ -66,6 +66,19 @@ You ask the hub for the big picture; it digests every journal and reports back.
 
 Three steps — one command does the work.
 
+> [!IMPORTANT]
+> **Get your LLM API key *before* you start the install.** The installer will
+> ask you to pick a provider and then prompt for that provider's API key — and
+> it will **not complete until a valid key is entered** (it validates the key
+> with a tiny "hello" request before proceeding). So grab your key now and have
+> it ready at install time to keep the flow friction-free.
+>
+> The default provider is **Grok (xAI)** — get a key at
+> [console.x.ai](https://console.x.ai/). For other providers see the
+> [provider table](#llm-providers) below. You can also hand the key off
+> non-interactively so the installer never pauses:
+> `BIZAGENT_API_KEY=... curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash`
+
 **Step 1 (optional).** Create a dedicated OS user (strongly recommended):
 
 ```sh

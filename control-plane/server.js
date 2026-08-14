@@ -128,6 +128,7 @@ const {
   clearThinking,
   getThinking,
 } = require("./lib/thinking");
+const { renderPlantUml } = require("./lib/plantuml");
 
 const PUBLIC_DIR = path.join(__dirname, "public");
 
@@ -765,7 +766,12 @@ async function handleApi(config, req, res) {
     }
     const { slug, logFile } = thinking;
     // Start at the turn boundary so only the current turn's output is shown.
-    let offset = Number(thinking.logByteOffset) || 0;
+    // Guard against a stale entry (missing/invalid logByteOffset): never replay
+    // prior-turn output — fall back to the current end of the log instead.
+    let offset = Number(thinking.logByteOffset);
+    if (!Number.isFinite(offset) || offset < 0) {
+      offset = fs.existsSync(logFile) ? fs.statSync(logFile).size : 0;
+    }
     const sendTail = () => {
       try {
         if (!fs.existsSync(logFile)) return;
@@ -1218,6 +1224,19 @@ async function handleApi(config, req, res) {
     try { broadcastConv(id, conv); } catch (_) {}
     try { wsBroadcastConv(id, conv); } catch (_) {}
     return send(res, 200, conv);
+  }
+
+  // --- PlantUML preview: render .puml source to SVG for inline display ---
+  if (url.pathname === "/api/plantuml/render" && req.method === "POST") {
+    const body = await parseBody(req);
+    const source = String(body.source || "");
+    if (!source.trim()) return send(res, 400, { error: "empty PlantUML source" });
+    try {
+      const svg = renderPlantUml(source, "svg");
+      return send(res, 200, { svg });
+    } catch (err) {
+      return send(res, 422, { error: err.message || "PlantUML render failed" });
+    }
   }
 
   return send(res, 404, { error: "not found" });

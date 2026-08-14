@@ -23,6 +23,7 @@
         <div class="auth-controls">
           <button id="libraryBtn" type="button" class="btn-secondary" hidden title="Browse plans, specs, and other docs written for you">Library</button>
           <button id="companyFilesBtn" type="button" class="btn-secondary" hidden title="Upload files to company/ for the Knowledge Stack">Company</button>
+          <button id="plantumlBtn" type="button" class="btn-secondary" hidden title="Preview a PlantUML diagram">PlantUML</button>
           <button id="editDisplayName" type="button" class="btn-secondary" hidden title="Change your display name">Name</button>
           <span id="authStatus" class="auth-status">Checking session...</span>
           <button id="logout" type="button" hidden>Logout</button>
@@ -93,6 +94,31 @@
       </div>
     </section>
   </main>
+
+  <div id="plantumlModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="plantumlModalTitle">
+    <div class="modal-content modal-content--wide">
+      <div class="modal-header">
+        <h3 id="plantumlModalTitle">PlantUML preview</h3>
+        <button id="plantumlModalClose" type="button" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="company-help">
+          Paste PlantUML source below and press <strong>Preview</strong> to render it
+          to SVG inline. Rendered locally on the hub via <code>plantuml.sh</code>.
+        </p>
+        <textarea id="plantumlSource" class="plantuml-source" rows="10"
+          placeholder="@startuml&#10;Alice -&gt; Bob: hello&#10;@enduml" spellcheck="false"></textarea>
+        <div class="plantuml-actions">
+          <button id="plantumlRender" type="button">Preview</button>
+          <span id="plantumlStatus" class="modal-status auth-status" hidden></span>
+        </div>
+        <div id="plantumlOutput" class="plantuml-output" hidden></div>
+      </div>
+      <div class="modal-footer">
+        <button id="plantumlModalDone" type="button" class="btn-secondary">Close</button>
+      </div>
+    </div>
+  </div>
 
   <div id="configModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <div class="modal-content">
