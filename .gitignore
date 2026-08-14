@@ -11,6 +11,7 @@
 # Local scratch
 *.log
 *.lock
+*.bak
 logs/
 
 # Runtime state under .bizagent (auth, sessions, pids, sockets, conversations).
