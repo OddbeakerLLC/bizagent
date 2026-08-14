@@ -764,7 +764,8 @@ async function handleApi(config, req, res) {
       return null;
     }
     const { slug, logFile } = thinking;
-    let offset = 0;
+    // Start at the turn boundary so only the current turn's output is shown.
+    let offset = Number(thinking.logByteOffset) || 0;
     const sendTail = () => {
       try {
         if (!fs.existsSync(logFile)) return;

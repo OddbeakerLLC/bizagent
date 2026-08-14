@@ -40,13 +40,16 @@ function writeThinking(hub, data) {
  * @param {string} conversationId
  * @param {string} slug - 'hub' or a product agent slug
  * @param {string} logFile - absolute path to the dispatch stdout log
+ * @param {number} [logByteOffset] - byte offset into logFile where this turn
+ *   begins, so the UI streams only the current turn's output (not the whole log)
  */
-function recordThinking(hub, conversationId, slug, logFile) {
+function recordThinking(hub, conversationId, slug, logFile, logByteOffset) {
   if (!conversationId || !slug) return;
   const data = readThinking(hub);
   data[conversationId] = {
     slug,
     logFile: String(logFile || ''),
+    logByteOffset: Number(logByteOffset) || 0,
     startedAt: new Date().toISOString(),
   };
   writeThinking(hub, data);
