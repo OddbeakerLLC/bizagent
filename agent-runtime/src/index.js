@@ -23,7 +23,7 @@ const { TOOLS, DESTRUCTIVE_TOOLS, executeToolCall } = require('./tools');
 const { buildSystemPrompt } = require('./system-prompt');
 
 const MAX_ITERATIONS = Math.min(
-  Math.max(Number(process.env.BIZAGENT_AGENT_MAX_ITERATIONS || 50), 5),
+  Math.max(Number(process.env.BIZAGENT_AGENT_MAX_ITERATIONS || 100), 5),
   120,
 );
 
