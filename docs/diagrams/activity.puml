@@ -1,0 +1,24 @@
+@startuml
+skinparam ConditionEndStyle hline
+
+start
+:User sends Prompt/Request;
+:Control Plane (CP) prepares Runtime Prompt\n(Session Memory + Pending Mail);
+:CP launches Hub Agent (PTL);
+
+if (Can Hub answer directly?) then (yes)
+    :Hub writes response to RESERVED_REPLY_BODY;
+else (no)
+    :Hub identifies owning Product Agent;
+    :Hub sends mail via write-message.sh;
+    :CP wakes up Product Agent;
+    :Product Agent reads inbox & performs work\nin project repository;
+    :Product Agent sends reply to Hub mailbox;
+    :CP re-launches Hub with new mail;
+    :Hub reads agent reply and synthesizes answer;
+    :Hub writes final response to RESERVED_REPLY_BODY;
+endif
+
+:CP delivers markdown body to User;
+stop
+@enduml
