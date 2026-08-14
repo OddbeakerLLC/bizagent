@@ -23,6 +23,7 @@ const {
 } = require('./conversations');
 const { logEvent, logError, appendLog } = require('./log');
 const { routeOutboxes, writeOutboxMessage } = require('./mail');
+const { clearThinking } = require('./thinking');
 
 const DEFAULT_MAX_BLOB_CHARS = 4000;
 const MIN_BLOB_CHARS = 12;
@@ -612,6 +613,12 @@ function drainPendingHubTurns(hub, isHubActive) {
 function onHubCliExit(hub, turn) {
   const start = Date.now();
   const result = ensureHubUserReply(hub, turn || {});
+
+  // Turn is over — drop any stale in-flight thinking entry so a later stream
+  // for the same conversation can never replay this (or an older) turn's output.
+  if (turn && turn.conversationId) {
+    try { clearThinking(hub, turn.conversationId); } catch (_err) { /* best-effort */ }
+  }
 
   logEvent(hub, {
     event: 'hub_safety_on_exit',

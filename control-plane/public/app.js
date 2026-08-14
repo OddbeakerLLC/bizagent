@@ -70,9 +70,12 @@ function setAuthenticated(isAuthenticated, message) {
   if (companyBtn) companyBtn.hidden = !isAuthenticated;
   const libraryBtn = document.getElementById('libraryBtn');
   if (libraryBtn) libraryBtn.hidden = !isAuthenticated;
+  const plantumlBtn = document.getElementById('plantumlBtn');
+  if (plantumlBtn) plantumlBtn.hidden = !isAuthenticated;
   if (!isAuthenticated) {
     document.getElementById('namePanel').hidden = true;
     hideCompanyModal();
+    hidePlantUmlModal();
     if (currentRoute === 'library') navigateRoute('chat');
   }
   setAuthStatus(message || (isAuthenticated ? 'Signed in' : 'Login required'), isAuthenticated ? 'ok' : 'warn');
@@ -1342,6 +1345,66 @@ function bindCompanyModal() {
   }
 }
 
+// --- PlantUML preview (render .puml source to SVG inline) ---
+function setPlantUmlStatus(msg, kind) {
+  const status = document.getElementById('plantumlStatus');
+  if (!status) return;
+  if (!msg) { status.hidden = true; status.textContent = ''; return; }
+  status.hidden = false;
+  status.textContent = msg;
+  status.className = `modal-status auth-status ${kind || ''}`;
+}
+
+function hidePlantUmlModal() {
+  const modal = document.getElementById('plantumlModal');
+  if (modal) modal.hidden = true;
+  setPlantUmlStatus('');
+}
+
+async function renderPlantUmlPreview() {
+  const sourceEl = document.getElementById('plantumlSource');
+  const output = document.getElementById('plantumlOutput');
+  const source = sourceEl ? sourceEl.value : '';
+  if (!source.trim()) {
+    setPlantUmlStatus('Enter PlantUML source first.', 'warn');
+    return;
+  }
+  setPlantUmlStatus('Rendering…', 'pending');
+  if (output) output.hidden = true;
+  try {
+    const data = await api('/api/plantuml/render', {
+      method: 'POST',
+      body: JSON.stringify({ source }),
+    });
+    if (!data || !data.svg) throw new Error('No SVG returned');
+    if (output) {
+      output.innerHTML = data.svg;
+      output.hidden = false;
+    }
+    setPlantUmlStatus('Rendered.', 'ok');
+  } catch (err) {
+    setPlantUmlStatus(err.message || 'Render failed', 'warn');
+  }
+}
+
+function bindPlantUmlModal() {
+  const modal = document.getElementById('plantumlModal');
+  if (!modal || modal.dataset.bound === '1') return;
+  modal.dataset.bound = '1';
+  const openBtn = document.getElementById('plantumlBtn');
+  if (openBtn) openBtn.addEventListener('click', () => { modal.hidden = false; });
+  const close = () => hidePlantUmlModal();
+  const closeBtn = document.getElementById('plantumlModalClose');
+  const doneBtn = document.getElementById('plantumlModalDone');
+  if (closeBtn) closeBtn.addEventListener('click', close);
+  if (doneBtn) doneBtn.addEventListener('click', close);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) close();
+  });
+  const renderBtn = document.getElementById('plantumlRender');
+  if (renderBtn) renderBtn.addEventListener('click', () => renderPlantUmlPreview());
+}
+
 document.getElementById('login').addEventListener('click', () => {
   if (needsSetup) setup();
   else login();
@@ -1351,6 +1414,7 @@ document.getElementById('logout').addEventListener('click', async () => {
   setAuthenticated(false, 'Signed out');
 });
 bindCompanyModal();
+bindPlantUmlModal();
 bindLibraryPage();
 bindComposerAttachments();
 applyRoute(parseRoute());

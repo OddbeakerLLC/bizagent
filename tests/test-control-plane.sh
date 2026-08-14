@@ -308,6 +308,22 @@ grep -q "thinkingActive" "$ROOT/control-plane/public/app.js" \
   || fail "UI missing thinking-active guard for Escape interrupt"
 grep -q "stopThinking" "$ROOT/control-plane/public/app.js" \
   || fail "UI missing Escape stop-thinking handler"
+# Thinking preview boundary: stream must never replay prior-turn output.
+grep -q "logByteOffset" "$ROOT/control-plane/lib/thinking.js" \
+  || fail "thinking record does not store logByteOffset"
+grep -q "Number.isFinite(offset)" "$ROOT/control-plane/server.js" \
+  || fail "thinking stream does not guard against stale/missing logByteOffset"
+grep -q "clearThinking" "$ROOT/control-plane/lib/hub-turn-safety.js" \
+  || fail "hub turn completion does not clear stale thinking entry"
+# PlantUML preview: render .puml source to SVG inline.
+grep -q "/api/plantuml/render" "$ROOT/control-plane/server.js" \
+  || fail "server missing PlantUML render endpoint"
+grep -q "renderPlantUml" "$ROOT/control-plane/lib/plantuml.js" \
+  || fail "missing PlantUML render module"
+grep -q "plantumlBtn" "$ROOT/control-plane/public/index.html" \
+  || fail "UI missing PlantUML preview button"
+grep -q "plantumlOutput" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing PlantUML preview output handling"
 # 4. Preview: built pages surface as clickable links opening in a new tab (no iframe).
 grep -q 'target="_blank"' "$ROOT/control-plane/public/app.js" \
   || fail "UI does not open preview links in a new tab"

@@ -269,6 +269,13 @@ select_default_provider() {
   SELECTED_PROMPT_FLAG="-f"
   SELECTED_YOLO_FLAG="-y"
   ok "LLM runtime: bizagent-agent · default provider: $SELECTED_PROVIDER"
+
+  # If the user doesn't already have their API key, now is the time to grab it:
+  # the install will NOT complete until a valid key is entered at the next step.
+  if [[ -z "${BIZAGENT_API_KEY:-}" ]]; then
+    note "If you don't already have an API key for ${SELECTED_PROVIDER:-grok}, grab it now —"
+    note "the next step requires it and the install will not finish until a valid key is entered."
+  fi
 }
 
 # Map provider → primary API key env var for .bizagent/env
@@ -458,6 +465,15 @@ PY
     warn "could not ensure cli.json provider catalog — runtime may fail until fixed"
   else
     ok "cli.json has provider '$provider' (runtime: bizagent-agent)"
+  fi
+
+  # Install root (control-plane) deps if present — e.g. `ws` for the web UI.
+  if [[ -f "$INSTALL_DIR/package.json" ]]; then
+    if command -v npm >/dev/null 2>&1; then
+      (cd "$INSTALL_DIR" && npm install --silent) \
+        && ok "control-plane npm dependencies installed" \
+        || warn "root npm install failed — run: cd $INSTALL_DIR && npm install"
+    fi
   fi
 
   # Install agent-runtime deps if present
