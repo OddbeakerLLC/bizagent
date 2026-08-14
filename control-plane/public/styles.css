@@ -50,13 +50,15 @@ body {
   min-width: 0;
 }
 .agent-name {
-  font-size: 14px;
-  color: #f7fafc;
+  font-size: 12px;
+  color: #cbd5e1;
+  margin-top: 1px;
 }
 .agent-product {
-  font-size: 11px;
-  color: #9ca3af;
-  margin-top: 1px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #f7fafc;
+  line-height: 1.25;
 }
 .agent-cli-line {
   display: block;
@@ -664,6 +666,26 @@ button {
   color: #1d4ed8;
   background: #eff6ff;
   border-color: #bfdbfe;
+}
+.thinking-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1d4ed8;
+  margin-bottom: 6px;
+}
+.thinking-log {
+  margin: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  background: #0f172a;
+  color: #cbd5e1;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .message.status.error {
   color: #9a3412;

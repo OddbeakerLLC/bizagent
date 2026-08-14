@@ -23,6 +23,9 @@ let librarySelectedId = '';
 let pendingAttachFiles = [];
 /** Last agents snapshot for recipient dropdown. */
 let lastAgentsList = [];
+/** Live thinking log: streams an in-flight turn's output in place of the launch-ack. */
+let thinkingSource = null;
+let thinkingConv = null;
 
 // UI polling gate for push test. Polling for /api/state and conversation history is OFF by default.
 // WS subscribe/push is the preferred and only driver when this flag is off (default).
@@ -391,25 +394,24 @@ function renderAgents(agents) {
     const labels = document.createElement('div');
     labels.className = 'agent-labels';
 
+    // Line 1 (top, large): product name.
+    const product = document.createElement('span');
+    product.className = 'agent-product';
+    product.textContent = agent.name || agent.agentName || agent.slug;
+    labels.appendChild(product);
+
+    // Line 2 (middle): agent name.
     const name = document.createElement('span');
     name.className = 'agent-name';
     name.textContent = agent.active ? `${agent.agentName} running` : agent.agentName;
     labels.appendChild(name);
 
-    if (agent.name && agent.name !== agent.agentName) {
-      const product = document.createElement('span');
-      product.className = 'agent-product';
-      product.textContent = agent.name;
-      labels.appendChild(product);
-    }
-
-    // LLM provider >> model (click opens config; does not toggle expand)
+    // Line 3 (beneath, small): model (click opens config; does not toggle expand).
     const cliLine = document.createElement('button');
     cliLine.type = 'button';
     cliLine.className = 'agent-cli-line';
-    const providerName = agent.provider || agent.cliName || '—';
     const modelName = agent.model || '—';
-    cliLine.textContent = `${providerName} >> ${modelName}`;
+    cliLine.textContent = modelName;
     cliLine.title = 'Change LLM and model';
     cliLine.addEventListener('click', (e) => {
       e.preventDefault();
@@ -661,7 +663,22 @@ function renderMessages(messages) {
     }
     const body = document.createElement('div');
     body.className = 'message-body';
-    body.innerHTML = renderMarkdown(msg.content);
+    // Live thinking: a launch-ack becomes a streaming "thinking" block instead
+    // of the static "Working. Stand by..." text. Replaced by the real reply
+    // when the conversation updates (the launch-ack is stripped on reply).
+    if (msg.role === 'status' && msg.kind === 'launch-ack') {
+      body.innerHTML = '';
+      const label = document.createElement('div');
+      label.className = 'thinking-label';
+      label.textContent = 'Thinking…';
+      const log = document.createElement('pre');
+      log.className = 'thinking-log';
+      log.setAttribute('data-thinking-log', '1');
+      body.appendChild(label);
+      body.appendChild(log);
+    } else {
+      body.innerHTML = renderMarkdown(msg.content);
+    }
     el.appendChild(body);
     if (Array.isArray(msg.attachments) && msg.attachments.length) {
       const row = document.createElement('div');
@@ -680,6 +697,71 @@ function renderMessages(messages) {
     root.appendChild(el);
   });
   root.scrollTop = root.scrollHeight;
+  syncThinking();
+}
+
+// --- Live thinking log (streams in-flight turn output) ---
+function closeThinkingStream() {
+  try { if (thinkingSource) thinkingSource.close(); } catch (_) {}
+  thinkingSource = null;
+  thinkingConv = null;
+}
+
+function thinkingLogEl() {
+  return document.querySelector('[data-thinking-log="1"]');
+}
+
+function thinkingActive() {
+  return !!thinkingSource && !!thinkingConv;
+}
+
+function openThinkingStream(convId) {
+  if (!convId || thinkingConv === convId) return;
+  closeThinkingStream();
+  thinkingConv = convId;
+  const log = thinkingLogEl();
+  if (!log) { closeThinkingStream(); return; }
+  thinkingSource = new EventSource(`/api/thinking/stream?conv=${encodeURIComponent(convId)}`);
+  thinkingSource.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    if (msg && msg.done) {
+      closeThinkingStream();
+      return;
+    }
+    if (msg && msg.text) {
+      const el = thinkingLogEl();
+      if (!el) { closeThinkingStream(); return; }
+      el.textContent += msg.text;
+      const root = document.getElementById('messages');
+      if (root) root.scrollTop = root.scrollHeight;
+    }
+  };
+  thinkingSource.onerror = () => { /* SSE will retry; close on done */ };
+}
+
+/** Open the thinking stream when a launch-ack is visible; close it otherwise. */
+function syncThinking() {
+  const hasAck = !!document.querySelector('[data-thinking-log="1"]');
+  if (hasAck && currentConversation) {
+    openThinkingStream(currentConversation);
+  } else if (!hasAck) {
+    closeThinkingStream();
+  }
+}
+
+/** Hard-stop the in-flight turn (operator pressed Escape). */
+async function stopThinking() {
+  const convId = thinkingConv || currentConversation;
+  if (!convId) return;
+  closeThinkingStream();
+  try {
+    await api('/api/thinking/stop', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: convId }),
+    });
+  } catch (_err) { /* best-effort */ }
+  if (currentConversation) await loadConversation(currentConversation);
 }
 
 async function loadProfile() {
@@ -1494,6 +1576,20 @@ function loadEnterprisePanel() {
   s.onerror = function () { try { s.remove(); } catch (_) {} };
   document.head.appendChild(s);
 }
+
+// Escape = hard-stop the in-flight thinking (no button, no clickable light).
+// Modal Escape handlers take precedence when a modal is open.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const modal = document.getElementById('configModal');
+  const companyModal = document.getElementById('companyModal');
+  const modalOpen = (modal && !modal.hidden) || (companyModal && !companyModal.hidden);
+  if (modalOpen) return;
+  if (thinkingActive()) {
+    e.preventDefault();
+    stopThinking();
+  }
+});
 
 
 boot();

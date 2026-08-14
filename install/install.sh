@@ -8,6 +8,7 @@ BOLD=$'\033[1m'; GREEN=$'\033[32m'; BLUE=$'\033[34m'; NC=$'\033[0m'
 step() { printf "\n${BOLD}${BLUE}==>${NC} ${BOLD}%s${NC}\n" "$1"; }
 ok()   { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
 note() { printf "  %s\n" "$1"; }
+warn() { printf "  ! %s\n" "$1"; }
 
 HUB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CP_DIR="$HUB/control-plane"
@@ -105,6 +106,42 @@ api_key_var_for_provider() {
     *) echo "XAI_API_KEY" ;;
   esac
 }
+# Provider → OpenAI-compatible endpoint + a cheap model for the hello check.
+provider_hello_endpoint() {
+  case "$1" in
+    grok|xai)        echo "https://api.x.ai/v1|grok-4.3" ;;
+    chatgpt|openai|codex) echo "https://api.openai.com/v1|gpt-5.4-mini" ;;
+    claude)          echo "https://api.anthropic.com/v1/|claude-haiku-4-5-20251001" ;;
+    openrouter)      echo "https://openrouter.ai/api/v1|anthropic/claude-sonnet-4" ;;
+    gemini|agy)      echo "https://generativelanguage.googleapis.com/v1beta/openai/|gemini-2.5-flash-lite" ;;
+    venice)          echo "https://api.venice.ai/api/v1|deepseek-v4-flash-0731" ;;
+    ollama)          echo "http://127.0.0.1:11434/v1|llama3.2" ;;
+    *)               echo "" ;;
+  esac
+}
+
+# Send a tiny 'hello' prompt to the LLM to confirm the API key works before
+# proceeding. Returns 0 on success, 1 on failure. Skips (returns 0) when the
+# provider endpoint is unknown or curl is unavailable — never blocks install.
+validate_api_key() {
+  local provider="$1" key="$2"
+  local ep base model code
+  ep="$(provider_hello_endpoint "$provider")"
+  [[ -z "$ep" ]] && return 0
+  base="${ep%%|*}"; model="${ep#*|}"
+  base="${base%/}"
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl not found — skipping API key validation"
+    return 0
+  fi
+  code="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "$base/chat/completions" \
+    -H "Authorization: Bearer $key" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":1}" 2>/dev/null)"
+  [[ "$code" == "200" ]]
+}
+
 API_KEY_VAR="$(api_key_var_for_provider "$PROVIDER")"
 mkdir -p "$HUB/.bizagent"
 if [[ ! -f "$HUB/.bizagent/env.example" && -f "$HUB/cli.json.example" ]]; then
@@ -121,6 +158,9 @@ if [[ -n "${BIZAGENT_API_KEY:-}" && -n "$API_KEY_VAR" ]]; then
   fi
   chmod 600 "$HUB/.bizagent/env"
   ok ".bizagent/env updated ($API_KEY_VAR from BIZAGENT_API_KEY)"
+  if ! validate_api_key "$PROVIDER" "$BIZAGENT_API_KEY"; then
+    warn "BIZAGENT_API_KEY was rejected by the provider — installation may fail until it is corrected."
+  fi
 elif [[ -n "$API_KEY_VAR" ]]; then
   existing_val="${!API_KEY_VAR:-}"
   if [[ -z "$existing_val" && -f "$HUB/.bizagent/env" ]]; then
@@ -142,15 +182,24 @@ elif [[ -n "$API_KEY_VAR" ]]; then
     fi
   else
     printf "\nHub turns need %s in .bizagent/env (first-run will not work without it).\n" "$API_KEY_VAR"
-    read -r -s -p "  $API_KEY_VAR (hidden, Enter to skip): " typed_key </dev/tty
-    printf "\n"
-    if [[ -n "$typed_key" ]]; then
-      printf '%s=%s\n' "$API_KEY_VAR" "$typed_key" >> "$HUB/.bizagent/env"
-      chmod 600 "$HUB/.bizagent/env"
-      ok ".bizagent/env written ($API_KEY_VAR)"
-    else
-      printf "  ! Skipped — first-run/hub turns will fail until this key is set.\n"
-    fi
+    printf "  ! An incorrectly entered API key will prevent completing the installation.\n"
+    typed_key=""
+    while true; do
+      read -r -s -p "  $API_KEY_VAR (required, hidden): " typed_key </dev/tty
+      printf "\n"
+      if [[ -z "$typed_key" ]]; then
+        printf "  ! API key is required — an empty or incorrect key will prevent completing the installation. Please enter it.\n"
+        continue
+      fi
+      if validate_api_key "$PROVIDER" "$typed_key"; then
+        break
+      fi
+      printf "  ! That API key was rejected by the provider. Please re-enter it.\n"
+      typed_key=""
+    done
+    printf '%s=%s\n' "$API_KEY_VAR" "$typed_key" >> "$HUB/.bizagent/env"
+    chmod 600 "$HUB/.bizagent/env"
+    ok ".bizagent/env written ($API_KEY_VAR, validated)"
   fi
 fi
 
