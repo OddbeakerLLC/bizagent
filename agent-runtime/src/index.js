@@ -23,23 +23,22 @@ const { TOOLS, DESTRUCTIVE_TOOLS, executeToolCall } = require('./tools');
 const { buildSystemPrompt } = require('./system-prompt');
 
 const REASONING_FIELDS = {
-  venice: 'reasoning_content',
-  grok: 'reasoning',
-  chatgpt: 'reasoning',
-  claude: 'thinking',
-  gemini: 'reasoning',
+  venice: ['reasoning_content'],
+  grok: ['reasoning_content'],
+  chatgpt: ['reasoning'],
+  claude: ['thinking'],
+  gemini: ['reasoning'],
+  openrouter: ['reasoning'],
   ollama: null,
 };
 
 function extractReasoning(msg, provider) {
-  const field = REASONING_FIELDS[provider];
-  if (field && msg[field] && typeof msg[field] === 'string') {
-    return msg[field];
-  }
-  // fallback: look for known fields
-  const known = ['reasoning_content', 'reasoning', 'thinking'];
-  for (const f of known) {
-    if (msg[f] && typeof msg[f] === 'string') return msg[f];
+  const fields = REASONING_FIELDS[provider] || [];
+  for (const field of fields) {
+    const content = msg[field];
+    if (typeof content === 'string' && content.trim()) {
+      return content;
+    }
   }
   return null;
 }
