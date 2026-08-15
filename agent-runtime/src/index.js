@@ -22,19 +22,30 @@ const { resolveProvider, listProviders } = require('./providers');
 const { TOOLS, DESTRUCTIVE_TOOLS, executeToolCall } = require('./tools');
 const { buildSystemPrompt } = require('./system-prompt');
 
+// Provider-specific reasoning field names (verified for Venice, Grok; others from provider docs)
 const REASONING_FIELDS = {
   venice: ['reasoning_content'],
-  grok: ['reasoning_content'],
+  grok: ['reasoning_content', 'reasoning'],
   chatgpt: ['reasoning'],
   claude: ['thinking'],
   gemini: ['reasoning'],
   openrouter: ['reasoning'],
-  ollama: null,
+  ollama: [],
 };
 
 function extractReasoning(msg, provider) {
-  const fields = REASONING_FIELDS[provider] || [];
-  for (const field of fields) {
+  const fields = REASONING_FIELDS[provider];
+  if (fields === null) return null;
+  const providerFields = fields || [];
+  for (const field of providerFields) {
+    const content = msg[field];
+    if (typeof content === 'string' && content.trim()) {
+      return content;
+    }
+  }
+  // fallback for unknown providers: check known fields
+  const known = ['reasoning_content', 'reasoning', 'thinking'];
+  for (const field of known) {
     const content = msg[field];
     if (typeof content === 'string' && content.trim()) {
       return content;
