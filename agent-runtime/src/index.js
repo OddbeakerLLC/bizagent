@@ -22,8 +22,30 @@ const { resolveProvider, listProviders } = require('./providers');
 const { TOOLS, DESTRUCTIVE_TOOLS, executeToolCall } = require('./tools');
 const { buildSystemPrompt } = require('./system-prompt');
 
+const REASONING_FIELDS = {
+  venice: 'reasoning_content',
+  grok: 'reasoning',
+  chatgpt: 'reasoning',
+  claude: 'thinking',
+  gemini: 'reasoning',
+  ollama: null,
+};
+
+function extractReasoning(msg, provider) {
+  const field = REASONING_FIELDS[provider];
+  if (field && msg[field] && typeof msg[field] === 'string') {
+    return msg[field];
+  }
+  // fallback: look for known fields
+  const known = ['reasoning_content', 'reasoning', 'thinking'];
+  for (const f of known) {
+    if (msg[f] && typeof msg[f] === 'string') return msg[f];
+  }
+  return null;
+}
+
 const MAX_ITERATIONS = Math.min(
-  Math.max(Number(process.env.BIZAGENT_AGENT_MAX_ITERATIONS || 50), 5),
+  Math.max(Number(process.env.BIZAGENT_AGENT_MAX_ITERATIONS || 100), 5),
   120,
 );
 
@@ -172,6 +194,11 @@ async function runAgent(userMessage) {
 
     if (msg.content) {
       console.log(msg.content);
+    }
+    // Log provider-specific reasoning/thinking fields
+    const reasoning = extractReasoning(msg, resolved.provider);
+    if (reasoning) {
+      console.log('Thinking:', reasoning);
     }
 
     if (!msg.tool_calls || msg.tool_calls.length === 0) {
