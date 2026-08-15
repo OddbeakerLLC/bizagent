@@ -22,6 +22,38 @@ const { resolveProvider, listProviders } = require('./providers');
 const { TOOLS, DESTRUCTIVE_TOOLS, executeToolCall } = require('./tools');
 const { buildSystemPrompt } = require('./system-prompt');
 
+// Provider-specific reasoning field names (verified for Venice, Grok; others from provider docs)
+const REASONING_FIELDS = {
+  venice: ['reasoning_content'],
+  grok: ['reasoning_content', 'reasoning'],
+  chatgpt: ['reasoning'],
+  claude: ['thinking'],
+  gemini: ['reasoning'],
+  openrouter: ['reasoning'],
+  ollama: [],
+};
+
+function extractReasoning(msg, provider) {
+  const fields = REASONING_FIELDS[provider];
+  if (fields === null) return null;
+  const providerFields = fields || [];
+  for (const field of providerFields) {
+    const content = msg[field];
+    if (typeof content === 'string' && content.trim()) {
+      return content;
+    }
+  }
+  // fallback for unknown providers: check known fields
+  const known = ['reasoning_content', 'reasoning', 'thinking'];
+  for (const field of known) {
+    const content = msg[field];
+    if (typeof content === 'string' && content.trim()) {
+      return content;
+    }
+  }
+  return null;
+}
+
 const MAX_ITERATIONS = Math.min(
   Math.max(Number(process.env.BIZAGENT_AGENT_MAX_ITERATIONS || 100), 5),
   120,
@@ -169,6 +201,12 @@ async function runAgent(userMessage) {
       break;
     }
     const msg = choice.message;
+    const reasoning = extractReasoning(msg, resolved.provider);
+    if (reasoning) {
+      reasoning.split('\n').forEach(line => {
+        if (line.trim()) console.log(`Thinking: ${line.trim()}`);
+      });
+    }
 
     if (msg.content) {
       console.log(msg.content);
@@ -294,7 +332,10 @@ async function interactiveLoop() {
   }
 }
 
-(async () => {
+module.exports = { extractReasoning };
+
+if (require.main === module) {
+  (async () => {
   try {
     const initialPrompt = await getInitialPrompt();
     if (initialPrompt) {
@@ -340,4 +381,5 @@ async function interactiveLoop() {
   } catch (_e) {
     /* ignore */
   }
-})();
+  })();
+}
