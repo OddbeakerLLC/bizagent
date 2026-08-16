@@ -73,7 +73,7 @@ function deriveHubRuntimePrompt(hub) {
     '',
     'You are the **Products Team Lead** (PTL). You report to the operator (CEO).',
     'Hub-and-spoke: this repo is the hub; each product has one agent owning one or more project repos.',
-    '`registry.json` is the source of truth. Use each product\'s `agent_name` when speaking to the operator;',
+    '`registry.json` is source of truth; use product `agent_name` with operator; status → product sitemap;',
     'use slugs only in message file headers (`from:`, `to:`).',
     '',
     '## What is a "product"?',

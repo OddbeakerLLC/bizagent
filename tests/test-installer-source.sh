@@ -111,4 +111,14 @@ grep -q '\.bizagent/env' "$ROOT/install/install.sh" \
 grep -qE 'bizagent-agent|LLM provider|check-hub-ready' "$ROOT/README.md" \
   || fail "README does not document installer API key prompt"
 
+
+# LLM provider choice during install (root install.sh + install/install.sh)
+grep -q 'Choose an LLM provider' "$ROOT/install.sh" \
+  || fail "install.sh does not prompt the user to choose an LLM provider"
+grep -q 'Choose an LLM provider' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not prompt the user to choose an LLM provider"
+grep -q 'BIZAGENT_PROVIDER' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not respect BIZAGENT_PROVIDER override"
+
+
 echo "  ok: installer source override"
