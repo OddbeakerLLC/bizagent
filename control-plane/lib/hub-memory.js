@@ -156,7 +156,7 @@ function deriveHubRuntimePrompt(hub) {
     '',
     '- Full setup/ops manual: `AGENT.md` (never for §0 detect-built on a live hub)',
     '- Knowledge Stack / weekly refresh: `WEEKLY.md`, `company/`, `knowledge-stack/`',
-    '- **Library** (operator-facing plans/specs/reports): write under `library/` and keep `library/manifest.json` in sync — the operator browses these in the UI without hub FS access. Prefer `library/YYYY-MM-DD-<slug>.md` plus a manifest entry (id, title, path, source).',
+    '- **Library** (plans/specs/diagrams): `library/` + `manifest.json` (UI browse). Docs: `YYYY-MM-DD-<slug>.md`. Diagrams: `<name>.puml` + render `<name>.svg`; manifest `path`=svg, `source_path`=puml, `kind`=diagram.',
     '- Nightly housekeeping: `NIGHTLY.md`',
     '- Factory reset (SHTF): `scripts/factory-reset.sh`',
     '- Product agent mailboxes: `agents/<slug>/inbox`, `agents/<slug>/outbox`',

@@ -105,7 +105,9 @@ const {
   MAX_UPLOAD_BYTES,
 } = require("./lib/company-files");
 const {
+  contentTypeForExt,
   ensureLibrary,
+  extOf,
   getLibraryEntry,
   listLibrary,
   resolveLibraryFile,
@@ -1036,24 +1038,110 @@ async function handleApi(config, req, res) {
       const wantDownload =
         url.searchParams.get("download") === "1" ||
         url.searchParams.get("download") === "true";
+      const wantRaw =
+        url.searchParams.get("raw") === "1" ||
+        url.searchParams.get("raw") === "true";
+      const wantSource =
+        url.searchParams.get("source") === "1" ||
+        url.searchParams.get("source") === "true";
+      const wantRender =
+        url.searchParams.get("render") === "1" ||
+        url.searchParams.get("render") === "true" ||
+        url.searchParams.get("format") === "svg" ||
+        url.searchParams.get("format") === "png";
       const doc = getLibraryEntry(config.hub, id);
-      if (wantDownload) {
-        const { abs } = resolveLibraryFile(config.hub, doc.path);
-        const raw = fs.readFileSync(abs);
-        const filename = path.basename(doc.path || "document.md");
-        res.writeHead(200, {
-          "Content-Type": "text/markdown; charset=utf-8",
+      const { abs } = resolveLibraryFile(config.hub, doc.path);
+      const filename = path.basename(doc.path || "document.md");
+      const fileExt = extOf(doc.path);
+      const safeName = (name) => String(name || "file").replace(/"/g, "");
+
+      // Companion .puml source for a diagram entry (download / view source).
+      if (wantSource && doc.source_path) {
+        const src = resolveLibraryFile(config.hub, doc.source_path);
+        if (!fs.existsSync(src.abs)) {
+          return send(res, 404, { error: "source file missing" });
+        }
+        const raw = fs.readFileSync(src.abs);
+        const srcName = path.basename(doc.source_path);
+        const headers = {
+          "Content-Type": contentTypeForExt(extOf(srcName)),
           "Content-Length": raw.length,
-          "Content-Disposition": `attachment; filename="${filename.replace(/"/g, "")}"`,
           "Cache-Control": "no-store",
+        };
+        if (wantDownload) {
+          headers["Content-Disposition"] = `attachment; filename="${safeName(srcName)}"`;
+        }
+        res.writeHead(200, headers);
+        res.end(raw);
+        return null;
+      }
+
+      // On-demand PlantUML render when entry is still .puml (no stored SVG).
+      if (wantRender && (fileExt === ".puml" || fileExt === ".plantuml")) {
+        const fmt = url.searchParams.get("format") === "png" ? "png" : "svg";
+        const source = fs.readFileSync(abs, "utf8");
+        const rendered = renderPlantUml(source, fmt);
+        const stem = filename.replace(/\.(puml|plantuml)$/i, "");
+        if (fmt === "png") {
+          const buf = Buffer.isBuffer(rendered) ? rendered : Buffer.from(rendered);
+          const headers = {
+            "Content-Type": "image/png",
+            "Content-Length": buf.length,
+            "Cache-Control": "no-store",
+          };
+          if (wantDownload) {
+            headers["Content-Disposition"] = `attachment; filename="${safeName(stem)}.png"`;
+          }
+          res.writeHead(200, headers);
+          res.end(buf);
+          return null;
+        }
+        const svg = String(rendered || "");
+        const buf = Buffer.from(svg, "utf8");
+        if (wantDownload || wantRaw) {
+          const headers = {
+            "Content-Type": "image/svg+xml; charset=utf-8",
+            "Content-Length": buf.length,
+            "Cache-Control": "no-store",
+          };
+          if (wantDownload) {
+            headers["Content-Disposition"] = `attachment; filename="${safeName(stem)}.svg"`;
+          }
+          res.writeHead(200, headers);
+          res.end(buf);
+          return null;
+        }
+        return send(res, 200, {
+          ...doc,
+          kind: "plantuml",
+          rendered_format: "svg",
+          svg,
         });
+      }
+
+      // Binary/raw bytes with correct Content-Type (svg/png/md/puml).
+      if (wantDownload || wantRaw) {
+        const raw = fs.readFileSync(abs);
+        const headers = {
+          "Content-Type": contentTypeForExt(fileExt),
+          "Content-Length": raw.length,
+          "Cache-Control": "no-store",
+        };
+        if (wantDownload) {
+          headers["Content-Disposition"] = `attachment; filename="${safeName(filename)}"`;
+        }
+        res.writeHead(200, headers);
         res.end(raw);
         return null;
       }
       return send(res, 200, doc);
     } catch (err) {
       const msg = err.message || "not found";
-      const status = /not found|missing/i.test(msg) ? 404 : 400;
+      const status = /not found|missing/i.test(msg)
+        ? 404
+        : /PlantUML|not installed/i.test(msg)
+          ? 422
+          : 400;
       return send(res, status, { error: msg });
     }
   }

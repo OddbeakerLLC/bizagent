@@ -76,7 +76,7 @@ function setAuthenticated(isAuthenticated, message) {
   if (!isAuthenticated) {
     document.getElementById('namePanel').hidden = true;
     hideCompanyModal();
-    hidePlantUmlModal();
+    if (typeof hidePlantUmlModal === 'function') hidePlantUmlModal();
     if (currentRoute === 'library') navigateRoute('chat');
   }
   setAuthStatus(message || (isAuthenticated ? 'Signed in' : 'Login required'), isAuthenticated ? 'ok' : 'warn');
@@ -1065,8 +1065,10 @@ function renderLibraryList(selectId) {
     li.className = 'company-file-item library-list-item';
     li.dataset.id = e.id;
     const when = e.created_at ? new Date(e.created_at).toLocaleString() : '';
+    const kind = libraryEntryKind(e);
+    const badge = (kind === 'plantuml' || kind === 'diagram') ? ' · diagram' : '';
     li.innerHTML = `<span class="company-file-path">${escapeHtml(e.title || e.path || e.id)}</span>`
-      + `<span class="company-file-meta">${escapeHtml(when)}</span>`;
+      + `<span class="company-file-meta">${escapeHtml(when)}${badge}</span>`;
     li.addEventListener('click', () => openLibraryDoc(e.id));
     list.appendChild(li);
   }
@@ -1081,6 +1083,35 @@ function setLibraryDownloadEnabled(on) {
   if (btn) btn.disabled = !on;
 }
 
+function setLibrarySourceVisible(on) {
+  const btn = document.getElementById('librarySourceBtn');
+  if (btn) {
+    btn.hidden = !on;
+    btn.disabled = !on;
+  }
+}
+
+function libraryEntryKind(doc) {
+  if (!doc) return 'document';
+  const k = String(doc.kind || doc.type || '').toLowerCase();
+  if (k === 'diagram' || k === 'image') return 'diagram';
+  if (k === 'plantuml') return 'plantuml';
+  const p = String(doc.path || '').toLowerCase();
+  if (p.endsWith('.svg') || p.endsWith('.png')) return 'diagram';
+  if (p.endsWith('.puml') || p.endsWith('.plantuml')) return 'plantuml';
+  return 'document';
+}
+
+function librarySourceBlock(doc) {
+  const sourceText = doc.source_content
+    || ((String(doc.ext || doc.path || '').toLowerCase().match(/\.puml$|\.plantuml$/))
+      ? doc.content
+      : '');
+  if (!sourceText) return '';
+  return `<details class="library-diagram-source"><summary>View PlantUML source</summary>`
+    + `<pre class="library-source-pre">${escapeHtml(sourceText)}</pre></details>`;
+}
+
 async function openLibraryDoc(id) {
   const titleEl = document.getElementById('libraryPreviewTitle');
   const bodyEl = document.getElementById('libraryPreviewBody');
@@ -1088,16 +1119,51 @@ async function openLibraryDoc(id) {
   librarySelectedId = id;
   bodyEl.innerHTML = '<p class="company-file-empty">Loading…</p>';
   setLibraryDownloadEnabled(false);
+  setLibrarySourceVisible(false);
   try {
-    const doc = await api(`/api/library/file?id=${encodeURIComponent(id)}`);
+    const kindHint = (() => {
+      const e = libraryEntriesCache.find((x) => x.id === id);
+      return e ? libraryEntryKind(e) : '';
+    })();
+    // On-demand render when the entry is still raw .puml (no stored SVG yet).
+    const qs = kindHint === 'plantuml'
+      ? `/api/library/file?id=${encodeURIComponent(id)}&render=1&format=svg`
+      : `/api/library/file?id=${encodeURIComponent(id)}`;
+    const doc = await api(qs);
     if (titleEl) {
       titleEl.textContent = doc.title || doc.path || id;
     }
-    bodyEl.innerHTML = renderMarkdown(doc.content || '');
+    const kind = libraryEntryKind(doc);
+    const metaPath = doc.source_path
+      ? `${doc.path} (source ${doc.source_path})`
+      : (doc.path || '');
+    const sourceHtml = librarySourceBlock(doc);
+    if (kind === 'plantuml' && doc.svg) {
+      bodyEl.innerHTML = `<div class="library-diagram">${doc.svg}</div>`
+        + `<p class="library-diagram-meta"><code>${escapeHtml(metaPath)}</code> · rendered SVG</p>`
+        + sourceHtml;
+    } else if (kind === 'diagram' || kind === 'plantuml') {
+      // Stored SVG/PNG (preferred) or SVG text content from getLibraryEntry.
+      const ext = String(doc.ext || doc.path || '').toLowerCase();
+      if (ext.endsWith('.svg') && doc.content && /<svg/i.test(doc.content)) {
+        bodyEl.innerHTML = `<div class="library-diagram">${doc.content}</div>`
+          + `<p class="library-diagram-meta"><code>${escapeHtml(metaPath)}</code></p>`
+          + sourceHtml;
+      } else {
+        const rawUrl = `/api/library/file?id=${encodeURIComponent(id)}&raw=1`;
+        bodyEl.innerHTML = `<div class="library-diagram"><img class="library-diagram-img" src="${rawUrl}" alt="${escapeHtml(doc.title || doc.path || 'diagram')}"></div>`
+          + `<p class="library-diagram-meta"><code>${escapeHtml(metaPath)}</code></p>`
+          + sourceHtml;
+      }
+    } else {
+      bodyEl.innerHTML = renderMarkdown(doc.content || '');
+    }
     document.querySelectorAll('.library-list-item').forEach((el) => {
       el.classList.toggle('is-selected', el.dataset.id === id);
     });
     setLibraryDownloadEnabled(true);
+    const hasSource = !!(doc.source_path || kind === 'plantuml' || doc.source_content);
+    setLibrarySourceVisible(hasSource);
   } catch (err) {
     bodyEl.innerHTML = `<p class="company-file-empty">${escapeHtml(err.message || 'Failed to load')}</p>`;
   }
@@ -1129,6 +1195,24 @@ function downloadLibraryDoc() {
   a.remove();
 }
 
+function downloadLibrarySource() {
+  if (!librarySelectedId) return;
+  const entry = libraryEntriesCache.find((x) => x.id === librarySelectedId);
+  const kind = libraryEntryKind(entry || {});
+  // Diagram entries with companion .puml use source=1; bare .puml downloads the file itself.
+  const href = (entry && entry.source_path)
+    ? `/api/library/file?id=${encodeURIComponent(librarySelectedId)}&source=1&download=1`
+    : (kind === 'plantuml'
+      ? `/api/library/file?id=${encodeURIComponent(librarySelectedId)}&download=1`
+      : `/api/library/file?id=${encodeURIComponent(librarySelectedId)}&source=1&download=1`);
+  const a = document.createElement('a');
+  a.href = href;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 function bindLibraryPage() {
   const openBtn = document.getElementById('libraryBtn');
   if (openBtn && openBtn.dataset.bound !== '1') {
@@ -1149,6 +1233,11 @@ function bindLibraryPage() {
   if (dlBtn && dlBtn.dataset.bound !== '1') {
     dlBtn.dataset.bound = '1';
     dlBtn.addEventListener('click', () => downloadLibraryDoc());
+  }
+  const srcBtn = document.getElementById('librarySourceBtn');
+  if (srcBtn && srcBtn.dataset.bound !== '1') {
+    srcBtn.dataset.bound = '1';
+    srcBtn.addEventListener('click', () => downloadLibrarySource());
   }
   const filter = document.getElementById('libraryFilter');
   if (filter && filter.dataset.bound !== '1') {
@@ -1379,6 +1468,14 @@ function bindCompanyModal() {
   }
 }
 
+document.getElementById('login').addEventListener('click', () => {
+  if (needsSetup) setup();
+  else login();
+});
+document.getElementById('logout').addEventListener('click', async () => {
+  await api('/api/logout', { method: 'POST', body: '{}' }).catch(() => {});
+  setAuthenticated(false, 'Signed out');
+});
 // --- PlantUML preview (render .puml source to SVG inline) ---
 function setPlantUmlStatus(msg, kind) {
   const status = document.getElementById('plantumlStatus');
@@ -1439,14 +1536,6 @@ function bindPlantUmlModal() {
   if (renderBtn) renderBtn.addEventListener('click', () => renderPlantUmlPreview());
 }
 
-document.getElementById('login').addEventListener('click', () => {
-  if (needsSetup) setup();
-  else login();
-});
-document.getElementById('logout').addEventListener('click', async () => {
-  await api('/api/logout', { method: 'POST', body: '{}' }).catch(() => {});
-  setAuthenticated(false, 'Signed out');
-});
 bindCompanyModal();
 bindPlantUmlModal();
 bindLibraryPage();

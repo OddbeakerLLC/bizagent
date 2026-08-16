@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "lib_smoke_plantuml",
+      "title": "Library PlantUML smoke diagram",
+      "path": "smoke-library-diagram.svg",
+      "source_path": "smoke-library-diagram.puml",
+      "kind": "diagram",
+      "type": "diagram",
+      "created_at": "2026-08-16T08:08:32.703Z",
+      "source": "system",
+      "tags": [
+        "diagram",
+        "smoke",
+        "plantuml"
+      ]
+    },
+    {
+      "id": "lib_readme",
+      "title": "Library README",
+      "path": "README.md",
+      "created_at": "2026-08-16T08:08:32.703Z",
+      "source": "system",
+      "tags": [
+        "meta"
+      ]
+    }
+  ]
+}
