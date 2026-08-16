@@ -82,19 +82,22 @@ Three steps — one command does the work.
 **Step 1 (optional).** Create a dedicated OS user (strongly recommended):
 
 ```sh
-# Pre-install system dependencies (requires sudo/root)
-sudo apt-get install -y git nodejs cron   # Debian/Ubuntu
-# sudo dnf install -y git nodejs cron     # Fedora/RHEL
-# brew install git node                   # macOS
+# Pre-install system dependencies (requires sudo/root) — optional but fastest
+sudo apt-get install -y git python3 curl nodejs npm cron openjdk-17-jre-headless graphviz plantuml   # Debian/Ubuntu
+# sudo dnf install -y git python3 curl nodejs npm cronie java-17-openjdk-headless graphviz plantuml # Fedora/RHEL
+# brew install git python3 curl node openjdk@17 graphviz plantuml                                   # macOS
 
 # Create the user and run the installer as that user
 sudo adduser bizagent
 sudo -u bizagent bash -c 'curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash'
 ```
 
-The installer uses `sudo` to install missing packages, so pre-installing
-them (or granting `bizagent` passwordless `sudo` for your package manager)
-is required.
+The installer installs any missing packages via your package manager (`sudo`
+on Linux, Homebrew on macOS). When `sudo` is unavailable it falls back to a
+**user-local** stack under `~/.bizagent/tools/` for Java, Graphviz (`dot`), and
+PlantUML so the web UI diagram preview still works. Pre-installing the packages
+above (or granting passwordless `sudo` for the package manager) is still the
+smoothest path.
 
 > **Headless server (VPS, SSH-only)?** Prefer non-interactive key handoff:
 > `BIZAGENT_API_KEY=... curl -fsSL ... | bash` (writes `.bizagent/env` for the
@@ -109,12 +112,26 @@ is required.
 curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash
 ```
 
-This installs `git`, `python3`, Node.js, and `cron` if missing; installs the
-**bizagent-agent** runtime; sets a default LLM provider (override with
-`BIZAGENT_PROVIDER=chatgpt|claude|gemini|…`); **prompts for that provider’s API
-key** into `.bizagent/env` (mode 600, never committed); runs
-`scripts/check-hub-ready.sh`; starts the control plane; queues first-run setup
-mail when ready; and prints your URL.
+This installs **all runtime dependencies first** if missing — `git`, `python3`,
+`curl`, Node.js/`npm`, `cron`, **Java (JRE 17+)**, **Graphviz (`dot`)**, and
+**PlantUML** (jar + wrapper; needed for the web UI diagram preview) — then
+installs the **bizagent-agent** runtime; sets a default LLM provider (override
+with `BIZAGENT_PROVIDER=chatgpt|claude|gemini|…`); **prompts for that
+provider’s API key** into `.bizagent/env` (mode 600, never committed); writes
+tool path hints (`PLANTUML_SH`, `GRAPHVIZ_DOT`, `JAVA_HOME`) into the same env
+file when user-local tools were used; runs `scripts/check-hub-ready.sh`; starts
+the control plane; queues first-run setup mail when ready; and prints your URL.
+
+| Dependency | Why | Package names (apt / dnf / brew) | User-local fallback |
+|---|---|---|---|
+| git | clone hub + product repos | `git` | — (required via pkg) |
+| python3 | installer seeding + small scripts | `python3` | — (required via pkg) |
+| curl | downloads + API-key hello check | `curl` | — (required via pkg) |
+| Node.js + npm | control plane + agent-runtime | `nodejs npm` / `node` | — (required via pkg) |
+| cron | nightly / scheduled hub jobs | `cron` / `cronie` (macOS ships cron) | — |
+| Java 17+ | PlantUML renderer | `openjdk-17-jre-headless` / `java-17-openjdk-headless` / `openjdk@17` | Temurin JDK → `~/.bizagent/tools/jdk` |
+| Graphviz (`dot`) | PlantUML non-sequence diagrams | `graphviz` | deb-extract or wrapper → `~/.bizagent/tools/` |
+| PlantUML | web UI `.puml` → SVG preview | `plantuml` | jar + `plantuml.sh` → `~/.bizagent/tools/` |
 
 **Step 3.** Open the URL shown in your terminal (or `http://localhost:8787`
 if it doesn't appear). Create a login, then chat with PTL to finish onboarding

@@ -1,7 +1,8 @@
 /**
  * PlantUML preview: render .puml source to SVG (or PNG) for inline display in
- * the web UI. Uses the user-local PlantUML wrapper (plantuml.sh) installed by
- * the shell-tools agent — no sudo, Java lives under /home/bizagent/tools/.
+ * the web UI. Uses a PlantUML wrapper (plantuml.sh) or `plantuml` on PATH.
+ * Installer places a user-local stack under ~/.bizagent/tools/ when packages
+ * are unavailable; PLANTUML_SH / GRAPHVIZ_DOT may be set in .bizagent/env.
  *
  * Best-effort: if PlantUML is not installed, renderPlantUml throws a clear
  * error the UI can surface instead of silently failing.
@@ -11,9 +12,14 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
+const HOME = os.homedir();
+
 const CANDIDATE_BINS = [
   process.env.PLANTUML_SH,
-  '/home/bizagent/tools/plantuml.sh',
+  path.join(HOME, '.bizagent', 'tools', 'plantuml.sh'),
+  path.join(HOME, '.bizagent', 'tools', 'bin', 'plantuml'),
+  path.join(HOME, 'tools', 'plantuml.sh'),
+  path.join(HOME, '.local', 'bin', 'plantuml'),
   '/usr/local/bin/plantuml',
   '/usr/bin/plantuml',
 ].filter(Boolean);
@@ -42,8 +48,8 @@ function renderPlantUml(source, format = 'svg') {
   const bin = findPlantUml();
   if (!bin) {
     throw new Error(
-      'PlantUML is not installed on this hub (plantuml.sh not found). ' +
-      'Ask the shell-tools agent to install it, or set PLANTUML_SH.',
+      'PlantUML is not installed on this hub (plantuml.sh / plantuml not found). ' +
+      'Re-run install.sh (it installs Java + PlantUML + Graphviz) or set PLANTUML_SH.',
     );
   }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-puml-'));
@@ -51,7 +57,19 @@ function renderPlantUml(source, format = 'svg') {
   fs.writeFileSync(puml, String(source || ''), 'utf8');
   try {
     // plantuml.sh <file> [svg|png|both] writes diagram.<fmt> next to the .puml.
-    execFileSync('bash', [bin, puml, format], { stdio: 'pipe' });
+    // System `plantuml` packages accept -t<svg|png> flags instead.
+    const base = path.basename(bin);
+    if (base === 'plantuml.sh' || bin.endsWith('/plantuml.sh')) {
+      execFileSync('bash', [bin, puml, format], {
+        stdio: 'pipe',
+        env: process.env,
+      });
+    } else {
+      execFileSync(bin, [`-t${format}`, puml], {
+        stdio: 'pipe',
+        env: process.env,
+      });
+    }
     const out = path.join(dir, `diagram.${format}`);
     if (!fs.existsSync(out)) {
       throw new Error('PlantUML produced no output for the given source.');

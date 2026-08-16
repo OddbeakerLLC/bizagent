@@ -4,8 +4,8 @@
 # One-liner:
 #   curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash
 #
-# Installs git, python3, cron, and Claude Code; clones bizagent;
-# starts the BizAgent control plane and opens the web UI.
+# Installs runtime deps (git, python3, curl, Node.js, cron, Java, Graphviz,
+# PlantUML), clones bizagent, starts the control plane, and opens the web UI.
 #
 # Env vars (optional):
 #   BIZAGENT_DIR=/path/to/clone    Override the default install dir (./bizagent)
@@ -171,6 +171,513 @@ ensure_node() {
     die "Node.js was installed but 'node' still is not on PATH. Open a new terminal and re-run this installer."
   fi
   ok "node installed"
+}
+
+ensure_curl() {
+  if have curl; then
+    ok "curl present"
+    return
+  fi
+  note "installing curl..."
+  case "$PKG" in
+    brew)   brew install curl ;;
+    apt)    $INSTALL curl ;;
+    dnf)    $INSTALL curl ;;
+    pacman) $INSTALL curl ;;
+    zypper) $INSTALL curl ;;
+  esac
+  if ! have curl; then
+    die "curl is required (downloads + API key check) but is not on PATH after install."
+  fi
+  ok "curl installed"
+}
+
+# User-local tool root for JDK / PlantUML / Graphviz when package install is unavailable.
+# Override with BIZAGENT_TOOLS_DIR. PATH snippets are written into .bizagent/env later.
+TOOLS_DIR="${BIZAGENT_TOOLS_DIR:-$HOME/.bizagent/tools}"
+TOOLS_BIN="$TOOLS_DIR/bin"
+
+# Track env exports the control plane should inherit (PATH, JAVA_HOME, GRAPHVIZ_DOT, PLANTUML_SH).
+TOOLS_ENV_LINES=()
+
+tools_env_add() {
+  local line="$1"
+  local i
+  for i in "${TOOLS_ENV_LINES[@]+"${TOOLS_ENV_LINES[@]}"}"; do
+    [[ "$i" == "$line" ]] && return
+  done
+  TOOLS_ENV_LINES+=("$line")
+}
+
+tools_path_prepend() {
+  local dir="$1"
+  [[ -d "$dir" ]] || return
+  case ":$PATH:" in
+    *":$dir:"*) ;;
+    *) export PATH="$dir:$PATH" ;;
+  esac
+  tools_env_add "export PATH=\"$dir:\$PATH\""
+}
+
+can_install_pkgs() {
+  # brew never needs sudo; Linux INSTALL uses sudo — accept passwordless or interactive tty.
+  if [[ "$PKG" == "brew" ]]; then
+    return 0
+  fi
+  if sudo -n true >/dev/null 2>&1; then
+    return 0
+  fi
+  # Allow a sudo password prompt only when a real tty is available (interactive install).
+  if [[ -r /dev/tty ]] && [[ -z "${BIZAGENT_NONINTERACTIVE:-}" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+pkg_install() {
+  # Run package install; return non-zero on failure without dying.
+  local pkgs="$*"
+  [[ -n "$pkgs" ]] || return 1
+  if ! can_install_pkgs; then
+    return 1
+  fi
+  # shellcheck disable=SC2086
+  eval "$INSTALL $pkgs"
+}
+
+detect_os_arch() {
+  local os arch
+  case "$(uname -s)" in
+    Darwin) os="mac" ;;
+    Linux)  os="linux" ;;
+    *)      os="linux" ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch="x64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    armv7l) arch="arm" ;;
+    *) arch="x64" ;;
+  esac
+  printf '%s %s\n' "$os" "$arch"
+}
+
+# --- Java (PlantUML) ---
+ensure_java() {
+  if have java; then
+    ok "java present ($(java -version 2>&1 | head -1))"
+    return
+  fi
+  # Homebrew often leaves openjdk keg-only — check common prefixes.
+  if [[ "$PKG" == "brew" ]]; then
+    local brew_java
+    for brew_java in \
+      "$(brew --prefix openjdk@17 2>/dev/null)/bin" \
+      "$(brew --prefix openjdk 2>/dev/null)/bin" \
+      "/opt/homebrew/opt/openjdk@17/bin" \
+      "/usr/local/opt/openjdk@17/bin"
+    do
+      if [[ -x "$brew_java/java" ]]; then
+        tools_path_prepend "$brew_java"
+        tools_env_add "export JAVA_HOME=\"$(dirname "$brew_java")\""
+        ok "java present (Homebrew keg)"
+        return
+      fi
+    done
+  fi
+
+  note "java not found — installing a JRE/JDK for PlantUML..."
+  local installed=0
+  case "$PKG" in
+    brew)
+      if pkg_install openjdk@17 || pkg_install openjdk; then installed=1; fi
+      ;;
+    apt)
+      if pkg_install openjdk-17-jre-headless || pkg_install default-jre-headless; then installed=1; fi
+      ;;
+    dnf)
+      if pkg_install java-17-openjdk-headless || pkg_install java-11-openjdk-headless; then installed=1; fi
+      ;;
+    pacman)
+      if pkg_install jre17-openjdk-headless || pkg_install jre-openjdk-headless; then installed=1; fi
+      ;;
+    zypper)
+      if pkg_install java-17-openjdk-headless || pkg_install java-11-openjdk-headless; then installed=1; fi
+      ;;
+  esac
+
+  # Refresh brew keg path after install.
+  if [[ "$PKG" == "brew" ]]; then
+    local brew_java
+    for brew_java in \
+      "$(brew --prefix openjdk@17 2>/dev/null)/bin" \
+      "$(brew --prefix openjdk 2>/dev/null)/bin"
+    do
+      if [[ -x "${brew_java}/java" ]]; then
+        tools_path_prepend "$brew_java"
+        tools_env_add "export JAVA_HOME=\"$(dirname "$brew_java")\""
+        have java && { ok "java installed (Homebrew)"; return; }
+      fi
+    done
+  fi
+
+  if have java; then
+    ok "java installed"
+    return
+  fi
+
+  # User-local Temurin JDK 17 (no sudo).
+  install_java_userlocal
+}
+
+install_java_userlocal() {
+  have curl || die "curl required to download a user-local JDK"
+  local os arch
+  read -r os arch <<<"$(detect_os_arch)"
+  local dest="$TOOLS_DIR/jdk"
+  mkdir -p "$TOOLS_DIR"
+  if [[ -x "$dest/bin/java" ]]; then
+    tools_path_prepend "$dest/bin"
+    tools_env_add "export JAVA_HOME=\"$dest\""
+    ok "java present (user-local $dest)"
+    return
+  fi
+  note "downloading Temurin JDK 17 to $dest (user-local, no sudo)..."
+  local url tmp tarball top
+  url="https://api.adoptium.net/v3/binary/latest/17/ga/${os}/${arch}/jdk/hotspot/normal/eclipse?project=jdk"
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  if ! curl -fsSL "$url" -o "$tmp/jdk.tgz"; then
+    die "Failed to download Temurin JDK 17. Install a JRE manually (openjdk 17+) and re-run."
+  fi
+  tar -xzf "$tmp/jdk.tgz" -C "$tmp"
+  top="$(find "$tmp" -maxdepth 1 -type d -name 'jdk-*' | head -1)"
+  [[ -n "$top" && -x "$top/bin/java" ]] || die "JDK archive did not contain bin/java"
+  rm -rf "$dest"
+  mv "$top" "$dest"
+  tools_path_prepend "$dest/bin"
+  tools_env_add "export JAVA_HOME=\"$dest\""
+  if ! have java; then
+    die "User-local JDK installed at $dest but java is not on PATH"
+  fi
+  ok "java installed user-local ($dest)"
+}
+
+# --- Graphviz / dot (PlantUML non-sequence diagrams) ---
+ensure_graphviz() {
+  if have dot; then
+    ok "dot present ($(dot -V 2>&1 | head -1))"
+    return
+  fi
+  note "graphviz (dot) not found — installing for PlantUML diagrams..."
+  case "$PKG" in
+    brew)   pkg_install graphviz || true ;;
+    apt)    pkg_install graphviz || true ;;
+    dnf)    pkg_install graphviz || true ;;
+    pacman) pkg_install graphviz || true ;;
+    zypper) pkg_install graphviz || true ;;
+  esac
+  hash -r 2>/dev/null || true
+  if have dot; then
+    ok "dot installed"
+    return
+  fi
+  install_graphviz_userlocal
+}
+
+install_graphviz_userlocal() {
+  local dest="$TOOLS_DIR/graphviz"
+  local bin_dir="$dest/usr/bin"
+  if [[ -x "$bin_dir/dot" ]]; then
+    expose_userlocal_graphviz "$dest"
+    if have dot && dot -V >/dev/null 2>&1; then
+      ok "dot present (user-local $bin_dir/dot)"
+      return
+    fi
+  fi
+
+  # Debian/Ubuntu: download .debs + recursive Depends and extract (no sudo).
+  # Package SONAMEs change across releases (libgvc6 vs libgvc7, etc.).
+  if have apt-get && have apt-cache && have dpkg-deb; then
+    note "extracting graphviz packages user-local into $dest..."
+    local debdir="$TOOLS_DIR/debs-graphviz"
+    mkdir -p "$debdir" "$dest"
+    # Resolve package names dynamically from apt metadata.
+    local -a pkgs=()
+    local line dep
+    pkgs+=(graphviz)
+    while IFS= read -r line; do
+      # apt-cache depends lines look like: "  Depends: libgvc7"
+      dep="$(printf '%s\n' "$line" | sed -n 's/^[[:space:]]*Depends:[[:space:]]*//p')"
+      [[ -n "$dep" ]] || continue
+      # Skip alternatives / debconf virtuals / libc
+      case "$dep" in
+        *\|*|libc6|libc6_*|libstdc++*|libgcc*|base-files|fonts-* ) continue ;;
+      esac
+      # Strip version operators: "libfoo (>= 1)" → libfoo
+      dep="${dep%% *}"
+      dep="${dep%%:*}"; # drop :any
+      pkgs+=("$dep")
+    done < <(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts \
+      --no-breaks --no-replaces --no-enhances graphviz 2>/dev/null | head -200)
+
+    # Also pull common Graphviz plugin packages when present in the index.
+    local plug
+    for plug in libgvplugin-core8 libgvplugin-dot-layout8 libgvplugin-gd8 \
+                libgvplugin-pango8 libgvplugin-neato-layout8; do
+      if apt-cache show "$plug" >/dev/null 2>&1; then
+        pkgs+=("$plug")
+      fi
+    done
+
+    # Unique package list
+    local -a uniq=()
+    local p seen
+    for p in "${pkgs[@]}"; do
+      seen=0
+      for u in "${uniq[@]+"${uniq[@]}"}"; do
+        [[ "$u" == "$p" ]] && { seen=1; break; }
+      done
+      [[ $seen -eq 0 ]] && uniq+=("$p")
+    done
+
+    if (cd "$debdir" && apt-get download "${uniq[@]}" >/dev/null 2>&1); then
+      local deb
+      for deb in "$debdir"/*.deb; do
+        [[ -f "$deb" ]] || continue
+        dpkg-deb -x "$deb" "$dest" 2>/dev/null || true
+      done
+      if [[ -x "$bin_dir/dot" ]]; then
+        expose_userlocal_graphviz "$dest"
+        if have dot && dot -V >/dev/null 2>&1; then
+          ok "dot installed user-local ($bin_dir/dot)"
+          return
+        fi
+        # If wrapper failed, surface ldd clues in a soft warn then fall through to die.
+        warn "user-local dot extracted but failed to run (missing libs?)"
+      fi
+    else
+      warn "apt-get download of graphviz deps failed (offline or no universe mirror?)"
+    fi
+  fi
+
+  die "Graphviz 'dot' is required for PlantUML (non-sequence diagrams) but could not be installed.
+Install it with your package manager and re-run, e.g.:
+  sudo apt-get install -y graphviz
+  sudo dnf install -y graphviz
+  brew install graphviz"
+}
+
+expose_userlocal_graphviz() {
+  local dest="$1"
+  local bin_dir="$dest/usr/bin"
+  local lib_dir=""
+  # Prefer multiarch lib dir when present.
+  if [[ -d "$dest/usr/lib/x86_64-linux-gnu" ]]; then
+    lib_dir="$dest/usr/lib/x86_64-linux-gnu"
+  elif [[ -d "$dest/usr/lib/aarch64-linux-gnu" ]]; then
+    lib_dir="$dest/usr/lib/aarch64-linux-gnu"
+  elif [[ -d "$dest/usr/lib" ]]; then
+    lib_dir="$dest/usr/lib"
+  fi
+  mkdir -p "$TOOLS_BIN"
+
+  # Register Graphviz plugins into configN (required after unpacking .debs without dpkg).
+  if [[ -n "$lib_dir" && -d "$lib_dir/graphviz" && -x "$bin_dir/dot" ]]; then
+    LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+      GVBINDIR="$lib_dir/graphviz" \
+      "$bin_dir/dot" -c >/dev/null 2>&1 || true
+  fi
+
+  # Wrapper so consumers only need TOOLS_BIN on PATH (sets LD_LIBRARY_PATH).
+  cat > "$TOOLS_BIN/dot" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+LIB="$lib_dir"
+BIN="$bin_dir"
+if [[ -n "\$LIB" ]]; then
+  export LD_LIBRARY_PATH="\$LIB\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+  # Graphviz plugins live under lib/graphviz
+  export GVBINDIR="\$LIB/graphviz"
+fi
+exec "\$BIN/dot" "\$@"
+EOF
+  chmod +x "$TOOLS_BIN/dot"
+  # Also expose sibling layout engines commonly invoked as `dot` alternatives.
+  local eng
+  for eng in neato fdp sfdp twopi circo; do
+    if [[ -x "$bin_dir/$eng" && ! -e "$TOOLS_BIN/$eng" ]]; then
+      cat > "$TOOLS_BIN/$eng" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+LIB="$lib_dir"
+BIN="$bin_dir"
+if [[ -n "\$LIB" ]]; then
+  export LD_LIBRARY_PATH="\$LIB\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+  export GVBINDIR="\$LIB/graphviz"
+fi
+exec "\$BIN/$eng" "\$@"
+EOF
+      chmod +x "$TOOLS_BIN/$eng"
+    fi
+  done
+  tools_path_prepend "$TOOLS_BIN"
+  tools_env_add "export GRAPHVIZ_DOT=\"$TOOLS_BIN/dot\""
+  if [[ -n "$lib_dir" ]]; then
+    tools_env_add "export LD_LIBRARY_PATH=\"$lib_dir\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\""
+    tools_env_add "export GVBINDIR=\"$lib_dir/graphviz\""
+  fi
+}
+
+# --- PlantUML (jar + wrapper) ---
+find_plantuml_bin() {
+  local c
+  for c in \
+    "${PLANTUML_SH:-}" \
+    "$TOOLS_DIR/plantuml.sh" \
+    "$HOME/tools/plantuml.sh" \
+    "$HOME/.local/bin/plantuml" \
+    "/usr/local/bin/plantuml" \
+    "/usr/bin/plantuml"
+  do
+    [[ -n "$c" && -f "$c" && -x "$c" ]] && { printf '%s\n' "$c"; return 0; }
+  done
+  if have plantuml; then
+    command -v plantuml
+    return 0
+  fi
+  return 1
+}
+
+ensure_plantuml() {
+  local existing
+  if existing="$(find_plantuml_bin 2>/dev/null)"; then
+    ok "plantuml present ($existing)"
+    tools_env_add "export PLANTUML_SH=\"$existing\""
+    return
+  fi
+
+  note "PlantUML not found — installing..."
+  # Distro package when available (often pulls Java; Graphviz may be recommended only).
+  case "$PKG" in
+    brew)   pkg_install plantuml || true ;;
+    apt)    pkg_install plantuml || true ;;
+    dnf)    pkg_install plantuml || true ;;
+    pacman) pkg_install plantuml || true ;;
+    zypper) pkg_install plantuml || true ;;
+  esac
+  hash -r 2>/dev/null || true
+  if existing="$(find_plantuml_bin 2>/dev/null)"; then
+    ok "plantuml installed ($existing)"
+    tools_env_add "export PLANTUML_SH=\"$existing\""
+    return
+  fi
+
+  install_plantuml_userlocal
+}
+
+install_plantuml_userlocal() {
+  have curl || die "curl required to download PlantUML"
+  have java || die "java required before PlantUML jar install"
+  mkdir -p "$TOOLS_DIR" "$TOOLS_BIN" "$HOME/.local/bin"
+  local jar="$TOOLS_DIR/plantuml.jar"
+  local wrap="$TOOLS_DIR/plantuml.sh"
+  local ver="1.2024.7"
+  local url="https://github.com/plantuml/plantuml/releases/download/v${ver}/plantuml-${ver}.jar"
+
+  if [[ ! -f "$jar" ]]; then
+    note "downloading PlantUML ${ver} jar to $jar..."
+    if ! curl -fsSL "$url" -o "$jar"; then
+      # Fallback: latest redirect from plantuml.com
+      if ! curl -fsSL "https://github.com/plantuml/plantuml/releases/latest/download/plantuml.jar" -o "$jar"; then
+        die "Failed to download plantuml.jar. Install the plantuml package or place plantuml.jar at $jar."
+      fi
+    fi
+  fi
+
+  # Portable wrapper: prefers java on PATH / JAVA_HOME, jar next to the script.
+  cat > "$wrap" <<'EOF'
+#!/usr/bin/env bash
+# PlantUML render wrapper (user-local install).
+# Usage:
+#   plantuml.sh <file.puml> [format]     # format: svg (default) | png | both
+#   plantuml.sh -tsvg <file.puml>        # passthrough to java -jar
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JAR="${PLANTUML_JAR:-$ROOT/plantuml.jar}"
+
+resolve_java() {
+  if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]]; then
+    printf '%s\n' "$JAVA_HOME/bin/java"
+    return
+  fi
+  if command -v java >/dev/null 2>&1; then
+    command -v java
+    return
+  fi
+  local c
+  for c in "$ROOT/jdk/bin/java" "$HOME/.bizagent/tools/jdk/bin/java"; do
+    if [[ -x "$c" ]]; then
+      printf '%s\n' "$c"
+      return
+    fi
+  done
+  echo "java not found (install a JRE 17+ or set JAVA_HOME)" >&2
+  exit 1
+}
+
+JAVA="$(resolve_java)"
+[[ -f "$JAR" ]] || { echo "PlantUML jar not found at $JAR" >&2; exit 1; }
+
+# Prefer installer-provided Graphviz wrapper / GRAPHVIZ_DOT.
+if [[ -n "${GRAPHVIZ_DOT:-}" && -x "$GRAPHVIZ_DOT" ]]; then
+  export GRAPHVIZ_DOT
+elif [[ -x "$HOME/.bizagent/tools/bin/dot" ]]; then
+  export GRAPHVIZ_DOT="$HOME/.bizagent/tools/bin/dot"
+  export PATH="$HOME/.bizagent/tools/bin:$PATH"
+fi
+
+DOT_ARGS=()
+if [[ -n "${GRAPHVIZ_DOT:-}" && -x "$GRAPHVIZ_DOT" ]]; then
+  DOT_ARGS=(-graphvizdot "$GRAPHVIZ_DOT")
+fi
+
+if [[ $# -eq 0 ]]; then
+  echo "Usage: plantuml.sh <file.puml> [svg|png|both]" >&2
+  exit 1
+fi
+
+if [[ "$1" == -* ]]; then
+  exec "$JAVA" -jar "$JAR" ${DOT_ARGS[@]+"${DOT_ARGS[@]}"} "$@"
+fi
+
+PUML="$1"
+FMT="${2:-svg}"
+case "$FMT" in
+  svg)  "$JAVA" -jar "$JAR" ${DOT_ARGS[@]+"${DOT_ARGS[@]}"} -tsvg "$PUML" ;;
+  png)  "$JAVA" -jar "$JAR" ${DOT_ARGS[@]+"${DOT_ARGS[@]}"} -tpng "$PUML" ;;
+  both)
+    "$JAVA" -jar "$JAR" ${DOT_ARGS[@]+"${DOT_ARGS[@]}"} -tsvg "$PUML"
+    "$JAVA" -jar "$JAR" ${DOT_ARGS[@]+"${DOT_ARGS[@]}"} -tpng "$PUML"
+    ;;
+  *)    echo "Unknown format: $FMT (use svg|png|both)" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "$wrap"
+
+  # PATH convenience: plantuml → wrapper
+  ln -sfn "$wrap" "$TOOLS_BIN/plantuml"
+  ln -sfn "$wrap" "$HOME/.local/bin/plantuml" 2>/dev/null || true
+  tools_path_prepend "$TOOLS_BIN"
+  tools_path_prepend "$HOME/.local/bin"
+  tools_env_add "export PLANTUML_SH=\"$wrap\""
+  tools_env_add "export PLANTUML_JAR=\"$jar\""
+
+  if ! find_plantuml_bin >/dev/null; then
+    die "PlantUML wrapper written to $wrap but not discoverable"
+  fi
+  ok "plantuml installed user-local ($wrap)"
 }
 
 validate_source() {
@@ -592,6 +1099,7 @@ write_env_file() {
     if [[ ! -f "$env_file" ]] && [[ -f "$INSTALL_DIR/.bizagent/env.example" ]]; then
       note "No API key saved. See .bizagent/env.example for the format."
     fi
+    write_tools_env_lines
     return
   fi
 
@@ -612,6 +1120,41 @@ EOF
   fi
   chmod 600 "$env_file"
   ok "API key written to .bizagent/env ($SELECTED_API_KEY_VAR)"
+  write_tools_env_lines
+}
+
+# Append tool PATH / PlantUML / Graphviz exports so control-plane.sh inherits them.
+write_tools_env_lines() {
+  local env_file="$INSTALL_DIR/.bizagent/env"
+  mkdir -p "$INSTALL_DIR/.bizagent"
+  if [[ ${#TOOLS_ENV_LINES[@]} -eq 0 ]]; then
+    # Still record discovery hints when tools were already on PATH from packages.
+    local puml
+    if puml="$(find_plantuml_bin 2>/dev/null)"; then
+      TOOLS_ENV_LINES+=("export PLANTUML_SH="$puml"")
+    fi
+    if have dot; then
+      TOOLS_ENV_LINES+=("export GRAPHVIZ_DOT="$(command -v dot)"")
+    fi
+  fi
+  [[ ${#TOOLS_ENV_LINES[@]} -eq 0 ]] && return 0
+  touch "$env_file"
+  chmod 600 "$env_file" 2>/dev/null || true
+  local line key
+  for line in "${TOOLS_ENV_LINES[@]}"; do
+    # Idempotent: drop prior export of same VAR then append.
+    key="${line%%=*}"
+    key="${key#export }"
+    if grep -qE "^export ${key}=" "$env_file" 2>/dev/null; then
+      local tmp
+      tmp="$(mktemp)"
+      grep -v -E "^export ${key}=" "$env_file" > "$tmp" || true
+      mv "$tmp" "$env_file"
+    fi
+    printf '%s
+' "$line" >> "$env_file"
+  done
+  ok "tool paths written to .bizagent/env (PlantUML/Graphviz/Java)"
 }
 
 # --- clone + handoff ---
@@ -746,8 +1289,13 @@ main() {
   step "Installing dependencies"
   ensure git
   ensure python3
+  ensure_curl
   ensure_node
   ensure_cron
+  # PlantUML UI preview stack (must be present before software setup / handoff)
+  ensure_java
+  ensure_graphviz
+  ensure_plantuml
 
   step "Default LLM provider"
   select_default_provider
