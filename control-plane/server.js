@@ -826,6 +826,43 @@ async function handleApi(config, req, res) {
     return send(res, 200, { ok: true });
   }
 
+
+  // --- Hard-stop a specific agent turn (click running status light) ---
+  const agentStopMatch = url.pathname.match(/^\/api\/agent\/([^/]+)\/stop$/);
+  if (agentStopMatch && req.method === "POST") {
+    const slug = decodeURIComponent(agentStopMatch[1] || "").trim();
+    if (!slug) return send(res, 400, { error: "missing agent slug" });
+    let killed = false;
+    try {
+      killed = !!stopAgentTurn(config.hub, slug);
+    } catch (_err) {
+      killed = false;
+    }
+    // Best-effort: clear thinking entry if this slug owns the active stream.
+    try {
+      const active = readJson(activeConversationFile(config.hub), null);
+      const convId = active && active.id;
+      if (convId) {
+        const thinking = getThinking(config.hub, convId);
+        if (thinking && thinking.slug === slug) {
+          clearThinking(config.hub, convId);
+          try {
+            appendMessage(
+              config.hub,
+              convId,
+              "status",
+              `Stopped by operator (agent light: ${slug}).`,
+              { kind: STATUS_ERROR_KIND },
+            );
+          } catch (_err) { /* ignore */ }
+          try { pushConv(config, convId); } catch (_err) { /* ignore */ }
+        }
+      }
+    } catch (_err) { /* ignore */ }
+    didChangeState();
+    return send(res, 200, { ok: true, killed, slug });
+  }
+
   if (url.pathname === "/api/observability" && req.method === "GET") {
     const hub = config.hub;
     const structuredLogPath = path.join(hub, "logs", "structured.log");

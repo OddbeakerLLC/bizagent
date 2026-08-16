@@ -252,18 +252,41 @@ install_cli() {
 # Default LLM provider for new hubs (bizagent-agent is always the runtime).
 # Override with BIZAGENT_PROVIDER=openai|venice|openrouter|grok
 select_default_provider() {
-  SELECTED_PROVIDER="${BIZAGENT_PROVIDER:-grok}"
-  case "$SELECTED_PROVIDER" in
-    grok|chatgpt|claude|gemini|venice|ollama) ;;
-    xai) SELECTED_PROVIDER="grok" ;;
-    openai|codex) SELECTED_PROVIDER="chatgpt" ;;
-    openrouter) SELECTED_PROVIDER="claude" ;;
-    agy) SELECTED_PROVIDER="gemini" ;;
-    *)
-      warn "Unknown BIZAGENT_PROVIDER=$SELECTED_PROVIDER — using grok"
-      SELECTED_PROVIDER="grok"
-      ;;
-  esac
+  if [[ -n "${BIZAGENT_PROVIDER:-}" ]]; then
+    # Non-interactive: respect the env override.
+    SELECTED_PROVIDER="${BIZAGENT_PROVIDER}"
+    case "$SELECTED_PROVIDER" in
+      grok|chatgpt|claude|gemini|venice|ollama) ;;
+      xai) SELECTED_PROVIDER="grok" ;;
+      openai|codex) SELECTED_PROVIDER="chatgpt" ;;
+      openrouter) SELECTED_PROVIDER="claude" ;;
+      agy) SELECTED_PROVIDER="gemini" ;;
+      *)
+        warn "Unknown BIZAGENT_PROVIDER=$SELECTED_PROVIDER — using grok"
+        SELECTED_PROVIDER="grok"
+        ;;
+    esac
+  else
+    # Interactive: let the user pick a provider (default grok).
+    # Prefer /dev/tty so piping the installer still works when a real terminal exists.
+    printf "\nChoose an LLM provider for the hub:\n"
+    printf "  1) grok\n  2) chatgpt\n  3) claude\n  4) gemini\n  5) venice\n  6) ollama\n"
+    _provider_choice=""
+    if [[ -r /dev/tty ]]; then
+      read -r -p "  Select provider [1-6, default 1 (grok)]: " _provider_choice </dev/tty || true
+    else
+      # No TTY (fully non-interactive pipe without BIZAGENT_PROVIDER): default grok.
+      _provider_choice="1"
+    fi
+    case "${_provider_choice:-1}" in
+      2|chatgpt) SELECTED_PROVIDER="chatgpt" ;;
+      3|claude)  SELECTED_PROVIDER="claude" ;;
+      4|gemini)  SELECTED_PROVIDER="gemini" ;;
+      5|venice)  SELECTED_PROVIDER="venice" ;;
+      6|ollama)  SELECTED_PROVIDER="ollama" ;;
+      *)         SELECTED_PROVIDER="grok" ;;
+    esac
+  fi
   # Legacy vars still set for older install paths that reference SELECTED_CLI
   SELECTED_CLI="bizagent-agent"
   SELECTED_PROMPT_FLAG="-f"

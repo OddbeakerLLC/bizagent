@@ -30,14 +30,30 @@ PORT="$(registry_port)"
 
 # --- 1. LLM provider (runtime is always bizagent-agent) ---
 step "Default LLM"
-PROVIDER="${BIZAGENT_PROVIDER:-grok}"
-case "$PROVIDER" in
-  grok|chatgpt|claude|gemini|venice|ollama) ;;
-  xai) PROVIDER="grok" ;;
-  openai|codex) PROVIDER="chatgpt" ;;
-  agy) PROVIDER="gemini" ;;
-  *) note "Unknown BIZAGENT_PROVIDER=$PROVIDER — using grok"; PROVIDER="grok" ;;
-esac
+if [[ -n "${BIZAGENT_PROVIDER:-}" ]]; then
+  # Non-interactive: respect the env override.
+  PROVIDER="${BIZAGENT_PROVIDER}"
+  case "$PROVIDER" in
+    grok|chatgpt|claude|gemini|venice|ollama) ;;
+    xai) PROVIDER="grok" ;;
+    openai|codex) PROVIDER="chatgpt" ;;
+    agy) PROVIDER="gemini" ;;
+    *) note "Unknown BIZAGENT_PROVIDER=$PROVIDER — using grok"; PROVIDER="grok" ;;
+  esac
+else
+  # Interactive: let the user pick a provider (default grok).
+  printf "\nChoose an LLM provider for the hub:\n"
+  printf "  1) grok\n  2) chatgpt\n  3) claude\n  4) gemini\n  5) venice\n  6) ollama\n"
+  read -r -p "  Select provider [1-6, default 1 (grok)]: " _provider_choice </dev/tty
+  case "${_provider_choice:-1}" in
+    2|chatgpt) PROVIDER="chatgpt" ;;
+    3|claude)  PROVIDER="claude" ;;
+    4|gemini)  PROVIDER="gemini" ;;
+    5|venice)  PROVIDER="venice" ;;
+    6|ollama)  PROVIDER="ollama" ;;
+    *)         PROVIDER="grok" ;;
+  esac
+fi
 # Default model per provider (overridable via BIZAGENT_MODEL)
 default_model_for() {
   case "$1" in

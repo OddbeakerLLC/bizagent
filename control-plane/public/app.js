@@ -26,6 +26,7 @@ let lastAgentsList = [];
 /** Live thinking log: streams an in-flight turn's output in place of the launch-ack. */
 let thinkingSource = null;
 let thinkingConv = null;
+let thinkingAck = null; // identity (created_at) of the launch-ack currently streamed
 
 // UI polling gate for push test. Polling for /api/state and conversation history is OFF by default.
 // WS subscribe/push is the preferred and only driver when this flag is off (default).
@@ -391,8 +392,16 @@ function renderAgents(agents) {
     row.tabIndex = 0;
 
     const light = document.createElement('span');
-    light.className = `status-light ${agent.hasMail ? 'on' : ''}`;
-    light.title = agent.hasMail ? 'Inbox has mail' : 'Inbox empty';
+    light.className = `status-light ${agent.hasMail ? 'on' : ''} ${agent.active ? 'running' : ''}`;
+    light.title = agent.active ? 'Stop agent (running)' : (agent.hasMail ? 'Inbox has mail' : 'Inbox empty');
+    light.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (agent.active) {
+        stopAgent(agent.slug);
+      } else if (thinkingActive()) {
+        stopThinking();
+      }
+    });
 
     const labels = document.createElement('div');
     labels.className = 'agent-labels';
@@ -677,6 +686,7 @@ function renderMessages(messages) {
       const log = document.createElement('pre');
       log.className = 'thinking-log';
       log.setAttribute('data-thinking-log', '1');
+      log.setAttribute('data-thinking-ack', String(msg.created_at || ''));
       body.appendChild(label);
       body.appendChild(log);
     } else {
@@ -708,6 +718,7 @@ function closeThinkingStream() {
   try { if (thinkingSource) thinkingSource.close(); } catch (_) {}
   thinkingSource = null;
   thinkingConv = null;
+  thinkingAck = null;
 }
 
 function thinkingLogEl() {
@@ -719,11 +730,16 @@ function thinkingActive() {
 }
 
 function openThinkingStream(convId) {
-  if (!convId || thinkingConv === convId) return;
-  closeThinkingStream();
-  thinkingConv = convId;
+  if (!convId) return;
   const log = thinkingLogEl();
   if (!log) { closeThinkingStream(); return; }
+  // Reopen whenever the conversation OR the launch-ack (turn) changes, so the
+  // stream always starts at the new turn's log offset — never old thinking.
+  const ack = log.getAttribute('data-thinking-ack') || '';
+  if (thinkingConv === convId && thinkingAck === ack) return;
+  closeThinkingStream();
+  thinkingConv = convId;
+  thinkingAck = ack;
   thinkingSource = new EventSource(`/api/thinking/stream?conv=${encodeURIComponent(convId)}`);
   thinkingSource.onmessage = (ev) => {
     let msg;
@@ -767,6 +783,19 @@ async function stopThinking() {
     });
   } catch (_err) { /* best-effort */ }
   if (currentConversation) await loadConversation(currentConversation);
+}
+
+async function stopAgent(slug) {
+  try {
+    await api(`/api/agent/${encodeURIComponent(slug)}/stop`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    // Refresh agent state after a short delay
+    setTimeout(() => refreshStatus(), 500);
+  } catch (err) {
+    console.error('Failed to stop agent', err);
+  }
 }
 
 async function loadProfile() {
@@ -1643,7 +1672,7 @@ function loadEnterprisePanel() {
   document.head.appendChild(s);
 }
 
-// Escape = hard-stop the in-flight thinking (no button, no clickable light).
+// Escape = hard-stop the in-flight thinking (also: click running status light).
 // Modal Escape handlers take precedence when a modal is open.
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;

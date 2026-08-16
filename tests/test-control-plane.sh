@@ -324,6 +324,15 @@ grep -q "plantumlBtn" "$ROOT/control-plane/public/index.html" \
   || fail "UI missing PlantUML preview button"
 grep -q "plantumlOutput" "$ROOT/control-plane/public/app.js" \
   || fail "UI missing PlantUML preview output handling"
+# Click-to-stop: running agent status light → /api/agent/:slug/stop
+grep -q 'agentStopMatch' "$ROOT/control-plane/server.js" \
+  || fail "server missing /api/agent/:slug/stop route"
+grep -q 'stopAgentTurn' "$ROOT/control-plane/server.js" \
+  || fail "server stop route does not call stopAgentTurn"
+grep -q "async function stopAgent" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing stopAgent helper"
+grep -q "status-light.running" "$ROOT/control-plane/public/styles.css" \
+  || fail "UI missing running status-light style"
 # 4. Preview: built pages surface as clickable links opening in a new tab (no iframe).
 grep -q 'target="_blank"' "$ROOT/control-plane/public/app.js" \
   || fail "UI does not open preview links in a new tab"
