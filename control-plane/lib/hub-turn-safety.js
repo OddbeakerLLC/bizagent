@@ -494,40 +494,12 @@ function ensureHubUserReply(hub, turn) {
   routeOutboxes(hub);
   readUserInboxMessages(hub);
 
-  if (hubReplySince(hub, conversationId, turn.startedAt)) {
-    clearPendingHubTurn(hub, turn);
-    clearReservedReplyBody(hub, conversationId);
-    // Relay (here or prior EXIT hook) may have just written the hub message — push.
-    notifyConversationMutated(hub, conversationId);
-    return { action: 'ok-existing', conversationId, mutated: true };
-  }
-  // Idempotent: shell EXIT + Node exit + tick drain may all fire.
-  if (hubFailureSince(hub, conversationId, turn.startedAt)) {
-    clearPendingHubTurn(hub, turn);
-    clearReservedReplyBody(hub, conversationId);
-    notifyConversationMutated(hub, conversationId);
-    return { action: 'ok-failed-already', conversationId, mutated: true };
-  }
-  if (pendingUserOutboxFor(hub, conversationId)) {
-    routeOutboxes(hub);
-    readUserInboxMessages(hub);
-    if (hubReplySince(hub, conversationId, turn.startedAt)) {
-      clearPendingHubTurn(hub, turn);
-      clearReservedReplyBody(hub, conversationId);
-      notifyConversationMutated(hub, conversationId);
-      return { action: 'ok-existing', conversationId, mutated: true };
-    }
-  }
-
-  // Reserved body path: model wrote markdown body only; CP owns frontmatter + route.
+  // Reserved body is authoritative for THIS turn. Check it before hubReplySince:
+  // back-to-back hub turns can land within the messageSince 2s floor, and the
+  // prior turn's hub reply must not discard a fresh reserved body (that left
+  // launch-acks stuck and Thinking Preview frozen with no real reply).
   const reservedBody = readReservedReplyBody(hub, conversationId);
   if (reservedBody && reservedBody.length >= MIN_RESERVED_BODY_CHARS) {
-    if (hubReplySince(hub, conversationId, turn.startedAt)) {
-      clearPendingHubTurn(hub, turn);
-      clearReservedReplyBody(hub, conversationId);
-      notifyConversationMutated(hub, conversationId);
-      return { action: 'ok-existing', conversationId, mutated: true };
-    }
     const result = finalizeViaOutbox(
       hub,
       conversationId,
@@ -537,7 +509,38 @@ function ensureHubUserReply(hub, turn) {
     );
     clearPendingHubTurn(hub, turn);
     clearReservedReplyBody(hub, conversationId);
+    // finalizeViaOutbox → appendMessage(role hub) already strips launch-acks.
     return result;
+  }
+
+  if (hubReplySince(hub, conversationId, turn.startedAt)) {
+    clearPendingHubTurn(hub, turn);
+    clearReservedReplyBody(hub, conversationId);
+    // Always drop launch-acks on success — otherwise Thinking Preview stays open
+    // forever with no hub message to replace the ack.
+    supersedeLaunchAcks(hub, conversationId);
+    // Relay (here or prior EXIT hook) may have just written the hub message — push.
+    notifyConversationMutated(hub, conversationId);
+    return { action: 'ok-existing', conversationId, mutated: true };
+  }
+  // Idempotent: shell EXIT + Node exit + tick drain may all fire.
+  if (hubFailureSince(hub, conversationId, turn.startedAt)) {
+    clearPendingHubTurn(hub, turn);
+    clearReservedReplyBody(hub, conversationId);
+    supersedeLaunchAcks(hub, conversationId);
+    notifyConversationMutated(hub, conversationId);
+    return { action: 'ok-failed-already', conversationId, mutated: true };
+  }
+  if (pendingUserOutboxFor(hub, conversationId)) {
+    routeOutboxes(hub);
+    readUserInboxMessages(hub);
+    if (hubReplySince(hub, conversationId, turn.startedAt)) {
+      clearPendingHubTurn(hub, turn);
+      clearReservedReplyBody(hub, conversationId);
+      supersedeLaunchAcks(hub, conversationId);
+      notifyConversationMutated(hub, conversationId);
+      return { action: 'ok-existing', conversationId, mutated: true };
+    }
   }
 
   // ALWAYS-WARM: No blob promotion fallback. If reserved body is empty, that's a failure.
@@ -545,6 +548,7 @@ function ensureHubUserReply(hub, turn) {
     || hubFailureSince(hub, conversationId, turn.startedAt)) {
     clearPendingHubTurn(hub, turn);
     clearReservedReplyBody(hub, conversationId);
+    supersedeLaunchAcks(hub, conversationId);
     notifyConversationMutated(hub, conversationId);
     return { action: 'ok-existing', conversationId, mutated: true };
   }

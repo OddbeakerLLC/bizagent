@@ -746,6 +746,11 @@ function openThinkingStream(convId) {
     try { msg = JSON.parse(ev.data); } catch (_) { return; }
     if (msg && msg.done) {
       closeThinkingStream();
+      // Turn ended server-side — reload so a stripped launch-ack / real reply
+      // replaces the Thinking… block even if the push was missed.
+      if (currentConversation === convId) {
+        loadConversation(convId).catch(() => {});
+      }
       return;
     }
     if (msg && msg.text) {
