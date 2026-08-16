@@ -1,0 +1,13 @@
+@startuml
+title BizAgent Library smoke diagram
+skinparam backgroundColor #FEFEFE
+actor Operator
+rectangle "BizAgent Hub" {
+  component "Library UI" as UI
+  component "library/" as LIB
+  component "plantuml.sh" as PUML
+}
+Operator --> UI : open diagram entry
+UI --> LIB : load foo.svg
+LIB ..> PUML : agents render .puml → .svg
+@enduml

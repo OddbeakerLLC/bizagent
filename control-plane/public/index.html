@@ -70,13 +70,15 @@
         </div>
         <div class="auth-controls">
           <button id="libraryRefresh" type="button" class="btn-secondary">Refresh</button>
-          <button id="libraryDownloadBtn" type="button" class="btn-secondary" disabled title="Download selected document">Download</button>
+          <button id="librarySourceBtn" type="button" class="btn-secondary" hidden disabled title="Download PlantUML source (.puml)">Source</button>
+          <button id="libraryDownloadBtn" type="button" class="btn-secondary" disabled title="Download selected document or diagram image">Download</button>
         </div>
       </header>
       <div class="library-page-body">
         <p class="company-help library-help">
-          Plans, specs, and other markdown written for you on the hub.
-          Agents and the hub save deliverables under <code>library/</code>.
+          Plans, specs, and diagrams written for you on the hub.
+          Agents and the hub save deliverables under <code>library/</code>
+          (markdown plus <code>.puml</code> — click a diagram entry to see the rendered image).
         </p>
         <div class="library-layout">
           <div class="library-sidebar">
@@ -105,6 +107,8 @@
         <p class="company-help">
           Paste PlantUML source below and press <strong>Preview</strong> to render it
           to SVG inline. Rendered locally on the hub via <code>plantuml.sh</code>.
+          For durable operator-visible diagrams, publish to <strong>Library</strong>
+          (<code>.puml</code> + rendered <code>.svg</code> + manifest entry).
         </p>
         <textarea id="plantumlSource" class="plantuml-source" rows="10"
           placeholder="@startuml&#10;Alice -&gt; Bob: hello&#10;@enduml" spellcheck="false"></textarea>

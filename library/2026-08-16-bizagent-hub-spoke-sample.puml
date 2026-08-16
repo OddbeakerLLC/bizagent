@@ -1,0 +1,26 @@
+@startuml
+title BizAgent hub-and-spoke (sample)
+skinparam backgroundColor #FEFEFE
+skinparam componentStyle rectangle
+
+actor Operator
+component "Web UI\n(control-plane)" as UI
+component "Hub PTL" as Hub
+component "Product agents" as Agents
+database "library/\n(plans + .puml)" as Lib
+database "Mail\ninbox/outbox" as Mail
+
+Operator --> UI : chat / Library
+UI --> Hub : turns
+Hub --> Mail : route
+Mail --> Agents
+Agents --> Mail : replies
+Hub --> Lib : write .md / .puml
+Operator --> Lib : click entry\n→ rendered diagram
+
+note right of Lib
+  Agents generate PlantUML,
+  register in library/manifest.json.
+  Library click renders SVG via plantuml.sh.
+end note
+@enduml

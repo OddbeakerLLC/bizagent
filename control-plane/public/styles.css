@@ -180,35 +180,6 @@ body {
   margin-bottom: 12px;
 }
 .company-upload-row label { font-size: 13px; color: #374151; }
-.plantuml-source {
-  width: 100%;
-  box-sizing: border-box;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  padding: 8px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  resize: vertical;
-  min-height: 120px;
-}
-.plantuml-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 10px 0;
-}
-.plantuml-output {
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  padding: 12px;
-  background: #fff;
-  overflow: auto;
-  max-height: 50vh;
-}
-.plantuml-output svg {
-  max-width: 100%;
-  height: auto;
-}
 .company-file-label {
   cursor: pointer;
   display: inline-block;
@@ -369,6 +340,76 @@ body {
   background: #f3f4f6;
   padding: 8px;
   border-radius: 4px;
+}
+.library-diagram {
+  overflow: auto;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 12px;
+  text-align: center;
+}
+.library-diagram svg,
+.library-diagram-img {
+  max-width: 100%;
+  height: auto;
+}
+.library-diagram-meta {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+.library-diagram-source {
+  margin-top: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px 12px;
+  text-align: left;
+}
+.library-diagram-source summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  color: #374151;
+}
+.library-source-pre {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: auto;
+  background: #f3f4f6;
+  padding: 8px;
+  border-radius: 4px;
+}
+.plantuml-source {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  resize: vertical;
+  min-height: 160px;
+}
+.plantuml-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+}
+.plantuml-output {
+  margin-top: 8px;
+  overflow: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 12px;
+  background: #fff;
+  text-align: center;
+}
+.plantuml-output svg {
+  max-width: 100%;
+  height: auto;
 }
 
 /* Composer attachments */
