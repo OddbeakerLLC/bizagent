@@ -12,7 +12,9 @@ architecture diagrams for the framework.
 
 ## Rendering
 
-Requires [PlantUML](https://plantuml.com/) (Java). Render all diagrams to PNG:
+Requires [PlantUML](https://plantuml.com/) (Java) and [Graphviz](https://graphviz.org/)
+(`dot`) for non-sequence diagrams. The BizAgent installer (`install.sh`) ensures
+both. Render all diagrams to PNG:
 
 ```bash
 plantuml docs/diagrams/*.puml

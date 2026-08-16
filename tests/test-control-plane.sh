@@ -496,6 +496,14 @@ grep -q "control-plane" "$ROOT/scripts/bizagent-watch.sh" \
   || fail "bizagent-watch.sh is not a control-plane wrapper"
 grep -q "ensure_node" "$ROOT/install.sh" \
   || fail "installer does not ensure Node.js"
+grep -q "ensure_java" "$ROOT/install.sh" \
+  || fail "installer does not ensure Java (PlantUML)"
+grep -q "ensure_graphviz" "$ROOT/install.sh" \
+  || fail "installer does not ensure Graphviz/dot (PlantUML)"
+grep -q "ensure_plantuml" "$ROOT/install.sh" \
+  || fail "installer does not ensure PlantUML"
+grep -q "ensure_curl" "$ROOT/install.sh" \
+  || fail "installer does not ensure curl"
 grep -q "__PORT__" "$ROOT/install/bizagent-control-plane.service" \
   || fail "service template does not expose configurable port"
 grep -q "__HOST__" "$ROOT/install/bizagent-control-plane.service" \
