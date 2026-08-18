@@ -13,6 +13,9 @@
 #   BIZAGENT_REINSTALL=1           Wipe an existing clone and reinstall from scratch
 #   BIZAGENT_API_KEY=...           Non-interactive: write this as the selected CLI's API key
 #                                  into INSTALL_DIR/.bizagent/env (preferred over prompting)
+#   BIZAGENT_AUTO_UPDATE=0|1       Non-interactive: framework auto-update preference
+#                                  (0=manual-only default, 1=nightly may run scripts/upgrade.sh)
+#                                  Persisted as registry.json settings.auto_update
 
 set -euo pipefail
 
@@ -1017,21 +1020,84 @@ PY
   fi
 }
 
+# Ask (or take BIZAGENT_AUTO_UPDATE) whether nightly may auto-upgrade framework code.
+# Default: manual-only (false). Choice is written to registry.json settings.auto_update.
+SELECTED_AUTO_UPDATE="false"
+
+prompt_auto_update() {
+  # Non-interactive override
+  if [[ -n "${BIZAGENT_AUTO_UPDATE:-}" ]]; then
+    case "${BIZAGENT_AUTO_UPDATE}" in
+      1|true|TRUE|yes|YES|on|ON)
+        SELECTED_AUTO_UPDATE="true"
+        ok "auto-update: enabled (BIZAGENT_AUTO_UPDATE) — nightly may run scripts/upgrade.sh"
+        ;;
+      0|false|FALSE|no|NO|off|OFF)
+        SELECTED_AUTO_UPDATE="false"
+        ok "auto-update: manual-only (BIZAGENT_AUTO_UPDATE)"
+        ;;
+      *)
+        warn "Unknown BIZAGENT_AUTO_UPDATE=$BIZAGENT_AUTO_UPDATE — defaulting to manual-only"
+        SELECTED_AUTO_UPDATE="false"
+        ;;
+    esac
+    return
+  fi
+
+  # No TTY: safe default
+  if [[ ! -r /dev/tty ]] || [[ -n "${BIZAGENT_NONINTERACTIVE:-}" ]]; then
+    SELECTED_AUTO_UPDATE="false"
+    ok "auto-update: manual-only (non-interactive default)"
+    note "Change later: registry.json → settings.auto_update true|false"
+    return
+  fi
+
+  step "Framework updates"
+  note "BizAgent can pull framework upgrades from the public repo (OddbeakerLLC/bizagent)."
+  note "Upgrades never overwrite registry.json, cli.json, agents/, company/, or mail."
+  note "Default is manual-only — you (or PTL) run scripts/upgrade.sh when ready."
+  printf "\n"
+  printf "  ${BOLD}1)${NC} Manual only ${DIM}(recommended default)${NC}\n"
+  printf "  ${BOLD}2)${NC} Automatic ${DIM}(nightly may run upgrade when appropriate)${NC}\n"
+  printf "\n"
+  local choice=""
+  while true; do
+    read -r -p "  Choose [1/2] (default 1): " choice </dev/tty || choice="1"
+    choice="${choice:-1}"
+    case "$choice" in
+      1|m|M|manual|Manual)
+        SELECTED_AUTO_UPDATE="false"
+        ok "auto-update: manual-only"
+        break
+        ;;
+      2|a|A|auto|Auto|automatic|Automatic)
+        SELECTED_AUTO_UPDATE="true"
+        ok "auto-update: enabled (nightly may run scripts/upgrade.sh)"
+        break
+        ;;
+      *)
+        warn "Enter 1 (manual) or 2 (automatic)"
+        ;;
+    esac
+  done
+}
+
 # Seed operator registry.json; set settings.hub_agent.provider to the default LLM.
 # registry.json is gitignored; the public repo only ships registry.example.json.
 write_registry_seed() {
   local dest="$INSTALL_DIR/registry.json"
   local src="$INSTALL_DIR/registry.example.json"
   local provider="${SELECTED_PROVIDER:-grok}"
+  local auto_update="${SELECTED_AUTO_UPDATE:-false}"
 
   if [[ ! -f "$dest" ]]; then
     if [[ ! -f "$src" ]]; then
       warn "registry.example.json missing — control plane needs a registry.json"
       return
     fi
-    if ! python3 - "$src" "$dest" "$provider" <<'PY'
+    if ! python3 - "$src" "$dest" "$provider" "$auto_update" <<'PY'
 import json, sys
-src, dest, provider = sys.argv[1:4]
+src, dest, provider, auto_update = sys.argv[1:5]
 d = json.load(open(src))
 d["org"] = ""
 d["products"] = []
@@ -1039,6 +1105,7 @@ d["cross_product_edges"] = []
 if "hub" in d and isinstance(d["hub"], dict):
     d["hub"]["name"] = "BizAgent"
 settings = d.setdefault("settings", {})
+settings["auto_update"] = auto_update.strip().lower() in ("1", "true", "yes", "on")
 hub_agent = settings.setdefault("hub_agent", {})
 hub_agent["provider"] = provider
 hub_agent["cliName"] = provider  # legacy alias
@@ -1051,15 +1118,19 @@ PY
       cp "$src" "$dest"
       warn "seeded registry.json as a full example copy (python seed failed)"
     else
-      ok "registry.json seeded (empty products, hub_agent.provider=$provider)"
+      ok "registry.json seeded (empty products, hub_agent.provider=$provider, auto_update=$auto_update)"
     fi
   else
-    # Existing registry: ensure hub provider is set.
-    if ! python3 - "$dest" "$provider" <<'PY'
+    # Existing registry: ensure hub provider + auto_update preference are set.
+    if ! python3 - "$dest" "$provider" "$auto_update" <<'PY'
 import json, sys
-path, provider = sys.argv[1:3]
+path, provider, auto_update = sys.argv[1:4]
 d = json.load(open(path))
 settings = d.setdefault("settings", {})
+# Only set auto_update when missing so re-install over existing clone keeps operator choice
+# unless they explicitly passed BIZAGENT_AUTO_UPDATE (SELECTED already resolved).
+# Installer always writes the choice from this run when key was prompted/env-set.
+settings["auto_update"] = auto_update.strip().lower() in ("1", "true", "yes", "on")
 hub_agent = settings.setdefault("hub_agent", {})
 current = (hub_agent.get("provider") or hub_agent.get("cliName") or hub_agent.get("cli") or "").strip()
 legacy_map = {"claude": "openrouter", "codex": "openai", "agy": "openrouter", "bizagent-agent": provider or "grok", "xai": "grok"}
@@ -1067,22 +1138,19 @@ if current:
     current = legacy_map.get(current, current)
     hub_agent["provider"] = current
     hub_agent["cliName"] = current
-    json.dump(d, open(path, "w"), indent=2)
-    open(path, "a").write("\n")
-    print("keep")
-    raise SystemExit(0)
-hub_agent["provider"] = provider
-hub_agent["cliName"] = provider
-if provider == "grok" and not hub_agent.get("model"):
-    hub_agent["model"] = "grok-4.5"
+else:
+    hub_agent["provider"] = provider
+    hub_agent["cliName"] = provider
+    if provider == "grok" and not hub_agent.get("model"):
+        hub_agent["model"] = "grok-4.5"
 json.dump(d, open(path, "w"), indent=2)
 open(path, "a").write("\n")
-print(provider)
+print(settings.get("auto_update"))
 PY
     then
-      warn "could not set hub_agent.provider on existing registry.json"
+      warn "could not set hub_agent.provider / auto_update on existing registry.json"
     else
-      ok "registry.json hub_agent.provider ensured"
+      ok "registry.json hub_agent.provider + auto_update ensured"
     fi
   fi
 
@@ -1304,6 +1372,8 @@ main() {
   # INSTALL_DIR is not finalized yet; prompt still works — path hints use default until choose_dir.
   INSTALL_DIR="${BIZAGENT_DIR:-$HOME/bizagent}"
   prompt_api_key
+
+  prompt_auto_update
 
   step "Setting up bizagent"
   choose_dir

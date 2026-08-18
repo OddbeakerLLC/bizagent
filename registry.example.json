@@ -9,6 +9,8 @@
   "settings": {
     "nightly_time": "23:00",
     "archive_after_days": 30,
+    "auto_update": false,
+    "_auto_update_comment": "When true, nightly runs scripts/upgrade.sh (public framework → hub machinery only; never clobbers registry/cli.json/agents/company/KS/library/mail). Default false = manual-only. Operator can always run scripts/upgrade.sh or ask PTL.",
     "autonomy": "maintenance-only",
     "dispatch": {
       "_comment": "Node control-plane dispatch tunables. poll_seconds honored (default 2; clamp 1\u201330). hub_slots and agent_slots are separate pools so hub turns do not starve product fanout (defaults: hub 1, agents = max_concurrency). max_concurrency default 8 (product-agent pool when agent_slots omitted).",

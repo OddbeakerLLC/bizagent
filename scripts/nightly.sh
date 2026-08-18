@@ -12,6 +12,30 @@ set -u
 HUB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HUB"
 
+# --- 0a. optional framework auto-upgrade --------------------------------
+# Only when settings.auto_update is true (default false = manual-only).
+# Safe upgrade preserves registry/cli.json/agents/company/KS/library/mail/.bizagent.
+# Manual path anytime: scripts/upgrade.sh (or ask PTL).
+AUTO_UPDATE="$(python3 -c '
+import json
+try:
+    v = json.load(open("registry.json")).get("settings", {}).get("auto_update", False)
+    print("1" if v is True or v == 1 or str(v).lower() in ("1", "true", "yes") else "0")
+except Exception:
+    print("0")
+' 2>/dev/null || echo 0)"
+if [ "$AUTO_UPDATE" = "1" ]; then
+  if [ -x "$HUB/scripts/upgrade.sh" ]; then
+    echo "nightly: settings.auto_update=true — running scripts/upgrade.sh --yes"
+    bash "$HUB/scripts/upgrade.sh" --hub "$HUB" --yes \
+      || echo "nightly: auto-upgrade failed (continuing mechanical half)"
+  else
+    echo "nightly: auto_update set but scripts/upgrade.sh missing — skip"
+  fi
+else
+  echo "nightly: auto_update off (manual-only) — skip framework upgrade"
+fi
+
 # --- 0. pull all project repos -----------------------------------------
 pull_project_paths() {
   python3 - <<'PY'

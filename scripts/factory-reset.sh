@@ -100,7 +100,9 @@ confirm() {
   [[ "$ans" == "y" || "$ans" == "Y" || "$ans" == "yes" ]] || die "aborted"
 }
 
-# Paths restored from framework on repair (relative to hub / source root).
+# Paths restored from framework on repair / upgrade (relative to hub / source root).
+# Keep in sync with scripts/upgrade.sh FRAMEWORK_PATHS.
+# Never includes cli.json, registry.json, or other operator state.
 FRAMEWORK_PATHS=(
   control-plane
   scripts
@@ -108,14 +110,23 @@ FRAMEWORK_PATHS=(
   tests
   install
   docs
+  agent-runtime
   cli.json.example
   registry.example.json
   package.json
+  package-lock.json
   NIGHTLY.md
   WEEKLY.md
+  AGENT.md
+  README.md
+  LICENSE
+  deploy.sh
+  viewlog.sh
+  bizagent.png
 )
 
 # Ops paths never clobbered by repair; restored by restore-ops when requested.
+# library/ is local operator content (plans/specs) — never overwritten by repair.
 OPS_PATHS=(
   registry.json
   cli.json
@@ -123,6 +134,7 @@ OPS_PATHS=(
   journal
   company
   knowledge-stack
+  library
   inbox
   outbox
   user
@@ -134,10 +146,11 @@ backup_hub_snapshot() {
   # Snapshot critical trees; skip huge/ephemeral if missing.
   local p
   for p in \
-    control-plane scripts templates tests install docs \
-    registry.json cli.json agents journal company knowledge-stack \
-    package.json NIGHTLY.md WEEKLY.md cli.json.example registry.example.json \
-    AGENT.md; do
+    control-plane scripts templates tests install docs agent-runtime \
+    registry.json cli.json agents journal company knowledge-stack library \
+    package.json package-lock.json NIGHTLY.md WEEKLY.md \
+    cli.json.example registry.example.json \
+    AGENT.md README.md LICENSE deploy.sh viewlog.sh; do
     if [[ -e "$HUB/$p" ]]; then
       mkdir -p "$BACKUP_DIR/$(dirname "$p")"
       cp -a "$HUB/$p" "$BACKUP_DIR/$p"
@@ -280,6 +293,13 @@ do_repair() {
   resolve_framework_source
   [[ -n "$FRAMEWORK_SRC" && -d "$FRAMEWORK_SRC" ]] || die "could not resolve framework source"
   [[ -d "$FRAMEWORK_SRC/control-plane" ]] || die "framework source missing control-plane/: $FRAMEWORK_SRC"
+
+  # Never let a *temp clone's* operator files bleed into live ops.
+  # Only strip from disposable clones — never mutate a --source path the operator owns.
+  if [[ "${CLEANUP_FRAMEWORK_SRC:-0}" -eq 1 ]]; then
+    rm -f "$FRAMEWORK_SRC/cli.json" \
+      "$FRAMEWORK_SRC/registry.json" 2>/dev/null || true
+  fi
 
   local path
   for path in "${FRAMEWORK_PATHS[@]}"; do
