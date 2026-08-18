@@ -9,8 +9,9 @@ specifies, and nothing more:
    ```sh
    bash scripts/nightly.sh
    ```
-   (pulls project repos + hub if remotes exist; routes mail; archives stale
-   inbox messages; prunes old `*/archive/` files.)
+   (if `settings.auto_update` is true, runs `scripts/upgrade.sh --yes` first;
+   then pulls project repos + hub if remotes exist; routes mail; archives stale
+   inbox messages; prunes old `*/archive/` files. Default auto_update is false.)
 
 2. For each project in `registry.json`, run `git log --since=midnight` to
    detect the day's commits.

@@ -279,11 +279,17 @@ scripts/viewlog.sh
 scripts/viewlog.sh hub          # warm hub + dispatch-hub.*
 
 # Nightly mechanical half + end-of-night backup push
-scripts/nightly.sh              # pull, route, archive, prune (+ defer reconcile)
+scripts/nightly.sh              # pull, route, archive, prune (+ optional auto-upgrade)
 scripts/nightly.sh push         # commit/push product repos + hub (private remote)
 scripts/defer.sh --in 15m ...   # schedule one-shot wake mail (see docs/DEFERRED-WAKE.md)
 scripts/defer.sh --list         # pending deferred wakes
 scripts/defer.sh --cancel ID
+
+# Framework upgrade from public OddbeakerLLC/bizagent (never clobbers ops data)
+scripts/upgrade.sh --dry-run    # show what would change
+scripts/upgrade.sh              # apply + restart control plane
+scripts/upgrade.sh --yes        # non-interactive apply
+# SHTF repair (same restore engine as upgrade): scripts/factory-reset.sh repair
 
 # After clone: drop public framework origin; ops gitignore; print private-remote advice
 scripts/detach-framework-remote.sh
@@ -297,6 +303,7 @@ Multiple BizAgent hubs can run on one machine. Set
 
 ```json
 "settings": {
+  "auto_update": false,
   "dispatch": {
     "poll_seconds": 2,
     "max_concurrency": 8,
@@ -312,6 +319,40 @@ Multiple BizAgent hubs can run on one machine. Set
 
 `poll_seconds` (1–30) controls how often the control plane wakes. Separate hub/agent slot pools keep operator turns responsive even under heavy fan-out. Archive pruning removes old `*/archive/` mail automatically on the nightly (or on demand).
 
+### Upgrading the hub framework
+
+Live hubs are **ops clones** (private remote, local `registry.json` / agents / mail).
+Framework code still comes from the public repo
+[`OddbeakerLLC/bizagent`](https://github.com/OddbeakerLLC/bizagent).
+
+```sh
+# Preview (no writes, no service bounce)
+scripts/upgrade.sh --dry-run -v
+
+# Apply: clone public main → restore machinery only → npm install → restart CP
+scripts/upgrade.sh --yes
+```
+
+**Preserved:** `registry.json`, `cli.json`, `agents/`, `company/`,
+`knowledge-stack/`, `library/`, `journal/`, mailboxes, `logs/`, `.bizagent/`
+(auth, env, runtime), secrets.
+
+**Updated:** `control-plane/`, `scripts/`, `templates/`, `tests/`,
+`agent-runtime/`, docs/examples, and other framework files.
+
+**Install-time preference.** The installer asks whether you want:
+
+- **Manual only** (default) — you or PTL run `scripts/upgrade.sh` when ready.
+- **Automatic** — nightly may run upgrade when `settings.auto_update` is `true`.
+
+Non-interactive: `BIZAGENT_AUTO_UPDATE=0|1`. Change later in `registry.json`
+→ `settings.auto_update`. Manual upgrade always works regardless of that flag.
+Ask PTL anytime to check/apply updates.
+
+**Caveats:** upgrade stops/restarts the control plane (brief UI downtime). A
+timestamped backup lands under `.bizagent/backups/`. Prefer a private hub remote
+and recent backup before large jumps. Hard-reload the browser after upgrade.
+
 ---
 
 ## What PTL asks during setup
@@ -326,6 +367,7 @@ and begins setup in the web UI. It only asks for the things that are genuinely y
 - nightly run time _(default 23:00)_
 - how long an unactioned message waits before being archived _(default 30 days)_
 - agent autonomy: maintenance-only, +monitoring, or +light-dev _(default maintenance-only)_
+- framework auto-update vs manual-only _(installer default: manual-only; `settings.auto_update`)_
 - a **private** git remote for the hub (strongly recommended)
 
 The installer **removes** the public framework GitHub remote from the clone so
@@ -362,7 +404,9 @@ bizagent/
 │   ├── viewlog.sh             tail -F control-plane / hub / structured logs
 │   ├── write-message.sh       canonical outbox helper (conversation stamping)
 │   ├── defer.sh               one-shot deferred wake mail (poll-after)
-│   ├── nightly.sh             route + prune + journal/sitemap housekeeping
+│   ├── nightly.sh             route + prune + optional auto-upgrade + housekeeping
+│   ├── upgrade.sh             safe framework upgrade from public OddbeakerLLC/bizagent
+│   ├── factory-reset.sh       repair / restore-ops / nuke (upgrade uses repair)
 │   └── ...                    (router, run-agent, onboard, publish-check, etc.)
 ├── control-plane/
 │   ├── server.js
