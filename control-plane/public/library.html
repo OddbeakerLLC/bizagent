@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BizAgent Library</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="library-page">
+  <main class="library-app" id="libraryApp">
+    <header class="topbar library-topbar">
+      <div class="library-topbar-left">
+        <h1 class="library-page-title">BizAgent Library</h1>
+        <span id="libraryAuthLabel" class="auth-status">Checking session…</span>
+      </div>
+      <div class="auth-controls">
+        <button id="libraryRefresh" type="button" class="btn-secondary">Refresh</button>
+        <button id="librarySourceBtn" type="button" class="btn-secondary" hidden disabled title="Download PlantUML source (.puml)">Source</button>
+        <button id="libraryDownloadBtn" type="button" class="btn-secondary" disabled title="Download selected document or diagram">Download</button>
+      </div>
+    </header>
+
+    <div id="libraryAuthGate" class="library-auth-gate" hidden>
+      <p class="company-help">Sign in on the main BizAgent console, then reopen Library.</p>
+      <p><a id="libraryConsoleLink" href="/">Open console</a></p>
+    </div>
+
+    <div class="library-page-body" id="libraryMain">
+      <p class="company-help library-help">
+        Browse viewable files by project repo. Expand one repo at a time; click a file to preview
+        (markdown, PlantUML diagrams, SVG/PNG). Hub curated deliverables live under
+        <strong>Hub library</strong>.
+      </p>
+      <div class="library-layout">
+        <div class="library-sidebar">
+          <input id="libraryFilter" type="search" class="library-filter" placeholder="Filter files…" autocomplete="off">
+          <div id="libraryAccordion" class="library-accordion" role="tree" aria-label="Project repositories"></div>
+        </div>
+        <div class="library-preview">
+          <div id="libraryPreviewTitle" class="library-preview-title">Select a file</div>
+          <div id="libraryPreviewBody" class="library-preview-body message-body">
+            <p class="company-file-empty">Expand a repo on the left, then choose a viewable file.</p>
+          </div>
+        </div>
+      </div>
+      <p id="libraryStatus" class="modal-status auth-status" hidden></p>
+    </div>
+  </main>
+  <script src="/library.js"></script>
+</body>
+</html>

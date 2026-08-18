@@ -108,8 +108,12 @@ const {
   contentTypeForExt,
   ensureLibrary,
   extOf,
+  getLibraryBrowseFile,
   getLibraryEntry,
+  getLibraryRepoTree,
   listLibrary,
+  listLibraryRepos,
+  resolveBrowseFile,
   resolveLibraryFile,
   MAX_BYTES: LIBRARY_MAX_BYTES,
 } = require("./lib/library");
@@ -1031,10 +1035,34 @@ async function handleApi(config, req, res) {
     }
   }
 
+  // Repo accordion roots (registry projects + hub library/).
+  if (url.pathname === "/api/library/repos" && req.method === "GET") {
+    try {
+      ensureLibrary(config.hub);
+      return send(res, 200, listLibraryRepos(config.hub, config.registry));
+    } catch (err) {
+      return send(res, 400, { error: err.message || "list repos failed" });
+    }
+  }
+
+  // Filtered viewable-file tree for one repo (dirs + .md/.puml/.svg/.png …).
+  if (url.pathname === "/api/library/tree" && req.method === "GET") {
+    try {
+      const repoId = (url.searchParams.get("repo") || "").trim();
+      if (!repoId) return send(res, 400, { error: "repo required" });
+      return send(res, 200, getLibraryRepoTree(config.hub, config.registry, repoId));
+    } catch (err) {
+      const msg = err.message || "tree failed";
+      const status = /not found/i.test(msg) ? 404 : 400;
+      return send(res, status, { error: msg });
+    }
+  }
+
   if (url.pathname === "/api/library/file" && req.method === "GET") {
     try {
-      const id = (url.searchParams.get("id") || url.searchParams.get("path") || "").trim();
-      if (!id) return send(res, 400, { error: "id required" });
+      const id = (url.searchParams.get("id") || "").trim();
+      const repoId = (url.searchParams.get("repo") || "").trim();
+      const relPath = (url.searchParams.get("path") || "").trim();
       const wantDownload =
         url.searchParams.get("download") === "1" ||
         url.searchParams.get("download") === "true";
@@ -1049,11 +1077,105 @@ async function handleApi(config, req, res) {
         url.searchParams.get("render") === "true" ||
         url.searchParams.get("format") === "svg" ||
         url.searchParams.get("format") === "png";
-      const doc = getLibraryEntry(config.hub, id);
+      const safeName = (name) => String(name || "file").replace(/"/g, "");
+
+      // Path-based browse (repo tree) takes precedence when repo+path given.
+      if (repoId && relPath) {
+        const resolved = resolveBrowseFile(config.hub, config.registry, repoId, relPath);
+        const { abs, rel, ext: fileExt } = resolved;
+        const filename = path.basename(rel || "document.md");
+        const doc = getLibraryBrowseFile(config.hub, config.registry, repoId, relPath);
+        // Never leak absolute paths to the client.
+        delete doc.abs;
+
+        if (wantSource && doc.source_path) {
+          const src = resolveBrowseFile(
+            config.hub,
+            config.registry,
+            repoId,
+            doc.source_path,
+          );
+          const raw = fs.readFileSync(src.abs);
+          const srcName = path.basename(doc.source_path);
+          const headers = {
+            "Content-Type": contentTypeForExt(extOf(srcName)),
+            "Content-Length": raw.length,
+            "Cache-Control": "no-store",
+          };
+          if (wantDownload) {
+            headers["Content-Disposition"] = `attachment; filename="${safeName(srcName)}"`;
+          }
+          res.writeHead(200, headers);
+          res.end(raw);
+          return null;
+        }
+
+        if (wantRender && (fileExt === ".puml" || fileExt === ".plantuml")) {
+          const fmt = url.searchParams.get("format") === "png" ? "png" : "svg";
+          const source = fs.readFileSync(abs, "utf8");
+          const rendered = renderPlantUml(source, fmt);
+          const stem = filename.replace(/\.(puml|plantuml)$/i, "");
+          if (fmt === "png") {
+            const buf = Buffer.isBuffer(rendered) ? rendered : Buffer.from(rendered);
+            const headers = {
+              "Content-Type": "image/png",
+              "Content-Length": buf.length,
+              "Cache-Control": "no-store",
+            };
+            if (wantDownload) {
+              headers["Content-Disposition"] = `attachment; filename="${safeName(stem)}.png"`;
+            }
+            res.writeHead(200, headers);
+            res.end(buf);
+            return null;
+          }
+          const svg = String(rendered || "");
+          const buf = Buffer.from(svg, "utf8");
+          if (wantDownload || wantRaw) {
+            const headers = {
+              "Content-Type": "image/svg+xml; charset=utf-8",
+              "Content-Length": buf.length,
+              "Cache-Control": "no-store",
+            };
+            if (wantDownload) {
+              headers["Content-Disposition"] = `attachment; filename="${safeName(stem)}.svg"`;
+            }
+            res.writeHead(200, headers);
+            res.end(buf);
+            return null;
+          }
+          return send(res, 200, {
+            ...doc,
+            kind: "plantuml",
+            rendered_format: "svg",
+            svg,
+          });
+        }
+
+        if (wantDownload || wantRaw) {
+          const raw = fs.readFileSync(abs);
+          const headers = {
+            "Content-Type": contentTypeForExt(fileExt),
+            "Content-Length": raw.length,
+            "Cache-Control": "no-store",
+          };
+          if (wantDownload) {
+            headers["Content-Disposition"] = `attachment; filename="${safeName(filename)}"`;
+          }
+          res.writeHead(200, headers);
+          res.end(raw);
+          return null;
+        }
+        return send(res, 200, doc);
+      }
+
+      // Legacy manifest id lookup (kept for older links / downloads).
+      const legacyId = id || (relPath && !repoId ? relPath : "");
+      if (!legacyId) return send(res, 400, { error: "id or repo+path required" });
+      const doc = getLibraryEntry(config.hub, legacyId);
       const { abs } = resolveLibraryFile(config.hub, doc.path);
       const filename = path.basename(doc.path || "document.md");
       const fileExt = extOf(doc.path);
-      const safeName = (name) => String(name || "file").replace(/"/g, "");
 
       // Companion .puml source for a diagram entry (download / view source).
       if (wantSource && doc.source_path) {

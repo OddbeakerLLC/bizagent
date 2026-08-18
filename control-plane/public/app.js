@@ -14,11 +14,6 @@ let ws = null;
 let wsReady = false;
 let subscribedAgents = false;
 let subscribedConv = null; // conv id we are currently subscribed to over WS
-/** SPA route: 'chat' | 'library' */
-let currentRoute = 'chat';
-/** Library list cache + selection */
-let libraryEntriesCache = [];
-let librarySelectedId = '';
 /** Pending composer attachments (File objects before upload). */
 let pendingAttachFiles = [];
 /** Last agents snapshot for recipient dropdown. */
@@ -77,7 +72,6 @@ function setAuthenticated(isAuthenticated, message) {
     document.getElementById('namePanel').hidden = true;
     hideCompanyModal();
     if (typeof hidePlantUmlModal === 'function') hidePlantUmlModal();
-    if (currentRoute === 'library') navigateRoute('chat');
   }
   setAuthStatus(message || (isAuthenticated ? 'Signed in' : 'Login required'), isAuthenticated ? 'ok' : 'warn');
 }
@@ -986,272 +980,47 @@ async function boot() {
   }
 }
 
-// --- SPA routing (chat | library) ---
-function parseRoute() {
-  const h = String((__loc.hash || '').replace(/^#/, '')).replace(/^\/+/, '');
-  if (h === 'library' || h.startsWith('library/')) return 'library';
-  return 'chat';
-}
+// --- Library (named browser tab; full-page repo accordion) ---
+const LIBRARY_WINDOW_NAME = 'bizagent-library';
 
-function navigateRoute(route, { push = true } = {}) {
-  const next = route === 'library' ? 'library' : 'chat';
-  if (push) {
-    const want = next === 'library' ? '#/library' : '#/chat';
-    if ((__loc.hash || '') !== want && typeof history !== 'undefined') {
-      history.pushState(null, '', want);
-    } else if (typeof location !== 'undefined') {
-      location.hash = want;
-    }
-  }
-  applyRoute(next);
-}
-
-function applyRoute(route) {
-  currentRoute = route === 'library' ? 'library' : 'chat';
-  const chat = document.getElementById('chatShell');
-  const lib = document.getElementById('libraryShell');
-  if (chat) chat.hidden = currentRoute !== 'chat';
-  if (lib) lib.hidden = currentRoute !== 'library';
-  if (currentRoute === 'library') {
-    refreshLibraryList(librarySelectedId).catch(() => {});
-  }
-}
-
-// --- Library page (operator-facing plans/specs) ---
-function setLibraryStatus(message, kind = 'neutral') {
-  const status = document.getElementById('libraryStatus');
-  if (!status) return;
-  if (!message) {
-    status.hidden = true;
-    status.textContent = '';
-    return;
-  }
-  status.hidden = false;
-  status.textContent = message;
-  status.dataset.kind = kind;
-}
-
-function libraryFilterQuery() {
-  const el = document.getElementById('libraryFilter');
-  return ((el && el.value) || '').trim().toLowerCase();
-}
-
-function entryMatchesFilter(e, q) {
-  if (!q) return true;
-  const title = String(e.title || '').toLowerCase();
-  const p = String(e.path || '').toLowerCase();
-  const tags = Array.isArray(e.tags) ? e.tags.join(' ').toLowerCase() : '';
-  return title.includes(q) || p.includes(q) || tags.includes(q);
-}
-
-function renderLibraryList(selectId) {
-  const list = document.getElementById('libraryList');
-  if (!list) return;
-  const q = libraryFilterQuery();
-  const entries = libraryEntriesCache.filter((e) => entryMatchesFilter(e, q));
-  list.innerHTML = '';
-  if (libraryEntriesCache.length === 0) {
-    list.innerHTML = '<li class="company-file-empty">Library is empty. Ask the hub or an agent to save a plan under library/.</li>';
-    setLibraryDownloadEnabled(false);
-    return;
-  }
-  if (entries.length === 0) {
-    list.innerHTML = '<li class="company-file-empty">No documents match this filter.</li>';
-    setLibraryDownloadEnabled(false);
-    return;
-  }
-  for (const e of entries) {
-    const li = document.createElement('li');
-    li.className = 'company-file-item library-list-item';
-    li.dataset.id = e.id;
-    const when = e.created_at ? new Date(e.created_at).toLocaleString() : '';
-    const kind = libraryEntryKind(e);
-    const badge = (kind === 'plantuml' || kind === 'diagram') ? ' · diagram' : '';
-    li.innerHTML = `<span class="company-file-path">${escapeHtml(e.title || e.path || e.id)}</span>`
-      + `<span class="company-file-meta">${escapeHtml(when)}${badge}</span>`;
-    li.addEventListener('click', () => openLibraryDoc(e.id));
-    list.appendChild(li);
-  }
-  const pick = selectId && entries.some((e) => e.id === selectId)
-    ? selectId
-    : (entries[0] && entries[0].id);
-  if (pick) openLibraryDoc(pick);
-}
-
-function setLibraryDownloadEnabled(on) {
-  const btn = document.getElementById('libraryDownloadBtn');
-  if (btn) btn.disabled = !on;
-}
-
-function setLibrarySourceVisible(on) {
-  const btn = document.getElementById('librarySourceBtn');
-  if (btn) {
-    btn.hidden = !on;
-    btn.disabled = !on;
-  }
-}
-
-function libraryEntryKind(doc) {
-  if (!doc) return 'document';
-  const k = String(doc.kind || doc.type || '').toLowerCase();
-  if (k === 'diagram' || k === 'image') return 'diagram';
-  if (k === 'plantuml') return 'plantuml';
-  const p = String(doc.path || '').toLowerCase();
-  if (p.endsWith('.svg') || p.endsWith('.png')) return 'diagram';
-  if (p.endsWith('.puml') || p.endsWith('.plantuml')) return 'plantuml';
-  return 'document';
-}
-
-function librarySourceBlock(doc) {
-  const sourceText = doc.source_content
-    || ((String(doc.ext || doc.path || '').toLowerCase().match(/\.puml$|\.plantuml$/))
-      ? doc.content
-      : '');
-  if (!sourceText) return '';
-  return `<details class="library-diagram-source"><summary>View PlantUML source</summary>`
-    + `<pre class="library-source-pre">${escapeHtml(sourceText)}</pre></details>`;
-}
-
-async function openLibraryDoc(id) {
-  const titleEl = document.getElementById('libraryPreviewTitle');
-  const bodyEl = document.getElementById('libraryPreviewBody');
-  if (!bodyEl) return;
-  librarySelectedId = id;
-  bodyEl.innerHTML = '<p class="company-file-empty">Loading…</p>';
-  setLibraryDownloadEnabled(false);
-  setLibrarySourceVisible(false);
+function openLibraryTab() {
+  const url = '/library.html';
   try {
-    const kindHint = (() => {
-      const e = libraryEntriesCache.find((x) => x.id === id);
-      return e ? libraryEntryKind(e) : '';
-    })();
-    // On-demand render when the entry is still raw .puml (no stored SVG yet).
-    const qs = kindHint === 'plantuml'
-      ? `/api/library/file?id=${encodeURIComponent(id)}&render=1&format=svg`
-      : `/api/library/file?id=${encodeURIComponent(id)}`;
-    const doc = await api(qs);
-    if (titleEl) {
-      titleEl.textContent = doc.title || doc.path || id;
+    const w = window.open(url, LIBRARY_WINDOW_NAME);
+    if (w) {
+      try { w.focus(); } catch (_err) { /* ignore */ }
+      return w;
     }
-    const kind = libraryEntryKind(doc);
-    const metaPath = doc.source_path
-      ? `${doc.path} (source ${doc.source_path})`
-      : (doc.path || '');
-    const sourceHtml = librarySourceBlock(doc);
-    if (kind === 'plantuml' && doc.svg) {
-      bodyEl.innerHTML = `<div class="library-diagram">${doc.svg}</div>`
-        + `<p class="library-diagram-meta"><code>${escapeHtml(metaPath)}</code> · rendered SVG</p>`
-        + sourceHtml;
-    } else if (kind === 'diagram' || kind === 'plantuml') {
-      // Stored SVG/PNG (preferred) or SVG text content from getLibraryEntry.
-      const ext = String(doc.ext || doc.path || '').toLowerCase();
-      if (ext.endsWith('.svg') && doc.content && /<svg/i.test(doc.content)) {
-        bodyEl.innerHTML = `<div class="library-diagram">${doc.content}</div>`
-          + `<p class="library-diagram-meta"><code>${escapeHtml(metaPath)}</code></p>`
-          + sourceHtml;
-      } else {
-        const rawUrl = `/api/library/file?id=${encodeURIComponent(id)}&raw=1`;
-        bodyEl.innerHTML = `<div class="library-diagram"><img class="library-diagram-img" src="${rawUrl}" alt="${escapeHtml(doc.title || doc.path || 'diagram')}"></div>`
-          + `<p class="library-diagram-meta"><code>${escapeHtml(metaPath)}</code></p>`
-          + sourceHtml;
-      }
-    } else {
-      bodyEl.innerHTML = renderMarkdown(doc.content || '');
-    }
-    document.querySelectorAll('.library-list-item').forEach((el) => {
-      el.classList.toggle('is-selected', el.dataset.id === id);
-    });
-    setLibraryDownloadEnabled(true);
-    const hasSource = !!(doc.source_path || kind === 'plantuml' || doc.source_content);
-    setLibrarySourceVisible(hasSource);
-  } catch (err) {
-    bodyEl.innerHTML = `<p class="company-file-empty">${escapeHtml(err.message || 'Failed to load')}</p>`;
+  } catch (_err) {
+    /* popup blocked — fall through */
   }
-}
-
-async function refreshLibraryList(selectId) {
-  const list = document.getElementById('libraryList');
-  if (!list) return;
-  list.innerHTML = '<li class="company-file-empty">Loading…</li>';
-  setLibraryStatus('');
-  try {
-    const data = await api('/api/library');
-    libraryEntriesCache = Array.isArray(data.entries) ? data.entries : [];
-    renderLibraryList(selectId || librarySelectedId);
-  } catch (err) {
-    list.innerHTML = '';
-    libraryEntriesCache = [];
-    setLibraryStatus(err.message || 'Failed to list library', 'warn');
-  }
-}
-
-function downloadLibraryDoc() {
-  if (!librarySelectedId) return;
-  const a = document.createElement('a');
-  a.href = `/api/library/file?id=${encodeURIComponent(librarySelectedId)}&download=1`;
-  a.rel = 'noopener';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
-function downloadLibrarySource() {
-  if (!librarySelectedId) return;
-  const entry = libraryEntriesCache.find((x) => x.id === librarySelectedId);
-  const kind = libraryEntryKind(entry || {});
-  // Diagram entries with companion .puml use source=1; bare .puml downloads the file itself.
-  const href = (entry && entry.source_path)
-    ? `/api/library/file?id=${encodeURIComponent(librarySelectedId)}&source=1&download=1`
-    : (kind === 'plantuml'
-      ? `/api/library/file?id=${encodeURIComponent(librarySelectedId)}&download=1`
-      : `/api/library/file?id=${encodeURIComponent(librarySelectedId)}&source=1&download=1`);
-  const a = document.createElement('a');
-  a.href = href;
-  a.rel = 'noopener';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  // Popup blocked: navigate this tab.
+  if (typeof location !== 'undefined') location.assign(url);
+  return null;
 }
 
 function bindLibraryPage() {
   const openBtn = document.getElementById('libraryBtn');
   if (openBtn && openBtn.dataset.bound !== '1') {
     openBtn.dataset.bound = '1';
-    openBtn.addEventListener('click', () => navigateRoute('library'));
+    openBtn.addEventListener('click', () => openLibraryTab());
   }
-  const backBtn = document.getElementById('libraryBackBtn');
-  if (backBtn && backBtn.dataset.bound !== '1') {
-    backBtn.dataset.bound = '1';
-    backBtn.addEventListener('click', () => navigateRoute('chat'));
-  }
-  const refreshBtn = document.getElementById('libraryRefresh');
-  if (refreshBtn && refreshBtn.dataset.bound !== '1') {
-    refreshBtn.dataset.bound = '1';
-    refreshBtn.addEventListener('click', () => refreshLibraryList(librarySelectedId));
-  }
-  const dlBtn = document.getElementById('libraryDownloadBtn');
-  if (dlBtn && dlBtn.dataset.bound !== '1') {
-    dlBtn.dataset.bound = '1';
-    dlBtn.addEventListener('click', () => downloadLibraryDoc());
-  }
-  const srcBtn = document.getElementById('librarySourceBtn');
-  if (srcBtn && srcBtn.dataset.bound !== '1') {
-    srcBtn.dataset.bound = '1';
-    srcBtn.addEventListener('click', () => downloadLibrarySource());
-  }
-  const filter = document.getElementById('libraryFilter');
-  if (filter && filter.dataset.bound !== '1') {
-    filter.dataset.bound = '1';
-    let t = null;
-    filter.addEventListener('input', () => {
-      clearTimeout(t);
-      t = setTimeout(() => renderLibraryList(librarySelectedId), 120);
-    });
-  }
-  if (typeof window !== 'undefined' && !window.__bizagentHashBound) {
-    window.__bizagentHashBound = true;
-    window.addEventListener('hashchange', () => applyRoute(parseRoute()));
-    window.addEventListener('popstate', () => applyRoute(parseRoute()));
+  // Deep-link: #/library still opens the named Library tab once.
+  if (typeof window !== 'undefined' && !window.__bizagentLibraryHashBound) {
+    window.__bizagentLibraryHashBound = true;
+    const maybeOpenFromHash = () => {
+      const h = String((__loc.hash || '').replace(/^#/, '')).replace(/^\/+/, '');
+      if (h === 'library' || h.startsWith('library/')) {
+        openLibraryTab();
+        try {
+          if (typeof history !== 'undefined') history.replaceState(null, '', '#/chat');
+        } catch (_err) {
+          /* ignore */
+        }
+      }
+    };
+    window.addEventListener('hashchange', maybeOpenFromHash);
+    maybeOpenFromHash();
   }
 }
 

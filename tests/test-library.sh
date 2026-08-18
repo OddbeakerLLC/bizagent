@@ -5,12 +5,19 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 [ -f "$ROOT/control-plane/lib/library.js" ] || fail "library.js missing"
 grep -q '/api/library' "$ROOT/control-plane/server.js" || fail "server missing /api/library"
+grep -q '/api/library/repos' "$ROOT/control-plane/server.js" || fail "server missing /api/library/repos"
+grep -q '/api/library/tree' "$ROOT/control-plane/server.js" || fail "server missing /api/library/tree"
 grep -q 'libraryBtn' "$ROOT/control-plane/public/index.html" || fail "UI missing Library button"
+grep -q 'bizagent-library\|openLibraryTab' "$ROOT/control-plane/public/app.js" || fail "UI missing named Library tab open"
+[ -f "$ROOT/control-plane/public/library.html" ] || fail "library.html missing"
+[ -f "$ROOT/control-plane/public/library.js" ] || fail "library.js (page) missing"
+grep -q 'library-accordion\|libraryAccordion' "$ROOT/control-plane/public/library.html" || fail "library page missing accordion root"
+grep -q 'library-diagram\|libraryEntryKind\|render=1\|render:' "$ROOT/control-plane/public/library.js" || fail "library page missing diagram preview path"
 grep -q "library/" "$ROOT/control-plane/lib/hub-memory.js" || fail "hub prompt missing library convention"
 grep -qE "\.puml|ALLOWED_EXT.*puml|puml" "$ROOT/control-plane/lib/library.js" || fail "library.js missing .puml allowlist"
 grep -q 'contentTypeForExt' "$ROOT/control-plane/lib/library.js" || fail "library.js missing contentTypeForExt"
+grep -q 'listLibraryRepos\|getLibraryRepoTree\|getLibraryBrowseFile' "$ROOT/control-plane/lib/library.js" || fail "library.js missing repo tree browse helpers"
 grep -q 'raw=1\|wantRaw\|raw ===' "$ROOT/control-plane/server.js" || fail "server missing library raw serve"
-grep -q 'library-diagram\|libraryEntryKind\|render=1' "$ROOT/control-plane/public/app.js" || fail "UI missing diagram preview path"
 grep -q 'image/svg+xml\|contentTypeForExt' "$ROOT/control-plane/server.js" || fail "server missing svg content-type path"
 
 node - "$ROOT" <<'NODE' || fail "library unit checks failed"
@@ -21,9 +28,13 @@ const {
   addLibraryDocument,
   addLibraryDiagram,
   contentTypeForExt,
+  getLibraryBrowseFile,
   getLibraryEntry,
+  getLibraryRepoTree,
   listLibrary,
+  listLibraryRepos,
   resolveLibraryFile,
+  resolveUnderRoot,
   ALLOWED_EXT,
 } = require(path.join(process.argv[2], 'control-plane/lib/library'));
 
@@ -146,6 +157,92 @@ if (plantumlOk) {
   }
 } else {
   console.log('(skip auto-render: PlantUML not installed)');
+}
+
+// Repo accordion browse: hub-library tree + nested path read
+const registry = {
+  products: [
+    {
+      slug: 'demo',
+      name: 'Demo Product',
+      projects: [
+        {
+          name: 'demo-repo',
+          path: path.join(hub, 'demo-repo'),
+          remote: 'ssh://example/demo-repo.git',
+        },
+      ],
+    },
+  ],
+};
+const demoRoot = path.join(hub, 'demo-repo');
+fs.mkdirSync(path.join(demoRoot, 'docs', 'diagrams'), { recursive: true });
+fs.writeFileSync(path.join(demoRoot, 'README.md'), '# Demo\n\nHello repo.\n');
+fs.writeFileSync(path.join(demoRoot, 'docs', 'plan.md'), '# Plan\n\nNested.\n');
+fs.writeFileSync(
+  path.join(demoRoot, 'docs', 'diagrams', 'flow.puml'),
+  '@startuml\nA -> B\n@enduml\n',
+);
+fs.writeFileSync(path.join(demoRoot, 'secret.env'), 'NOPE=1\n');
+fs.mkdirSync(path.join(demoRoot, 'node_modules', 'x'), { recursive: true });
+fs.writeFileSync(path.join(demoRoot, 'node_modules', 'x', 'readme.md'), 'skip\n');
+
+const { repos } = listLibraryRepos(hub, registry);
+if (!repos.some((r) => r.id === 'hub-library')) {
+  console.error('missing hub-library', repos);
+  process.exit(16);
+}
+if (!repos.some((r) => r.id === 'repo:demo:demo-repo' && r.available)) {
+  console.error('missing demo repo', repos);
+  process.exit(17);
+}
+
+const tree = getLibraryRepoTree(hub, registry, 'repo:demo:demo-repo');
+const flat = [];
+(function walk(nodes) {
+  for (const n of nodes || []) {
+    if (n.type === 'file') flat.push(n.path);
+    else walk(n.children);
+  }
+})(tree.tree);
+if (!flat.includes('README.md') || !flat.includes('docs/plan.md') || !flat.includes('docs/diagrams/flow.puml')) {
+  console.error('tree missing viewable files', flat);
+  process.exit(18);
+}
+if (flat.some((p) => p.includes('node_modules') || p.endsWith('.env') || p.includes('secret'))) {
+  console.error('tree leaked noise', flat);
+  process.exit(19);
+}
+
+const nested = getLibraryBrowseFile(hub, registry, 'repo:demo:demo-repo', 'docs/plan.md');
+if (!nested.content.includes('Nested') || nested.path !== 'docs/plan.md') {
+  console.error('browse nested', nested);
+  process.exit(20);
+}
+
+// Path escape must fail
+threw = false;
+try {
+  resolveUnderRoot(demoRoot, '../etc/passwd');
+} catch (_e) {
+  threw = true;
+}
+if (!threw) {
+  console.error('browse escape');
+  process.exit(21);
+}
+
+const hubTree = getLibraryRepoTree(hub, registry, 'hub-library');
+const hubFlat = [];
+(function walk(nodes) {
+  for (const n of nodes || []) {
+    if (n.type === 'file') hubFlat.push(n.path);
+    else walk(n.children);
+  }
+})(hubTree.tree);
+if (!hubFlat.includes('README.md') && !hubFlat.some((p) => p.endsWith('.md'))) {
+  console.error('hub library tree empty', hubFlat);
+  process.exit(22);
 }
 
 fs.rmSync(hub, { recursive: true, force: true });

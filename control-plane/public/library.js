@@ -1,0 +1,551 @@
+/* BizAgent Library — named-tab repo accordion browser */
+'use strict';
+
+let libraryRepos = [];
+let libraryTrees = Object.create(null); // repoId -> tree payload
+let libraryExpandedId = '';
+let librarySelected = null; // { repoId, path, id }
+let libraryFilterTimer = null;
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    ...options,
+  });
+  if (res.status === 401) {
+    showAuthGate(true);
+    throw new Error('Login required');
+  }
+  if (!res.ok) {
+    const bodyText = await res.text();
+    let message = bodyText || 'Request failed';
+    try {
+      const body = JSON.parse(bodyText);
+      message = body.error || message;
+    } catch (_err) {
+      /* keep text */
+    }
+    throw new Error(message);
+  }
+  return res.json();
+}
+
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function isSafeHref(url) {
+  return /^(https?:|mailto:|\/|#)/i.test(url);
+}
+
+function isSafeImageSrc(url) {
+  return /^(https?:|\/)/i.test(url);
+}
+
+function parseTableCells(line) {
+  let t = line.trim();
+  if (t.startsWith('|')) t = t.slice(1);
+  if (t.endsWith('|')) t = t.slice(0, -1);
+  return t.split('|').map((cell) => cell.trim());
+}
+
+function isTableSeparator(line) {
+  const cells = parseTableCells(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isTableRow(line) {
+  const t = line.trim();
+  return t.includes('|') && !/^```/.test(t);
+}
+
+function renderInline(text) {
+  const codeSpans = [];
+  let s = text.replace(/`([^`]+)`/g, (_, code) => {
+    codeSpans.push(escapeHtml(code));
+    return `\x00CODESPAN:${codeSpans.length - 1}\x00`;
+  });
+  s = escapeHtml(s);
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  s = s.replace(/_([^_]+)_/g, '<em>$1</em>');
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (match, alt, url) => (
+    isSafeImageSrc(url)
+      ? `<img src="${url}" alt="${alt}" loading="lazy">`
+      : match
+  ));
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, url) => (
+    isSafeHref(url)
+      ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
+      : match
+  ));
+  s = s.replace(/\x00CODESPAN:(\d+)\x00/g, (_, i) => `<code>${codeSpans[Number(i)]}</code>`);
+  return s;
+}
+
+function renderMarkdown(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  const htmlParts = [];
+  let paragraphBuffer = [];
+  let listBuffer = null;
+
+  const flushParagraph = () => {
+    if (paragraphBuffer.length) {
+      htmlParts.push(`<p>${paragraphBuffer.map(renderInline).join('<br>')}</p>`);
+      paragraphBuffer = [];
+    }
+  };
+  const flushList = () => {
+    if (listBuffer) {
+      const tag = listBuffer.type;
+      htmlParts.push(`<${tag}>${listBuffer.items.map((item) => `<li>${renderInline(item)}</li>`).join('')}</${tag}>`);
+      listBuffer = null;
+    }
+  };
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (/^```/.test(line)) {
+      flushParagraph();
+      flushList();
+      const codeLines = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++;
+      htmlParts.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    if (i + 1 < lines.length && isTableRow(line) && isTableSeparator(lines[i + 1])) {
+      flushParagraph();
+      flushList();
+      const headers = parseTableCells(line);
+      i += 2;
+      const bodyRows = [];
+      while (i < lines.length && isTableRow(lines[i]) && !isTableSeparator(lines[i]) && lines[i].trim() !== '') {
+        bodyRows.push(parseTableCells(lines[i]));
+        i++;
+      }
+      const thead = `<thead><tr>${headers.map((h) => `<th>${renderInline(h)}</th>`).join('')}</tr></thead>`;
+      const tbody = bodyRows.length
+        ? `<tbody>${bodyRows.map((row) => `<tr>${row.map((c) => `<td>${renderInline(c)}</td>`).join('')}</tr>`).join('')}</tbody>`
+        : '';
+      htmlParts.push(`<table>${thead}${tbody}</table>`);
+      continue;
+    }
+
+    const headerMatch = /^(#{1,6})\s+(.*)/.exec(line);
+    if (headerMatch) {
+      flushParagraph();
+      flushList();
+      const level = headerMatch[1].length;
+      htmlParts.push(`<h${level}>${renderInline(headerMatch[2])}</h${level}>`);
+      i++;
+      continue;
+    }
+
+    const ulMatch = /^[-*+]\s+(.*)/.exec(line);
+    if (ulMatch) {
+      flushParagraph();
+      if (!listBuffer || listBuffer.type !== 'ul') {
+        flushList();
+        listBuffer = { type: 'ul', items: [] };
+      }
+      listBuffer.items.push(ulMatch[1]);
+      i++;
+      continue;
+    }
+
+    const olMatch = /^\d+\.\s+(.*)/.exec(line);
+    if (olMatch) {
+      flushParagraph();
+      if (!listBuffer || listBuffer.type !== 'ol') {
+        flushList();
+        listBuffer = { type: 'ol', items: [] };
+      }
+      listBuffer.items.push(olMatch[1]);
+      i++;
+      continue;
+    }
+
+    if (line.trim() === '') {
+      flushParagraph();
+      flushList();
+      i++;
+      continue;
+    }
+
+    flushList();
+    paragraphBuffer.push(line);
+    i++;
+  }
+  flushParagraph();
+  flushList();
+  return htmlParts.join('\n') || '<p class="company-file-empty">(empty)</p>';
+}
+
+function showAuthGate(on) {
+  const gate = document.getElementById('libraryAuthGate');
+  const main = document.getElementById('libraryMain');
+  const label = document.getElementById('libraryAuthLabel');
+  if (gate) gate.hidden = !on;
+  if (main) main.hidden = !!on;
+  if (label) {
+    label.textContent = on ? 'Login required' : 'Signed in';
+    label.dataset.kind = on ? 'warn' : 'ok';
+  }
+}
+
+function setLibraryStatus(message, kind = 'neutral') {
+  const status = document.getElementById('libraryStatus');
+  if (!status) return;
+  if (!message) {
+    status.hidden = true;
+    status.textContent = '';
+    return;
+  }
+  status.hidden = false;
+  status.textContent = message;
+  status.dataset.kind = kind;
+}
+
+function setLibraryDownloadEnabled(on) {
+  const btn = document.getElementById('libraryDownloadBtn');
+  if (btn) btn.disabled = !on;
+}
+
+function setLibrarySourceVisible(on) {
+  const btn = document.getElementById('librarySourceBtn');
+  if (btn) {
+    btn.hidden = !on;
+    btn.disabled = !on;
+  }
+}
+
+function libraryFilterQuery() {
+  const el = document.getElementById('libraryFilter');
+  return ((el && el.value) || '').trim().toLowerCase();
+}
+
+function libraryEntryKind(doc) {
+  if (!doc) return 'document';
+  const k = String(doc.kind || doc.type || '').toLowerCase();
+  if (k === 'diagram' || k === 'image') return 'diagram';
+  if (k === 'plantuml') return 'plantuml';
+  const p = String(doc.path || doc.name || '').toLowerCase();
+  if (p.endsWith('.svg') || p.endsWith('.png')) return 'diagram';
+  if (p.endsWith('.puml') || p.endsWith('.plantuml')) return 'plantuml';
+  return 'document';
+}
+
+function librarySourceBlock(doc) {
+  const sourceText = doc.source_content
+    || ((String(doc.ext || doc.path || '').toLowerCase().match(/\.puml$|\.plantuml$/))
+      ? doc.content
+      : '');
+  if (!sourceText) return '';
+  return `<details class="library-diagram-source"><summary>View PlantUML source</summary>`
+    + `<pre class="library-source-pre">${escapeHtml(sourceText)}</pre></details>`;
+}
+
+function fileApiUrl(repoId, filePath, extra = {}) {
+  const qs = new URLSearchParams();
+  qs.set('repo', repoId);
+  qs.set('path', filePath);
+  for (const [k, v] of Object.entries(extra)) {
+    if (v != null && v !== '') qs.set(k, String(v));
+  }
+  return `/api/library/file?${qs.toString()}`;
+}
+
+function nodeMatchesFilter(node, q) {
+  if (!q) return true;
+  if (node.type === 'file') {
+    return String(node.name || '').toLowerCase().includes(q)
+      || String(node.path || '').toLowerCase().includes(q);
+  }
+  const kids = Array.isArray(node.children) ? node.children : [];
+  return kids.some((c) => nodeMatchesFilter(c, q));
+}
+
+function filterTree(nodes, q) {
+  if (!q) return nodes || [];
+  const out = [];
+  for (const n of nodes || []) {
+    if (n.type === 'file') {
+      if (nodeMatchesFilter(n, q)) out.push(n);
+      continue;
+    }
+    if (!nodeMatchesFilter(n, q)) continue;
+    const kids = filterTree(n.children || [], q);
+    if (kids.length) out.push({ ...n, children: kids });
+  }
+  return out;
+}
+
+function renderTreeNodes(nodes, repoId, depth) {
+  const ul = document.createElement('ul');
+  ul.className = depth === 0 ? 'library-tree library-tree-root' : 'library-tree';
+  for (const node of nodes || []) {
+    const li = document.createElement('li');
+    if (node.type === 'dir') {
+      li.className = 'library-tree-dir';
+      const label = document.createElement('div');
+      label.className = 'library-tree-dir-label';
+      label.textContent = node.name;
+      li.appendChild(label);
+      li.appendChild(renderTreeNodes(node.children || [], repoId, depth + 1));
+    } else {
+      li.className = 'library-tree-file';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'library-tree-file-btn';
+      btn.dataset.repo = repoId;
+      btn.dataset.path = node.path;
+      const kind = libraryEntryKind(node);
+      const badge = (kind === 'plantuml' || kind === 'diagram') ? ' · diagram' : '';
+      btn.innerHTML = `<span class="library-tree-file-name">${escapeHtml(node.name)}</span>`
+        + `<span class="library-tree-file-meta">${escapeHtml(badge.trim())}</span>`;
+      if (
+        librarySelected
+        && librarySelected.repoId === repoId
+        && librarySelected.path === node.path
+      ) {
+        btn.classList.add('is-selected');
+      }
+      btn.addEventListener('click', () => openLibraryFile(repoId, node.path));
+      li.appendChild(btn);
+    }
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+function renderAccordion() {
+  const root = document.getElementById('libraryAccordion');
+  if (!root) return;
+  root.innerHTML = '';
+  if (!libraryRepos.length) {
+    root.innerHTML = '<p class="company-file-empty">No project repos found in registry.</p>';
+    return;
+  }
+  const q = libraryFilterQuery();
+
+  for (const repo of libraryRepos) {
+    const item = document.createElement('div');
+    item.className = 'library-acc-item';
+    item.dataset.repoId = repo.id;
+    if (libraryExpandedId === repo.id) item.classList.add('is-expanded');
+
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'library-acc-head';
+    head.setAttribute('aria-expanded', libraryExpandedId === repo.id ? 'true' : 'false');
+    const product = repo.kind === 'hub-library'
+      ? 'Hub'
+      : (repo.product_name || repo.product || '');
+    const avail = repo.available === false ? ' · offline' : '';
+    head.innerHTML = `<span class="library-acc-chevron" aria-hidden="true"></span>`
+      + `<span class="library-acc-title">${escapeHtml(repo.label || repo.name)}</span>`
+      + `<span class="library-acc-meta">${escapeHtml(product)}${escapeHtml(avail)}</span>`;
+    head.addEventListener('click', () => toggleRepo(repo.id));
+    item.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'library-acc-body';
+    if (libraryExpandedId === repo.id) {
+      const cached = libraryTrees[repo.id];
+      if (!cached) {
+        body.innerHTML = '<p class="company-file-empty">Loading…</p>';
+      } else if (cached.error) {
+        body.innerHTML = `<p class="company-file-empty">${escapeHtml(cached.error)}</p>`;
+      } else {
+        const tree = filterTree(cached.tree || [], q);
+        if (!tree.length) {
+          body.innerHTML = q
+            ? '<p class="company-file-empty">No viewable files match this filter.</p>'
+            : '<p class="company-file-empty">No viewable files in this repo.</p>';
+        } else {
+          body.appendChild(renderTreeNodes(tree, repo.id, 0));
+          if (cached.truncated) {
+            const note = document.createElement('p');
+            note.className = 'library-tree-truncated';
+            note.textContent = 'Tree truncated (too many nodes).';
+            body.appendChild(note);
+          }
+        }
+      }
+    }
+    item.appendChild(body);
+    root.appendChild(item);
+  }
+}
+
+async function toggleRepo(repoId) {
+  if (libraryExpandedId === repoId) {
+    libraryExpandedId = '';
+    renderAccordion();
+    return;
+  }
+  libraryExpandedId = repoId;
+  renderAccordion();
+  if (!libraryTrees[repoId]) {
+    try {
+      const data = await api(`/api/library/tree?repo=${encodeURIComponent(repoId)}`);
+      libraryTrees[repoId] = data;
+    } catch (err) {
+      libraryTrees[repoId] = { error: err.message || 'Failed to load tree', tree: [] };
+    }
+    if (libraryExpandedId === repoId) renderAccordion();
+  }
+}
+
+async function openLibraryFile(repoId, filePath) {
+  const titleEl = document.getElementById('libraryPreviewTitle');
+  const bodyEl = document.getElementById('libraryPreviewBody');
+  if (!bodyEl) return;
+  librarySelected = { repoId, path: filePath, id: `${repoId}:${filePath}` };
+  bodyEl.innerHTML = '<p class="company-file-empty">Loading…</p>';
+  setLibraryDownloadEnabled(false);
+  setLibrarySourceVisible(false);
+  document.querySelectorAll('.library-tree-file-btn').forEach((el) => {
+    el.classList.toggle(
+      'is-selected',
+      el.dataset.repo === repoId && el.dataset.path === filePath,
+    );
+  });
+
+  try {
+    const kindHint = libraryEntryKind({ path: filePath });
+    const qs = kindHint === 'plantuml'
+      ? fileApiUrl(repoId, filePath, { render: '1', format: 'svg' })
+      : fileApiUrl(repoId, filePath);
+    const doc = await api(qs);
+    if (titleEl) {
+      const repo = libraryRepos.find((r) => r.id === repoId);
+      const prefix = repo ? `${repo.label || repo.name} / ` : '';
+      titleEl.textContent = `${prefix}${doc.title || doc.path || filePath}`;
+    }
+    const kind = libraryEntryKind(doc);
+    const metaPath = doc.source_path
+      ? `${doc.path} (source ${doc.source_path})`
+      : (doc.path || filePath);
+    const sourceHtml = librarySourceBlock(doc);
+    if (kind === 'plantuml' && doc.svg) {
+      bodyEl.innerHTML = `<div class="library-diagram">${doc.svg}</div>`
+        + `<p class="library-diagram-meta"><code>${escapeHtml(metaPath)}</code> · rendered SVG</p>`
+        + sourceHtml;
+    } else if (kind === 'diagram' || kind === 'plantuml') {
+      const ext = String(doc.ext || doc.path || '').toLowerCase();
+      if (ext.endsWith('.svg') && doc.content && /<svg/i.test(doc.content)) {
+        bodyEl.innerHTML = `<div class="library-diagram">${doc.content}</div>`
+          + `<p class="library-diagram-meta"><code>${escapeHtml(metaPath)}</code></p>`
+          + sourceHtml;
+      } else {
+        const rawUrl = fileApiUrl(repoId, filePath, { raw: '1' });
+        bodyEl.innerHTML = `<div class="library-diagram"><img class="library-diagram-img" src="${rawUrl}" alt="${escapeHtml(doc.title || doc.path || 'diagram')}"></div>`
+          + `<p class="library-diagram-meta"><code>${escapeHtml(metaPath)}</code></p>`
+          + sourceHtml;
+      }
+    } else {
+      bodyEl.innerHTML = renderMarkdown(doc.content || '');
+    }
+    setLibraryDownloadEnabled(true);
+    const hasSource = !!(doc.source_path || kind === 'plantuml' || doc.source_content);
+    setLibrarySourceVisible(hasSource);
+  } catch (err) {
+    bodyEl.innerHTML = `<p class="company-file-empty">${escapeHtml(err.message || 'Failed to load')}</p>`;
+  }
+}
+
+function downloadLibraryDoc() {
+  if (!librarySelected) return;
+  const a = document.createElement('a');
+  a.href = fileApiUrl(librarySelected.repoId, librarySelected.path, { download: '1' });
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function downloadLibrarySource() {
+  if (!librarySelected) return;
+  const a = document.createElement('a');
+  a.href = fileApiUrl(librarySelected.repoId, librarySelected.path, {
+    source: '1',
+    download: '1',
+  });
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function refreshLibraryRepos() {
+  setLibraryStatus('');
+  const root = document.getElementById('libraryAccordion');
+  if (root) root.innerHTML = '<p class="company-file-empty">Loading…</p>';
+  try {
+    const data = await api('/api/library/repos');
+    libraryRepos = Array.isArray(data.repos) ? data.repos : [];
+    // Drop cached trees so Refresh re-reads disk.
+    libraryTrees = Object.create(null);
+    const keep = libraryExpandedId;
+    libraryExpandedId = '';
+    renderAccordion();
+    if (keep) await toggleRepo(keep);
+  } catch (err) {
+    if (root) root.innerHTML = '';
+    libraryRepos = [];
+    setLibraryStatus(err.message || 'Failed to list repos', 'warn');
+  }
+}
+
+async function initLibraryPage() {
+  document.title = 'BizAgent Library';
+  try {
+    await api('/api/state');
+    showAuthGate(false);
+  } catch (_err) {
+    showAuthGate(true);
+    return;
+  }
+
+  const refreshBtn = document.getElementById('libraryRefresh');
+  if (refreshBtn) refreshBtn.addEventListener('click', () => refreshLibraryRepos());
+  const dlBtn = document.getElementById('libraryDownloadBtn');
+  if (dlBtn) dlBtn.addEventListener('click', () => downloadLibraryDoc());
+  const srcBtn = document.getElementById('librarySourceBtn');
+  if (srcBtn) srcBtn.addEventListener('click', () => downloadLibrarySource());
+  const filter = document.getElementById('libraryFilter');
+  if (filter) {
+    filter.addEventListener('input', () => {
+      clearTimeout(libraryFilterTimer);
+      libraryFilterTimer = setTimeout(() => renderAccordion(), 120);
+    });
+  }
+
+  await refreshLibraryRepos();
+  // Auto-expand hub library for a useful first view.
+  if (libraryRepos.some((r) => r.id === 'hub-library')) {
+    await toggleRepo('hub-library');
+  }
+}
+
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => initLibraryPage());
+  } else {
+    initLibraryPage();
+  }
+}
