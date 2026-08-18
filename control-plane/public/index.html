@@ -62,39 +62,6 @@
       </form>
     </section>
 
-    <section class="library-shell" id="libraryShell" hidden>
-      <header class="topbar library-topbar">
-        <div class="library-topbar-left">
-          <button id="libraryBackBtn" type="button" class="btn-secondary" title="Back to chat">← Chat</button>
-          <h2 class="library-page-title">Library</h2>
-        </div>
-        <div class="auth-controls">
-          <button id="libraryRefresh" type="button" class="btn-secondary">Refresh</button>
-          <button id="librarySourceBtn" type="button" class="btn-secondary" hidden disabled title="Download PlantUML source (.puml)">Source</button>
-          <button id="libraryDownloadBtn" type="button" class="btn-secondary" disabled title="Download selected document or diagram image">Download</button>
-        </div>
-      </header>
-      <div class="library-page-body">
-        <p class="company-help library-help">
-          Plans, specs, and diagrams written for you on the hub.
-          Agents and the hub save deliverables under <code>library/</code>
-          (markdown plus <code>.puml</code> — click a diagram entry to see the rendered image).
-        </p>
-        <div class="library-layout">
-          <div class="library-sidebar">
-            <input id="libraryFilter" type="search" class="library-filter" placeholder="Filter by title…" autocomplete="off">
-            <ul id="libraryList" class="company-file-list library-list"></ul>
-          </div>
-          <div class="library-preview">
-            <div id="libraryPreviewTitle" class="library-preview-title">Select a document</div>
-            <div id="libraryPreviewBody" class="library-preview-body message-body">
-              <p class="company-file-empty">Nothing selected.</p>
-            </div>
-          </div>
-        </div>
-        <p id="libraryStatus" class="modal-status auth-status" hidden></p>
-      </div>
-    </section>
   </main>
 
   <div id="plantumlModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="plantumlModalTitle">

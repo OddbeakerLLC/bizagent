@@ -219,6 +219,357 @@ function resolveLibraryFile(hub, relPath) {
   return { root, abs, rel: name };
 }
 
+/** Directories never shown in Library tree browse (noise / secrets / huge trees). */
+const BROWSE_SKIP_DIRS = new Set([
+  '.git',
+  'node_modules',
+  '.bizagent',
+  'logs',
+  'inbox',
+  'outbox',
+  'archive',
+  '__pycache__',
+  '.venv',
+  'venv',
+  'dist',
+  'build',
+  'coverage',
+  '.next',
+  '.turbo',
+  '.cache',
+  'tmp',
+  'temp',
+]);
+
+const MAX_TREE_NODES = 2500;
+const MAX_TREE_DEPTH = 8;
+
+function isViewableLibraryExt(ext) {
+  return ALLOWED_EXT.has(String(ext || '').toLowerCase());
+}
+
+function safeRelSegments(relPath) {
+  const parts = String(relPath || '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.some((p) => p === '.' || p === '..' || p.includes('\0'))) {
+    throw new Error('path escapes root');
+  }
+  if (parts.some((p) => p.startsWith('.'))) {
+    throw new Error('dotfiles not allowed');
+  }
+  return parts;
+}
+
+/**
+ * Resolve a relative path under an absolute root (no escape).
+ * Empty rel → root itself.
+ */
+function resolveUnderRoot(rootAbs, relPath) {
+  const root = path.resolve(rootAbs);
+  const parts = safeRelSegments(relPath);
+  const abs = parts.length ? path.resolve(root, ...parts) : root;
+  const rootSep = root.endsWith(path.sep) ? root : root + path.sep;
+  if (abs !== root && !abs.startsWith(rootSep)) {
+    throw new Error('path escapes root');
+  }
+  return { root, abs, rel: parts.join('/') };
+}
+
+function titleFromManifest(hub) {
+  const map = new Map();
+  try {
+    const man = readManifest(hub);
+    for (const e of man.entries || []) {
+      if (!e || !e.path) continue;
+      const key = String(e.path).replace(/\\/g, '/');
+      map.set(key, e);
+      if (e.source_path) map.set(String(e.source_path).replace(/\\/g, '/'), e);
+      if (e.id) map.set(`id:${e.id}`, e);
+    }
+  } catch (_err) {
+    /* ignore */
+  }
+  return map;
+}
+
+/**
+ * List registry project repos (+ hub library entry) for Library accordion nav.
+ * @returns {{ repos: Array<object> }}
+ */
+function listLibraryRepos(hub, registry) {
+  const { resolveProjectPath, agentsFromRegistry } = require('./config');
+  const repos = [];
+  const seen = new Set();
+
+  // Hub curated library/ first — operator-facing deliverables.
+  try {
+    ensureLibrary(hub);
+  } catch (_err) {
+    /* still list entry */
+  }
+  repos.push({
+    id: 'hub-library',
+    name: 'Hub library',
+    label: 'Hub library',
+    kind: 'hub-library',
+    product: 'hub',
+    product_name: 'BizAgent',
+    path: 'library/',
+    available: true,
+  });
+  seen.add(path.resolve(libraryRoot(hub)));
+
+  const agents = agentsFromRegistry(registry || {}, hub);
+  for (const agent of agents) {
+    const projects = Array.isArray(agent.projects) ? agent.projects : [];
+    for (const proj of projects) {
+      const name = String(proj.name || '').trim();
+      if (!name) continue;
+      const abs = resolveProjectPath(hub, proj.path);
+      if (!abs) continue;
+      const key = path.resolve(abs);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let available = false;
+      try {
+        available = fs.existsSync(abs) && fs.statSync(abs).isDirectory();
+      } catch (_err) {
+        available = false;
+      }
+      repos.push({
+        id: `repo:${agent.slug}:${name}`,
+        name,
+        label: name,
+        kind: 'project',
+        product: agent.slug,
+        product_name: agent.name || agent.slug,
+        path: String(proj.path || ''),
+        remote: String(proj.remote || ''),
+        available,
+      });
+    }
+  }
+
+  return { repos };
+}
+
+function findRepoById(hub, registry, repoId) {
+  const { repos } = listLibraryRepos(hub, registry);
+  const id = String(repoId || '').trim();
+  const hit = repos.find((r) => r.id === id);
+  if (!hit) throw new Error('repo not found');
+  if (hit.kind === 'hub-library') {
+    return {
+      ...hit,
+      rootAbs: libraryRoot(hub),
+      browseRootLabel: 'library',
+    };
+  }
+  const { resolveProjectPath } = require('./config');
+  const rootAbs = resolveProjectPath(hub, hit.path);
+  if (!rootAbs || !fs.existsSync(rootAbs) || !fs.statSync(rootAbs).isDirectory()) {
+    throw new Error('repo path not available on disk');
+  }
+  return {
+    ...hit,
+    rootAbs,
+    browseRootLabel: hit.name,
+  };
+}
+
+/**
+ * Build a filtered tree of viewable files + directories under a repo.
+ * Only dirs that contain (recursively) at least one viewable file are kept.
+ */
+function buildViewableTree(rootAbs, { maxNodes = MAX_TREE_NODES, maxDepth = MAX_TREE_DEPTH } = {}) {
+  let nodes = 0;
+
+  function walk(dirAbs, relBase, depth) {
+    if (depth > maxDepth) return [];
+    let entries;
+    try {
+      entries = fs.readdirSync(dirAbs, { withFileTypes: true });
+    } catch (_err) {
+      return [];
+    }
+    const dirs = [];
+    const files = [];
+    for (const ent of entries) {
+      if (!ent || !ent.name) continue;
+      if (ent.name.startsWith('.')) continue;
+      if (ent.isSymbolicLink && ent.isSymbolicLink()) continue;
+      const abs = path.join(dirAbs, ent.name);
+      const rel = relBase ? `${relBase}/${ent.name}` : ent.name;
+      let st;
+      try {
+        st = fs.lstatSync(abs);
+      } catch (_err) {
+        continue;
+      }
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) {
+        if (BROWSE_SKIP_DIRS.has(ent.name)) continue;
+        dirs.push({ name: ent.name, abs, rel });
+      } else if (st.isFile()) {
+        const ext = extOf(ent.name);
+        if (!isViewableLibraryExt(ext)) continue;
+        files.push({ name: ent.name, abs, rel, ext, size: st.size, mtime: st.mtime.toISOString() });
+      }
+    }
+    dirs.sort((a, b) => a.name.localeCompare(b.name));
+    files.sort((a, b) => a.name.localeCompare(b.name));
+
+    const children = [];
+    for (const d of dirs) {
+      if (nodes >= maxNodes) break;
+      const kids = walk(d.abs, d.rel, depth + 1);
+      if (!kids.length) continue; // drop empty / noise-only dirs
+      nodes += 1;
+      children.push({
+        type: 'dir',
+        name: d.name,
+        path: d.rel,
+        children: kids,
+      });
+    }
+    for (const f of files) {
+      if (nodes >= maxNodes) break;
+      nodes += 1;
+      children.push({
+        type: 'file',
+        name: f.name,
+        path: f.rel,
+        ext: f.ext,
+        size: f.size,
+        mtime: f.mtime,
+        kind: kindForEntry(null, f.rel),
+      });
+    }
+    return children;
+  }
+
+  const tree = walk(path.resolve(rootAbs), '', 0);
+  return { tree, node_count: nodes, truncated: nodes >= maxNodes };
+}
+
+function getLibraryRepoTree(hub, registry, repoId) {
+  const repo = findRepoById(hub, registry, repoId);
+  const { tree, node_count, truncated } = buildViewableTree(repo.rootAbs);
+  return {
+    repo: {
+      id: repo.id,
+      name: repo.name,
+      label: repo.label || repo.name,
+      kind: repo.kind,
+      product: repo.product,
+      product_name: repo.product_name,
+      path: repo.path,
+      available: true,
+    },
+    tree,
+    node_count,
+    truncated,
+  };
+}
+
+/**
+ * Read a viewable file from a repo tree (or hub library/) for Library preview.
+ * Supports nested paths. Manifest metadata applied when path matches hub library/.
+ */
+function getLibraryBrowseFile(hub, registry, repoId, relPath) {
+  const repo = findRepoById(hub, registry, repoId);
+  const { abs, rel } = resolveUnderRoot(repo.rootAbs, relPath);
+  if (!rel) throw new Error('path required');
+  if (!fs.existsSync(abs)) throw new Error('not found');
+  const st = fs.statSync(abs);
+  if (!st.isFile()) throw new Error('not a file');
+  if (st.size > MAX_BYTES) throw new Error('file too large to view');
+  const ext = extOf(rel);
+  if (!isViewableLibraryExt(ext)) throw new Error('file type not viewable in Library');
+
+  const text = isTextLibraryExt(ext);
+  const content = text ? fs.readFileSync(abs, 'utf8') : null;
+  const base = {
+    id: `${repo.id}:${rel}`,
+    title: path.basename(rel),
+    path: rel,
+    repo_id: repo.id,
+    repo_name: repo.name,
+    source: repo.kind === 'hub-library' ? 'library' : 'repo',
+    tags: [],
+    created_at: st.mtime.toISOString(),
+  };
+
+  // Overlay hub library/manifest metadata when browsing hub-library.
+  if (repo.kind === 'hub-library') {
+    const man = titleFromManifest(hub);
+    const hit = man.get(rel);
+    if (hit) {
+      if (hit.id) base.manifest_id = hit.id;
+      if (hit.title) base.title = hit.title;
+      if (hit.source) base.source = hit.source;
+      if (Array.isArray(hit.tags)) base.tags = hit.tags;
+      if (hit.created_at) base.created_at = hit.created_at;
+      if (hit.source_path) base.source_path = hit.source_path;
+      if (hit.kind) base.kind = hit.kind;
+      if (hit.type) base.type = hit.type;
+    }
+  }
+
+  const enriched = enrichEntry(base, st);
+  let source_content = null;
+  if (base.source_path) {
+    try {
+      const src = resolveUnderRoot(repo.rootAbs, base.source_path);
+      if (fs.existsSync(src.abs) && isTextLibraryExt(extOf(src.rel))) {
+        source_content = fs.readFileSync(src.abs, 'utf8');
+      }
+    } catch (_err) {
+      /* ignore */
+    }
+  } else if (IMAGE_EXT.has(ext)) {
+    // Companion .puml next to rendered image (common convention).
+    const stem = stemOf(path.basename(rel));
+    const dir = path.dirname(rel);
+    for (const pumlExt of ['.puml', '.plantuml']) {
+      const candidate = dir && dir !== '.' ? `${dir}/${stem}${pumlExt}` : `${stem}${pumlExt}`;
+      try {
+        const src = resolveUnderRoot(repo.rootAbs, candidate);
+        if (fs.existsSync(src.abs)) {
+          source_content = fs.readFileSync(src.abs, 'utf8');
+          enriched.source_path = candidate;
+          break;
+        }
+      } catch (_err) {
+        /* ignore */
+      }
+    }
+  }
+
+  return {
+    ...enriched,
+    content: content == null ? '' : content,
+    binary: !text,
+    source_content,
+  };
+}
+
+/** Resolve absolute path for a browse file (raw/download/render). */
+function resolveBrowseFile(hub, registry, repoId, relPath) {
+  const repo = findRepoById(hub, registry, repoId);
+  const { abs, rel } = resolveUnderRoot(repo.rootAbs, relPath);
+  if (!rel) throw new Error('path required');
+  if (!fs.existsSync(abs)) throw new Error('not found');
+  const st = fs.statSync(abs);
+  if (!st.isFile()) throw new Error('not a file');
+  const ext = extOf(rel);
+  if (!isViewableLibraryExt(ext)) throw new Error('file type not viewable in Library');
+  return { repo, abs, rel, ext, st };
+}
+
 function stemOf(filename) {
   return String(filename || '').replace(/\.[^.]+$/, '');
 }
@@ -446,25 +797,36 @@ function addLibraryDiagram(hub, opts = {}) {
 
 module.exports = {
   ALLOWED_EXT,
+  BROWSE_SKIP_DIRS,
   DIAGRAM_EXT,
   IMAGE_EXT,
   MAX_BYTES,
+  MAX_TREE_DEPTH,
+  MAX_TREE_NODES,
   PLANTUML_EXT,
   TEXT_EXT,
   addLibraryDiagram,
   addLibraryDocument,
+  buildViewableTree,
   contentTypeForExt,
   ensureLibrary,
   extOf,
+  findRepoById,
+  getLibraryBrowseFile,
   getLibraryEntry,
+  getLibraryRepoTree,
   isDiagramLibraryExt,
   isTextLibraryExt,
+  isViewableLibraryExt,
   kindForEntry,
   libraryRoot,
   listLibrary,
+  listLibraryRepos,
   readManifest,
   renderPumlBeside,
+  resolveBrowseFile,
   resolveLibraryFile,
+  resolveUnderRoot,
   safeFilename,
   writeManifest,
 };
