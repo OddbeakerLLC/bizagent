@@ -1023,6 +1023,8 @@ async function handleApi(config, req, res) {
   }
 
   // --- Library (operator-facing plans/specs; browser viewer) ---
+  // Filesystem walk of hub docs/company/reports + registry project repos.
+  // No library/manifest.json.
   if (url.pathname === "/api/library" && req.method === "GET") {
     try {
       ensureLibrary(config.hub);
@@ -1035,7 +1037,7 @@ async function handleApi(config, req, res) {
     }
   }
 
-  // Repo accordion roots (registry projects + hub library/).
+  // Accordion roots: Hub (filtered) + registry project repos.
   if (url.pathname === "/api/library/repos" && req.method === "GET") {
     try {
       ensureLibrary(config.hub);
@@ -1169,7 +1171,8 @@ async function handleApi(config, req, res) {
         return send(res, 200, doc);
       }
 
-      // Legacy manifest id lookup (kept for older links / downloads).
+      // Legacy id/path lookup (old deep links / downloads). Resolves under
+      // docs|company|reports (and legacy library/) without manifest.json.
       const legacyId = id || (relPath && !repoId ? relPath : "");
       if (!legacyId) return send(res, 400, { error: "id or repo+path required" });
       const doc = getLibraryEntry(config.hub, legacyId);

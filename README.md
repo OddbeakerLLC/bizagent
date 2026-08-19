@@ -182,10 +182,11 @@ your `registry.json`).
 - **Agent rail** — left sidebar: each agent with a status light, **`provider >> model`**
   (click to change LLM), expand for inbox / last dispatch / journal
 - **Agent detail panel** — expand a row for inbox count, last-dispatched time, journal snippet
-- **Library** — topbar **Library** browses operator-facing plans/specs/**diagrams** under hub
-  `library/` (markdown + rendered PlantUML SVG). Click a diagram entry to see the image;
-  agents write `.puml`, render `.svg`, register both in `manifest.json`.
-  `GET /api/library`, `GET /api/library/file` (`?raw=1`, `?download=1`, `?source=1`, `?render=1`)
+- **Library** — topbar **Library** opens a named-tab accordion: **Hub**
+  (`docs/`, `company/`, `reports/` only) plus each registry project repo.
+  Markdown and PlantUML/SVG diagrams render in-browser (no `library/manifest.json`).
+  `GET /api/library/repos`, `GET /api/library/tree?repo=…`,
+  `GET /api/library/file?repo=&path=` (`?raw=1`, `?download=1`, `?source=1`, `?render=1`)
 - **Company files** — topbar **Company** uploads into hub `company/` (Knowledge Stack
   inputs) when you cannot reach the hub disk; `GET/POST /api/company/files`
 - **Dynamic page title** — browser tab reads `BizAgent — {org name}` from `registry.json`

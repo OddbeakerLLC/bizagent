@@ -13,12 +13,21 @@ grep -q 'bizagent-library\|openLibraryTab' "$ROOT/control-plane/public/app.js" |
 [ -f "$ROOT/control-plane/public/library.js" ] || fail "library.js (page) missing"
 grep -q 'library-accordion\|libraryAccordion' "$ROOT/control-plane/public/library.html" || fail "library page missing accordion root"
 grep -q 'library-diagram\|libraryEntryKind\|render=1\|render:' "$ROOT/control-plane/public/library.js" || fail "library page missing diagram preview path"
-grep -q "library/" "$ROOT/control-plane/lib/hub-memory.js" || fail "hub prompt missing library convention"
+grep -qE "docs/|company/|reports/" "$ROOT/control-plane/lib/hub-memory.js" || fail "hub prompt missing library hub-dir convention"
 grep -qE "\.puml|ALLOWED_EXT.*puml|puml" "$ROOT/control-plane/lib/library.js" || fail "library.js missing .puml allowlist"
 grep -q 'contentTypeForExt' "$ROOT/control-plane/lib/library.js" || fail "library.js missing contentTypeForExt"
 grep -q 'listLibraryRepos\|getLibraryRepoTree\|getLibraryBrowseFile' "$ROOT/control-plane/lib/library.js" || fail "library.js missing repo tree browse helpers"
+grep -q 'HUB_INCLUDE_DIRS\|includeOnly' "$ROOT/control-plane/lib/library.js" || fail "library.js missing hub include filters"
 grep -q 'raw=1\|wantRaw\|raw ===' "$ROOT/control-plane/server.js" || fail "server missing library raw serve"
 grep -q 'image/svg+xml\|contentTypeForExt' "$ROOT/control-plane/server.js" || fail "server missing svg content-type path"
+# No manifest.json dependency (code must not read/write it; comments may mention removal)
+if grep -E 'readManifest|writeManifest|manifestPath' "$ROOT/control-plane/lib/library.js" >/dev/null; then
+  fail "library.js still has manifest read/write helpers"
+fi
+if [ -f "$ROOT/library/manifest.json" ]; then
+  fail "library/manifest.json should be removed"
+fi
+[ -f "$ROOT/docs/diagrams/smoke-library-diagram.puml" ] || fail "smoke diagram not migrated to docs/diagrams/"
 
 node - "$ROOT" <<'NODE' || fail "library unit checks failed"
 const fs = require('fs');
@@ -36,12 +45,14 @@ const {
   resolveLibraryFile,
   resolveUnderRoot,
   ALLOWED_EXT,
+  HUB_INCLUDE_DIRS,
 } = require(path.join(process.argv[2], 'control-plane/lib/library'));
 
 const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'ba-lib-'));
 
+// Path escape under resolveUnderRoot
 let threw = false;
-try { resolveLibraryFile(hub, '../etc/passwd'); } catch (_e) { threw = true; }
+try { resolveUnderRoot(hub, '../etc/passwd'); } catch (_e) { threw = true; }
 if (!threw) { console.error('escape'); process.exit(1); }
 
 const e = addLibraryDocument(hub, {
@@ -50,15 +61,22 @@ const e = addLibraryDocument(hub, {
   source: 'hub',
   tags: ['plan'],
 });
-if (!e.id || e.path.indexOf('.md') < 0) { console.error(e); process.exit(2); }
+if (!e.id || e.path.indexOf('.md') < 0 || !e.path.startsWith('docs/')) {
+  console.error(e);
+  process.exit(2);
+}
 
 const listed = listLibrary(hub);
-if (!listed.entries.some((x) => x.id === e.id)) {
+if (!listed.entries.some((x) => x.path === e.path || x.id === e.id || x.path.endsWith(path.basename(e.path)))) {
   console.error('list', listed);
   process.exit(3);
 }
+if (!Array.isArray(listed.include) || !listed.include.includes('docs')) {
+  console.error('list include', listed.include);
+  process.exit(3);
+}
 
-const got = getLibraryEntry(hub, e.id);
+const got = getLibraryEntry(hub, e.path);
 if (!got.content.includes('Do the thing')) {
   console.error('get', got);
   process.exit(4);
@@ -93,25 +111,26 @@ if (contentTypeForExt('.png') !== 'image/png') {
   process.exit(8);
 }
 
-// Store a pre-rendered SVG diagram entry
+// Store a pre-rendered SVG diagram under docs/diagrams
 const svgBody = '<svg xmlns="http://www.w3.org/2000/svg"><text y="20">ok</text></svg>\n';
 const pumlBody = '@startuml\nAlice -> Bob: hi\n@enduml\n';
-fs.writeFileSync(path.join(hub, 'library', 'pair.puml'), pumlBody);
+fs.mkdirSync(path.join(hub, 'docs', 'diagrams'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'docs', 'diagrams', 'pair.puml'), pumlBody);
 const diag = addLibraryDocument(hub, {
   title: 'Paired diagram',
   filename: 'pair.svg',
   content: svgBody,
   source: 'hub',
-  source_path: 'pair.puml',
+  source_path: 'docs/diagrams/pair.puml',
   kind: 'diagram',
   tags: ['diagram'],
   overwrite: true,
 });
-if (diag.path !== 'pair.svg' || diag.kind !== 'diagram') {
+if (diag.path !== 'docs/diagrams/pair.svg' || diag.kind !== 'diagram') {
   console.error('diag entry', diag);
   process.exit(9);
 }
-const gotDiag = getLibraryEntry(hub, diag.id);
+const gotDiag = getLibraryEntry(hub, diag.path);
 if (!gotDiag.content.includes('<svg') || gotDiag.binary) {
   console.error('gotDiag', gotDiag);
   process.exit(10);
@@ -137,20 +156,20 @@ if (plantumlOk) {
     source: 'hub',
     overwrite: true,
   });
-  if (rendered.path !== 'auto-render.svg' || rendered.kind !== 'diagram') {
+  if (rendered.path !== 'docs/diagrams/auto-render.svg' || rendered.kind !== 'diagram') {
     console.error('auto render entry', rendered);
     process.exit(12);
   }
-  if (rendered.source_path !== 'auto-render.puml') {
+  if (rendered.source_path !== 'docs/diagrams/auto-render.puml') {
     console.error('auto source_path', rendered);
     process.exit(13);
   }
-  const svgPath = path.join(hub, 'library', 'auto-render.svg');
+  const svgPath = path.join(hub, 'docs', 'diagrams', 'auto-render.svg');
   if (!fs.existsSync(svgPath) || !fs.readFileSync(svgPath, 'utf8').includes('<svg')) {
     console.error('auto svg missing');
     process.exit(14);
   }
-  const gotAuto = getLibraryEntry(hub, rendered.id);
+  const gotAuto = getLibraryEntry(hub, rendered.path);
   if (gotAuto.kind !== 'diagram' || !gotAuto.content.includes('<svg')) {
     console.error('gotAuto', gotAuto);
     process.exit(15);
@@ -159,7 +178,7 @@ if (plantumlOk) {
   console.log('(skip auto-render: PlantUML not installed)');
 }
 
-// Repo accordion browse: hub-library tree + nested path read
+// Repo accordion browse: hub + project repo tree
 const registry = {
   products: [
     {
@@ -187,9 +206,23 @@ fs.writeFileSync(path.join(demoRoot, 'secret.env'), 'NOPE=1\n');
 fs.mkdirSync(path.join(demoRoot, 'node_modules', 'x'), { recursive: true });
 fs.writeFileSync(path.join(demoRoot, 'node_modules', 'x', 'readme.md'), 'skip\n');
 
+// Hub curated content for include filter checks
+fs.mkdirSync(path.join(hub, 'company'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'company', 'mission.md'), '# Mission\n\nShip it.\n');
+fs.writeFileSync(path.join(hub, 'NIGHTLY.md'), '# should not appear\n');
+fs.writeFileSync(path.join(hub, 'registry.json'), '{}\n');
+fs.mkdirSync(path.join(hub, 'agents', 'x'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'agents', 'x', 'agent.md'), '# no\n');
+fs.mkdirSync(path.join(hub, 'library'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'library', 'legacy.md'), '# legacy only\n');
+
 const { repos } = listLibraryRepos(hub, registry);
-if (!repos.some((r) => r.id === 'hub-library')) {
-  console.error('missing hub-library', repos);
+if (!repos.some((r) => r.id === 'hub' && r.kind === 'hub')) {
+  console.error('missing hub', repos);
+  process.exit(16);
+}
+if (repos.some((r) => r.id === 'hub-library')) {
+  console.error('legacy hub-library still listed', repos);
   process.exit(16);
 }
 if (!repos.some((r) => r.id === 'repo:demo:demo-repo' && r.available)) {
@@ -232,7 +265,7 @@ if (!threw) {
   process.exit(21);
 }
 
-const hubTree = getLibraryRepoTree(hub, registry, 'hub-library');
+const hubTree = getLibraryRepoTree(hub, registry, 'hub');
 const hubFlat = [];
 (function walk(nodes) {
   for (const n of nodes || []) {
@@ -240,9 +273,56 @@ const hubFlat = [];
     else walk(n.children);
   }
 })(hubTree.tree);
-if (!hubFlat.includes('README.md') && !hubFlat.some((p) => p.endsWith('.md'))) {
-  console.error('hub library tree empty', hubFlat);
+if (!hubFlat.some((p) => p.startsWith('docs/')) || !hubFlat.includes('company/mission.md')) {
+  console.error('hub tree missing include dirs', hubFlat);
   process.exit(22);
+}
+// Excluded paths must not appear
+const banned = ['NIGHTLY.md', 'registry.json', 'agents/', 'library/', 'control-plane/'];
+if (hubFlat.some((p) => banned.some((b) => p === b || p.startsWith(b)))) {
+  console.error('hub tree leaked excluded paths', hubFlat);
+  process.exit(23);
+}
+// Top-level tree nodes should only be include dirs
+const topNames = (hubTree.tree || []).map((n) => n.name).sort();
+for (const name of topNames) {
+  if (!HUB_INCLUDE_DIRS.includes(name)) {
+    console.error('hub tree top-level not in include list', topNames);
+    process.exit(24);
+  }
+}
+
+// Legacy hub-library repo id still works
+const legacyTree = getLibraryRepoTree(hub, registry, 'hub-library');
+if (!legacyTree.repo || legacyTree.repo.id !== 'hub') {
+  console.error('hub-library alias', legacyTree.repo);
+  process.exit(25);
+}
+
+// Legacy basename resolve for migrated smoke-style files
+fs.writeFileSync(path.join(hub, 'docs', 'diagrams', 'smoke-library-diagram.puml'), '@startuml\nX\n@enduml\n');
+const legacy = getLibraryEntry(hub, 'smoke-library-diagram.puml');
+if (!legacy.path.includes('smoke-library-diagram.puml')) {
+  console.error('legacy basename', legacy);
+  process.exit(26);
+}
+
+// Hub browse must reject excluded paths
+threw = false;
+try {
+  getLibraryBrowseFile(hub, registry, 'hub', 'NIGHTLY.md');
+} catch (_e) {
+  threw = true;
+}
+if (!threw) {
+  console.error('hub browse should reject NIGHTLY.md');
+  process.exit(27);
+}
+
+// No manifest.json created by ensure/add
+if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
+  console.error('manifest.json was created');
+  process.exit(28);
 }
 
 fs.rmSync(hub, { recursive: true, force: true });

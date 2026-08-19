@@ -9,6 +9,10 @@ architecture diagrams for the framework.
 | `sequence.puml` | Turn sequence: user → control plane → hub → product agent → user |
 | `use-case.puml` | Use-case diagram of the BizAgent system |
 | `activity.puml` | Activity flow for a user prompt/turn |
+| `smoke-library-diagram.puml` (+ `.svg`) | Library UI smoke diagram (click-to-view) |
+| `2026-08-16-bizagent-hub-spoke-sample.puml` (+ `.svg`) | Sample hub-and-spoke diagram |
+
+Browse these in the UI under **Library → Hub → docs/diagrams/** (filesystem walk; no manifest).
 
 ## Rendering
 
