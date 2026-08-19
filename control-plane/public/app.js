@@ -1309,7 +1309,6 @@ bindCompanyModal();
 bindPlantUmlModal();
 bindLibraryPage();
 bindComposerAttachments();
-applyRoute(parseRoute());
 document.getElementById('newConversation').addEventListener('click', async () => {
   if (!displayName) {
     showNamePanel(true);
