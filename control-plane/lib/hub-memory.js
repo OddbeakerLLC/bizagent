@@ -157,7 +157,7 @@ function deriveHubRuntimePrompt(hub) {
     '',
     '- Full setup/ops manual: `AGENT.md` (never for §0 detect-built on a live hub)',
     '- Knowledge Stack / weekly refresh: `WEEKLY.md`, `company/`, `knowledge-stack/`',
-    '- **Library** (plans/specs/diagrams): `library/` + `manifest.json` (UI browse). Docs: `YYYY-MM-DD-<slug>.md`. Diagrams: `<name>.puml` + render `<name>.svg`; manifest `path`=svg, `source_path`=puml, `kind`=diagram.',
+    '- **Library** (UI browse): hub `docs/`, `company/`, `reports/` (+ registry project repos). No `library/manifest.json`. Docs: `docs/YYYY-MM-DD-<slug>.md`. Diagrams: `docs/diagrams/<name>.puml` (+ rendered `.svg`).',
     '- Nightly housekeeping: `NIGHTLY.md`',
     '- Framework upgrade: `scripts/upgrade.sh` (dry-run / apply; preserves ops data)',
     '- Factory reset (SHTF): `scripts/factory-reset.sh`',

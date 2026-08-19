@@ -351,7 +351,7 @@ function renderAccordion() {
     head.type = 'button';
     head.className = 'library-acc-head';
     head.setAttribute('aria-expanded', libraryExpandedId === repo.id ? 'true' : 'false');
-    const product = repo.kind === 'hub-library'
+    const product = (repo.kind === 'hub' || repo.kind === 'hub-library')
       ? 'Hub'
       : (repo.product_name || repo.product || '');
     const avail = repo.available === false ? ' · offline' : '';
@@ -536,10 +536,11 @@ async function initLibraryPage() {
   }
 
   await refreshLibraryRepos();
-  // Auto-expand hub library for a useful first view.
-  if (libraryRepos.some((r) => r.id === 'hub-library')) {
-    await toggleRepo('hub-library');
-  }
+  // Auto-expand Hub (filtered docs/company/reports) for a useful first view.
+  const hubId = libraryRepos.some((r) => r.id === 'hub')
+    ? 'hub'
+    : (libraryRepos.some((r) => r.id === 'hub-library') ? 'hub-library' : '');
+  if (hubId) await toggleRepo(hubId);
 }
 
 if (typeof document !== 'undefined') {

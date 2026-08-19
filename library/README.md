@@ -1,41 +1,31 @@
-# Library
+# library/ (legacy)
 
-Operator-facing documents and diagrams produced for you (plans, specs, reports).
-Browse them in the BizAgent UI under **Library**.
+Operator-facing Library content now lives under hub curated directories and is
+browsed by filesystem walk — **not** this folder and **not** a `manifest.json`.
 
-PTL and product agents should write deliverables here (or register them)
-so you can open them without SSH access to the hub.
+| Path | Purpose |
+|------|---------|
+| `docs/` | Architecture, specs, technical docs |
+| `docs/diagrams/` | PlantUML sources (`.puml`) + rendered `.svg` |
+| `company/` | Company overview, mission, news, incidents |
+| `reports/` | Reports (when present) |
 
-## Diagrams (PlantUML)
+The Library UI accordion shows **Hub** (only the dirs above) plus each registry
+project repo. Excluded from Hub browse: `agents/`, `control-plane/`, `library/`,
+`.bizagent/`, mailboxes, scripts, registry files, etc.
 
-End-to-end path so the operator can **click a Library entry and see the rendered image**:
+## Publishing diagrams
 
-1. Write PlantUML source as a top-level file: `library/<name>.puml`
-2. Render SVG beside it (hub has `plantuml.sh` / Graphviz):
-   ```bash
-   plantuml.sh library/<name>.puml svg
-   # → library/<name>.svg
-   ```
-3. Register in `library/manifest.json` (one entry; image is what the UI opens):
-   ```json
-   {
-     "id": "lib_YYYYMMDD_<slug>",
-     "title": "Human title",
-     "path": "<name>.svg",
-     "source_path": "<name>.puml",
-     "kind": "diagram",
-     "type": "diagram",
-     "created_at": "YYYY-MM-DDTHH:MM:SS.000Z",
-     "source": "agent",
-     "tags": ["diagram"]
-   }
-   ```
+1. Write `docs/diagrams/<name>.puml`
+2. Render beside it (`plantuml.sh` / `renderPlantUml`) → `docs/diagrams/<name>.svg`
+3. Open **Library** → **Hub** → `docs/diagrams/` — click the file (no manifest entry)
 
-From hub/agent Node code you can also call:
+From hub/agent Node code:
 
-- `addLibraryDocument(hub, { title, filename: 'x.puml', content, source: 'agent' })` — writes `.puml`, renders `.svg`, indexes both
-- `addLibraryDiagram(hub, { title, content, source: 'agent' })` — same, forces `.puml` name
+- `addLibraryDocument(hub, { title, filename: 'x.puml', content, source: 'agent' })`
+- `addLibraryDiagram(hub, { title, content, source: 'agent' })`
 
-Markdown docs are unchanged (`.md` / `.markdown` / `.txt`). Allowed diagram artifacts: `.puml`, `.plantuml`, `.svg`, `.png` (top-level only; no `..` / subdirs).
+Both write under `docs/` / `docs/diagrams/` and do **not** touch `manifest.json`.
 
-Smoke check: open **Library** → **Library PlantUML smoke diagram** — you should see the rendered SVG, with optional source download.
+Legacy deep links (`?id=…` or old `library/` basenames) still resolve when the
+file exists under `docs/`, `docs/diagrams/`, or this legacy `library/` folder.
