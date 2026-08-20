@@ -498,34 +498,6 @@ body.library-page {
   padding: 8px;
   border-radius: 4px;
 }
-.plantuml-source {
-  width: 100%;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.4;
-  resize: vertical;
-  min-height: 160px;
-}
-.plantuml-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 8px 0;
-}
-.plantuml-output {
-  margin-top: 8px;
-  overflow: auto;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  padding: 12px;
-  background: #fff;
-  text-align: center;
-}
-.plantuml-output svg {
-  max-width: 100%;
-  height: auto;
-}
-
 /* Composer attachments */
 .composer-main {
   display: flex;
