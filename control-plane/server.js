@@ -1476,19 +1476,6 @@ async function handleApi(config, req, res) {
     return send(res, 200, conv);
   }
 
-  // --- PlantUML preview: render .puml source to SVG for inline display ---
-  if (url.pathname === "/api/plantuml/render" && req.method === "POST") {
-    const body = await parseBody(req);
-    const source = String(body.source || "");
-    if (!source.trim()) return send(res, 400, { error: "empty PlantUML source" });
-    try {
-      const svg = renderPlantUml(source, "svg");
-      return send(res, 200, { svg });
-    } catch (err) {
-      return send(res, 422, { error: err.message || "PlantUML render failed" });
-    }
-  }
-
   return send(res, 404, { error: "not found" });
 }
 
