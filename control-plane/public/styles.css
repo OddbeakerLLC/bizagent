@@ -695,6 +695,14 @@ body.library-page {
 .auth-controls button.btn-secondary:hover {
   background: #f3f4f6;
 }
+.auth-controls button.tts-toggle.active {
+  background: #dbeafe;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}
+.auth-controls button.tts-toggle.active:hover {
+  background: #bfdbfe;
+}
 .auth-controls {
   display: flex;
   align-items: center;
