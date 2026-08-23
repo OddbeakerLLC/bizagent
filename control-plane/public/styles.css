@@ -703,6 +703,15 @@ body.library-page {
 .auth-controls button.tts-toggle.active:hover {
   background: #bfdbfe;
 }
+.auth-controls button.tts-toggle.tts-unavailable {
+  border-color: #f59e0b;
+  color: #b45309;
+}
+.auth-controls button.tts-toggle.tts-unavailable.active {
+  background: #fef3c7;
+  border-color: #f59e0b;
+  color: #b45309;
+}
 .auth-controls {
   display: flex;
   align-items: center;

@@ -661,17 +661,44 @@ let ttsEnabled = false;
 /** After first paint of a conversation, only *new* hub replies are spoken. */
 let ttsPrimed = false;
 let lastSpokenHubKey = '';
+/** One-shot console warn for speak failures (autoplay / missing voices). */
+let ttsSpeakErrorLogged = false;
+/** UI state when browser has no usable speechSynthesis / voices. */
+let ttsUnavailableReason = '';
 
 function hubMessageKey(msg) {
   if (!msg || msg.role !== 'hub') return '';
   return `${msg.created_at || ''}|${String(msg.content || '').length}|${String(msg.content || '').slice(0, 80)}`;
 }
 
+function getSpeechSynthesis() {
+  if (typeof window === 'undefined') return null;
+  return window.speechSynthesis || null;
+}
+
+function getTtsVoices() {
+  const synth = getSpeechSynthesis();
+  if (!synth) return [];
+  try {
+    return synth.getVoices() || [];
+  } catch (_) {
+    return [];
+  }
+}
+
 function stopTtsSpeech() {
   try {
-    if (typeof window !== 'undefined' && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-    }
+    const synth = getSpeechSynthesis();
+    if (synth) synth.cancel();
+  } catch (_) { /* ignore */ }
+}
+
+/** Resume if cancel()/browser left synth paused (common Chrome gotcha). */
+function ensureTtsResumed() {
+  const synth = getSpeechSynthesis();
+  if (!synth) return;
+  try {
+    if (synth.paused) synth.resume();
   } catch (_) { /* ignore */ }
 }
 
@@ -695,9 +722,28 @@ function updateTtsToggleUi() {
   if (!btn) return;
   btn.classList.toggle('active', ttsEnabled);
   btn.setAttribute('aria-pressed', ttsEnabled ? 'true' : 'false');
-  btn.title = ttsEnabled
-    ? 'Text-to-speech ON (click to disable)'
-    : 'Text-to-speech OFF (click to enable)';
+  if (ttsUnavailableReason) {
+    btn.title = ttsUnavailableReason;
+    btn.classList.add('tts-unavailable');
+  } else {
+    btn.classList.remove('tts-unavailable');
+    btn.title = ttsEnabled
+      ? 'Text-to-speech ON (click to disable)'
+      : 'Text-to-speech OFF (click to enable)';
+  }
+}
+
+function setTtsUnavailable(reason) {
+  ttsUnavailableReason = reason || '';
+  updateTtsToggleUi();
+}
+
+function logTtsSpeakErrorOnce(err) {
+  if (ttsSpeakErrorLogged) return;
+  ttsSpeakErrorLogged = true;
+  try {
+    console.warn('[bizagent TTS] speak failed (autoplay policy, paused synth, or no voices):', err || '');
+  } catch (_) { /* ignore */ }
 }
 
 function cleanLineForSpeech(line) {
@@ -774,26 +820,84 @@ function buildSpokenText(text) {
   return result || null;
 }
 
-function speakHubReply(text) {
-  if (!ttsEnabled) return;
-  if (typeof window === 'undefined' || !window.speechSynthesis) return;
-  const spokenText = buildSpokenText(text);
-  if (!spokenText) return;
+/**
+ * Speak text via speechSynthesis.
+ * @param {string} text raw or already-built spoken text
+ * @param {{ raw?: boolean }} [opts] raw=true skips buildSpokenText (confirmation phrases)
+ */
+function speakTtsText(text, opts) {
+  if (!ttsEnabled) return false;
+  const synth = getSpeechSynthesis();
+  if (!synth) {
+    setTtsUnavailable('No browser voice (speechSynthesis missing)');
+    logTtsSpeakErrorOnce('speechSynthesis missing');
+    return false;
+  }
+  const spokenText = opts && opts.raw ? String(text || '').trim() : buildSpokenText(text);
+  if (!spokenText) return false;
+
+  // cancel() can leave Chrome paused; resume before/after so later async speaks work.
   stopTtsSpeech();
+  ensureTtsResumed();
+
   try {
+    const voices = getTtsVoices();
+    if (!voices.length) {
+      // Voices often populate async; try once more after a tick is handled by onvoiceschanged.
+      // Still attempt speak — some engines work with default voice and empty list briefly.
+      setTtsUnavailable('No browser voice (empty voice list — try again or check OS TTS)');
+    } else if (ttsUnavailableReason) {
+      setTtsUnavailable('');
+    }
+
     const utterance = new SpeechSynthesisUtterance(spokenText);
     utterance.rate = 1.0;
     utterance.pitch = 1.0;
     utterance.volume = 1.0;
     try {
-      const voices = window.speechSynthesis.getVoices() || [];
       const preferred = voices.find((v) =>
         v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Daniel')
       );
       if (preferred) utterance.voice = preferred;
     } catch (_) { /* ignore voice pick */ }
-    window.speechSynthesis.speak(utterance);
-  } catch (_) { /* ignore speak failures */ }
+
+    utterance.onerror = (ev) => {
+      logTtsSpeakErrorOnce(ev && (ev.error || ev));
+    };
+
+    ensureTtsResumed();
+    synth.speak(utterance);
+    // Some Chromium builds need resume() right after speak() when previously cancelled.
+    ensureTtsResumed();
+    return true;
+  } catch (err) {
+    logTtsSpeakErrorOnce(err);
+    return false;
+  }
+}
+
+function speakHubReply(text) {
+  speakTtsText(text);
+}
+
+/** Unlock autoplay + confirm enable inside the user-gesture click chain. */
+function primeTtsOnEnable() {
+  const synth = getSpeechSynthesis();
+  if (!synth) {
+    setTtsUnavailable('No browser voice (speechSynthesis missing)');
+    logTtsSpeakErrorOnce('speechSynthesis missing');
+    return;
+  }
+  try {
+    synth.cancel();
+    ensureTtsResumed();
+    // Warm voice list under the gesture when possible.
+    getTtsVoices();
+  } catch (err) {
+    logTtsSpeakErrorOnce(err);
+  }
+  const ok = speakTtsText('Text to speech on.', { raw: true });
+  if (ok && getTtsVoices().length) setTtsUnavailable('');
 }
 
 function maybeSpeakNewHubReplies(messages) {
@@ -816,11 +920,20 @@ function maybeSpeakNewHubReplies(messages) {
   if (ttsEnabled && latestHub) speakHubReply(latestHub.content);
 }
 
-function setTtsEnabled(on) {
-  ttsEnabled = !!on;
+function setTtsEnabled(on, opts) {
+  const next = !!on;
+  const wasOn = ttsEnabled;
+  ttsEnabled = next;
   saveTtsEnabled(ttsEnabled);
   updateTtsToggleUi();
-  if (!ttsEnabled) stopTtsSpeech();
+  if (!ttsEnabled) {
+    stopTtsSpeech();
+    return;
+  }
+  // Prime only on user toggle ON (click gesture unlocks later async speaks).
+  if (opts && opts.prime && !wasOn) {
+    primeTtsOnEnable();
+  }
 }
 
 function bindTtsToggle() {
@@ -829,14 +942,26 @@ function bindTtsToggle() {
   const btn = document.getElementById('ttsToggle');
   if (!btn || btn.dataset.bound === '1') return;
   btn.dataset.bound = '1';
-  btn.addEventListener('click', () => setTtsEnabled(!ttsEnabled));
+  btn.addEventListener('click', () => {
+    // Toggle OFF: stop. Toggle ON: enable + speak confirmation in this gesture.
+    setTtsEnabled(!ttsEnabled, { prime: true });
+  });
   // Chrome loads voices async; warm the list so first speak can pick a voice.
   try {
-    if (window.speechSynthesis) {
-      window.speechSynthesis.getVoices();
-      window.speechSynthesis.onvoiceschanged = () => {
-        try { window.speechSynthesis.getVoices(); } catch (_) { /* ignore */ }
+    const synth = getSpeechSynthesis();
+    if (synth) {
+      getTtsVoices();
+      synth.onvoiceschanged = () => {
+        try {
+          const voices = getTtsVoices();
+          if (voices.length && ttsUnavailableReason) setTtsUnavailable('');
+          else if (!voices.length && ttsEnabled) {
+            setTtsUnavailable('No browser voice (empty voice list — try again or check OS TTS)');
+          }
+        } catch (_) { /* ignore */ }
       };
+    } else {
+      setTtsUnavailable('No browser voice (speechSynthesis missing)');
     }
   } catch (_) { /* ignore */ }
 }
