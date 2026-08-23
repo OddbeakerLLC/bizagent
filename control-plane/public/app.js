@@ -66,9 +66,12 @@ function setAuthenticated(isAuthenticated, message) {
   if (companyBtn) companyBtn.hidden = !isAuthenticated;
   const libraryBtn = document.getElementById('libraryBtn');
   if (libraryBtn) libraryBtn.hidden = !isAuthenticated;
+  const ttsBtn = document.getElementById('ttsToggle');
+  if (ttsBtn) ttsBtn.hidden = !isAuthenticated;
   if (!isAuthenticated) {
     document.getElementById('namePanel').hidden = true;
     hideCompanyModal();
+    stopTtsSpeech();
   }
   setAuthStatus(message || (isAuthenticated ? 'Signed in' : 'Login required'), isAuthenticated ? 'ok' : 'warn');
 }
@@ -651,6 +654,193 @@ function messageClassName(msg) {
   return 'message system';
 }
 
+// --- Console TTS (browser speechSynthesis; default OFF) ---
+// Patterns adapted from Jobe PWA buildSpokenText / cleanLineForSpeech.
+const TTS_STORAGE_KEY = 'bizagent.tts.enabled';
+let ttsEnabled = false;
+/** After first paint of a conversation, only *new* hub replies are spoken. */
+let ttsPrimed = false;
+let lastSpokenHubKey = '';
+
+function hubMessageKey(msg) {
+  if (!msg || msg.role !== 'hub') return '';
+  return `${msg.created_at || ''}|${String(msg.content || '').length}|${String(msg.content || '').slice(0, 80)}`;
+}
+
+function stopTtsSpeech() {
+  try {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+  } catch (_) { /* ignore */ }
+}
+
+function loadTtsEnabled() {
+  try {
+    return __storage.getItem(TTS_STORAGE_KEY) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+function saveTtsEnabled(on) {
+  try {
+    if (on) __storage.setItem(TTS_STORAGE_KEY, '1');
+    else __storage.removeItem(TTS_STORAGE_KEY);
+  } catch (_) { /* ignore */ }
+}
+
+function updateTtsToggleUi() {
+  const btn = document.getElementById('ttsToggle');
+  if (!btn) return;
+  btn.classList.toggle('active', ttsEnabled);
+  btn.setAttribute('aria-pressed', ttsEnabled ? 'true' : 'false');
+  btn.title = ttsEnabled
+    ? 'Text-to-speech ON (click to disable)'
+    : 'Text-to-speech OFF (click to enable)';
+}
+
+function cleanLineForSpeech(line) {
+  return String(line || '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/#{1,6}\s+/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/https?:\/\/[^\s]+/g, 'link')
+    .replace(/`[^`]+`/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{27BF}\u{2300}-\u{23FF}\u{2B50}\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2702}-\u{27B0}]/gu, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function buildSpokenText(text) {
+  const blocks = String(text || '').split(/\n{2,}/);
+  const spoken = [];
+  let inCodeBlock = false;
+
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+    const lines = trimmed.split(/\n/);
+    const fenceCount = (trimmed.match(/```/g) || []).length;
+
+    if (inCodeBlock) {
+      if (fenceCount % 2 === 1) inCodeBlock = false;
+      continue;
+    }
+    if (trimmed.startsWith('```')) {
+      if (fenceCount % 2 === 1) inCodeBlock = true;
+      spoken.push("Here's a code snippet.");
+      continue;
+    }
+
+    const tableLines = lines.filter((l) => l.trim().startsWith('|'));
+    if (tableLines.length >= 2) {
+      const dataRows = tableLines.filter((l) => !/^[\s|:-]+$/.test(l));
+      spoken.push(`Here's a table with ${Math.max(dataRows.length - 1, 0)} rows.`);
+      continue;
+    }
+
+    const listLines = lines.filter((l) => /^\s*(?:[-*]|\d+\.)\s/.test(l));
+    if (listLines.length >= 2) {
+      if (listLines.length <= 3) {
+        const items = listLines.map((l) =>
+          cleanLineForSpeech(l.replace(/^\s*(?:[-*]|\d+\.)\s+/, ''))
+        );
+        spoken.push(`${items.join('. ')}.`);
+      } else {
+        const first = cleanLineForSpeech(listLines[0].replace(/^\s*(?:[-*]|\d+\.)\s+/, ''));
+        const second = cleanLineForSpeech(listLines[1].replace(/^\s*(?:[-*]|\d+\.)\s+/, ''));
+        spoken.push(`Here are ${listLines.length} items, including ${first}, and ${second}.`);
+      }
+      continue;
+    }
+
+    const prose = lines.map((l) => cleanLineForSpeech(l)).join('. ');
+    if (prose.length > 800) {
+      const cutoff = prose.substring(0, 500);
+      const lastPeriod = cutoff.lastIndexOf('.');
+      if (lastPeriod > 100) spoken.push(prose.substring(0, lastPeriod + 1));
+      else spoken.push(`${cutoff}.`);
+      spoken.push('You can read the rest on screen.');
+    } else if (prose) {
+      spoken.push(prose);
+    }
+  }
+
+  let result = spoken.join(' ').trim();
+  result = result.replace(/\.{2,}/g, '.').replace(/\s{2,}/g, ' ');
+  return result || null;
+}
+
+function speakHubReply(text) {
+  if (!ttsEnabled) return;
+  if (typeof window === 'undefined' || !window.speechSynthesis) return;
+  const spokenText = buildSpokenText(text);
+  if (!spokenText) return;
+  stopTtsSpeech();
+  try {
+    const utterance = new SpeechSynthesisUtterance(spokenText);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+    try {
+      const voices = window.speechSynthesis.getVoices() || [];
+      const preferred = voices.find((v) =>
+        v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Daniel')
+      );
+      if (preferred) utterance.voice = preferred;
+    } catch (_) { /* ignore voice pick */ }
+    window.speechSynthesis.speak(utterance);
+  } catch (_) { /* ignore speak failures */ }
+}
+
+function maybeSpeakNewHubReplies(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  let latestHub = null;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i] && list[i].role === 'hub' && String(list[i].content || '').trim()) {
+      latestHub = list[i];
+      break;
+    }
+  }
+  const key = hubMessageKey(latestHub);
+  if (!ttsPrimed) {
+    ttsPrimed = true;
+    lastSpokenHubKey = key;
+    return;
+  }
+  if (!key || key === lastSpokenHubKey) return;
+  lastSpokenHubKey = key;
+  if (ttsEnabled && latestHub) speakHubReply(latestHub.content);
+}
+
+function setTtsEnabled(on) {
+  ttsEnabled = !!on;
+  saveTtsEnabled(ttsEnabled);
+  updateTtsToggleUi();
+  if (!ttsEnabled) stopTtsSpeech();
+}
+
+function bindTtsToggle() {
+  ttsEnabled = loadTtsEnabled();
+  updateTtsToggleUi();
+  const btn = document.getElementById('ttsToggle');
+  if (!btn || btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', () => setTtsEnabled(!ttsEnabled));
+  // Chrome loads voices async; warm the list so first speak can pick a voice.
+  try {
+    if (window.speechSynthesis) {
+      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => {
+        try { window.speechSynthesis.getVoices(); } catch (_) { /* ignore */ }
+      };
+    }
+  } catch (_) { /* ignore */ }
+}
+
 function renderMessages(messages) {
   const root = document.getElementById('messages');
   root.innerHTML = '';
@@ -702,6 +892,7 @@ function renderMessages(messages) {
   });
   root.scrollTop = root.scrollHeight;
   syncThinking();
+  maybeSpeakNewHubReplies(messages);
 }
 
 // --- Live thinking log (streams in-flight turn output) ---
@@ -875,6 +1066,10 @@ async function loadConversation(id) {
   const conv = await api(`/api/conversations/${encodeURIComponent(id)}`);
   const messages = conv.messages || [];
   lastConversationStamp = conversationPollStamp(conv);
+  // Do not read history aloud when opening/switching conversations.
+  ttsPrimed = false;
+  lastSpokenHubKey = '';
+  stopTtsSpeech();
   renderMessages(messages);
 }
 
@@ -1244,6 +1439,7 @@ document.getElementById('logout').addEventListener('click', async () => {
 });
 bindCompanyModal();
 bindLibraryPage();
+bindTtsToggle();
 bindComposerAttachments();
 document.getElementById('newConversation').addEventListener('click', async () => {
   if (!displayName) {
@@ -1291,6 +1487,8 @@ document.getElementById('composer').addEventListener('submit', async (event) => 
   const content = input.value.trim();
   const hasFiles = pendingAttachFiles.length > 0;
   if ((!content && !hasFiles) || !currentConversation) return;
+  // Stop prior hub speech when the operator sends a new message.
+  stopTtsSpeech();
   const text = content || (hasFiles ? '(attachments)' : '');
   input.value = '';
   let attachments = [];
