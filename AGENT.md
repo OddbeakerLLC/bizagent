@@ -373,6 +373,13 @@ for the exact sequence.
 
 `company/` has no naming convention — name files however you want.
 
+**Playbooks (cross-agent proven how-tos).** Under `knowledge-stack/playbooks/`
+(+ `INDEX.md`). Curated cards for reusable procedures — not product dumps.
+Stuck agents mail hub `consult: …`; hub greps playbooks first, may query 1–2
+agents, synthesizes one answer, and promotes proven outcomes to new cards.
+No fleet broadcast. Schema and flow: `knowledge-stack/playbooks/README.md`,
+`docs/PLAYBOOKS-AND-CONSULT.md`. Filing/index updates are normal PTL soft ops.
+
 ### Message format
 
 A `.md` file in an `outbox/`; the router moves it to the recipient's `inbox/`.
