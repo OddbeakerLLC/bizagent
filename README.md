@@ -133,24 +133,23 @@ the control plane; queues first-run setup mail when ready; and prints your URL.
 | Graphviz (`dot`) | PlantUML non-sequence diagrams | `graphviz` | deb-extract or wrapper → `~/.bizagent/tools/` |
 | PlantUML | web UI `.puml` → SVG preview | `plantuml` | jar + `plantuml.sh` → `~/.bizagent/tools/` |
 
-**Optional — console TTS (Kokoro via oddbeaker-tts).** The web UI can speak hub
-replies when a local **oddbeaker-tts** daemon is listening on **port 9201**
-(shared host port — do not start a second daemon if Jobe already owns 9201).
-Install editable from the Oddbeaker Framework monorepo until a private index
-exists:
+**Optional — console TTS (Kokoro via oddbeaker-tts).** The installer runs
+`scripts/install-oddbeaker-tts.sh` after cloning: installs the shared daemon on
+**port 9201** when the host allows, prompts for a preferred voice, and stores
+`BIZAGENT_TTS_VOICE` in `.bizagent/env`. The UI TTS toggle stays **off** until
+you enable it. One daemon per host (shared with Jobe if already on 9201). Soft
+failure leaves browser `speechSynthesis` as fallback.
 
-```sh
-cd /path/to/oddbeaker-framework/packages/oddbeaker-tts
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[runtime]"
-oddbeaker-tts   # 127.0.0.1:9201 — skip if already running
-```
+| Install env | Purpose |
+|-------------|--------|
+| `BIZAGENT_TTS_VOICE` | Non-interactive voice id (default `af_heart`) |
+| `BIZAGENT_TTS_SOURCE` | Local checkout or git URL for oddbeaker-tts |
+| `BIZAGENT_SKIP_TTS=1` | Skip TTS install entirely |
+| `BIZAGENT_NONINTERACTIVE=1` | No voice/provider prompts |
 
-Cache: appliances set `ODDBEAKER_TTS_CACHE_DIR=/var/cache/oddbeaker-tts`; dev
-defaults to `~/.cache/oddbeaker-tts`. BizAgent knobs: `BIZAGENT_TTS_URL`
-(default `http://127.0.0.1:9201`), optional `BIZAGENT_TTS_VOICE`. Browser
-`speechSynthesis` remains the fallback if the service is down. Details:
-[`docs/TTS-CONSOLE.md`](docs/TTS-CONSOLE.md).
+Upgrade: `scripts/upgrade.sh` offers TTS when `:9201` is unhealthy (`--with-tts`
+/ `--no-tts`). Manual: `scripts/install-oddbeaker-tts.sh --hub "$PWD" --prompt-voice`.
+Details: [`docs/TTS-CONSOLE.md`](docs/TTS-CONSOLE.md).
 
 **Step 3.** Open the URL shown in your terminal (or `http://localhost:8787`
 if it doesn't appear). Create a login, then chat with PTL to finish onboarding

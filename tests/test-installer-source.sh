@@ -122,3 +122,22 @@ grep -q 'BIZAGENT_PROVIDER' "$ROOT/install/install.sh" \
 
 
 echo "  ok: installer source override"
+
+# oddbeaker-tts dependency + voice prompt (console TTS)
+grep -q 'ensure_oddbeaker_tts' "$ROOT/install.sh" \
+  || fail "install.sh missing ensure_oddbeaker_tts"
+grep -q 'install-oddbeaker-tts' "$ROOT/install.sh" \
+  || fail "install.sh does not call install-oddbeaker-tts"
+[ -x "$ROOT/scripts/install-oddbeaker-tts.sh" ] \
+  || fail "scripts/install-oddbeaker-tts.sh missing or not executable"
+bash -n "$ROOT/scripts/install-oddbeaker-tts.sh" \
+  || fail "install-oddbeaker-tts.sh bash -n failed"
+grep -q 'BIZAGENT_TTS_VOICE' "$ROOT/scripts/install-oddbeaker-tts.sh" \
+  || fail "install-oddbeaker-tts.sh does not persist BIZAGENT_TTS_VOICE"
+grep -q 'BIZAGENT_SKIP_TTS' "$ROOT/install.sh" \
+  || fail "install.sh missing BIZAGENT_SKIP_TTS"
+grep -q 'BIZAGENT_TTS_VOICE' "$ROOT/.bizagent/env.example" \
+  || fail "env.example missing BIZAGENT_TTS_VOICE"
+grep -q 'install-oddbeaker-tts' "$ROOT/README.md" \
+  || fail "README missing install-oddbeaker-tts docs"
+

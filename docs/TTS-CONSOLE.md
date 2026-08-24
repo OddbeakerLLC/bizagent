@@ -25,23 +25,37 @@ Package: **oddbeaker-tts** (Oddbeaker Framework, Kokoro). Import `oddbeaker_tts`
 
 ## Install / run oddbeaker-tts
 
-Until a private package index exists, install editable from the monorepo:
+**Preferred:** the BizAgent installer and `scripts/upgrade.sh` call
+`scripts/install-oddbeaker-tts.sh`, which clones/installs the package (venv +
+`[runtime]` extras), starts a user systemd unit or nohup daemon on
+`127.0.0.1:9201`, prompts for a voice, and writes `BIZAGENT_TTS_VOICE` into
+hub `.bizagent/env` (never clobbers an existing voice unless `--force-voice`).
 
 ```bash
-# From a checkout that contains oddbeaker-framework
-cd /path/to/oddbeaker-framework/packages/oddbeaker-tts
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[runtime]"
-# torch: use the index for your GPU/CPU if needed
+# Fresh install (automatic during install.sh after clone)
+# Non-interactive:
+#   BIZAGENT_TTS_VOICE=af_heart BIZAGENT_NONINTERACTIVE=1 bash install.sh
+# Skip TTS:
+#   BIZAGENT_SKIP_TTS=1 bash install.sh
+
+# Manual / repair on an existing hub:
+scripts/install-oddbeaker-tts.sh --hub /path/to/hub --prompt-voice
+# Upgrade path (offers install when :9201 unhealthy):
+scripts/upgrade.sh --hub /path/to/hub --with-tts
 ```
 
-**One daemon per host on port 9201.** If Jobe (or another product) already owns `127.0.0.1:9201`, do **not** start a second process — BizAgent shares it.
+Source resolution order: `BIZAGENT_TTS_SOURCE` → existing
+`~/.bizagent/oddbeaker-tts` → sibling `../oddbeaker-tts` checkouts → SSH
+`OddbeakerLLC/oddbeaker-tts` (HTTPS may 404 while the repo is private).
+
+**One daemon per host on port 9201.** If Jobe (or another product) already owns
+`127.0.0.1:9201`, the helper detects `/health` and does **not** start a second
+process — BizAgent shares it.
 
 ```bash
-# Only if nothing is listening on 9201:
-oddbeaker-tts
-# or: oddbeaker-tts --host 127.0.0.1 --port 9201
+# Manual start only if nothing is listening on 9201:
+~/.bizagent/oddbeaker-tts/.venv/bin/oddbeaker-tts --host 127.0.0.1 --port 9201
+# or: systemctl --user enable --now oddbeaker-tts.service
 ```
 
 ### Cache

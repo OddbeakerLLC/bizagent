@@ -18,9 +18,12 @@
 # Usage:
 #   scripts/upgrade.sh [--hub PATH] [--source PATH|URL] [--ref REF]
 #                      [--dry-run] [-v|--verbose] [--yes|-y] [--no-restart]
+#                      [--with-tts|--no-tts]
 #
 # Env:
 #   BIZAGENT_FRAMEWORK   Default framework path or git URL (same as factory-reset)
+#   BIZAGENT_SKIP_TTS=1  Skip oddbeaker-tts offer/install on upgrade
+#   BIZAGENT_TTS_*       See scripts/install-oddbeaker-tts.sh
 #
 # Manual path (any time): run this script, or ask PTL to apply updates.
 # Nightly auto path: only when registry.json settings.auto_update === true
@@ -37,6 +40,7 @@ DRY_RUN=0
 VERBOSE=0
 YES=0
 NO_RESTART=0
+WITH_TTS=""   # empty=auto (offer if missing), 1=force try, 0=skip
 DEFAULT_FRAMEWORK_URL="https://github.com/OddbeakerLLC/bizagent.git"
 
 usage() {
@@ -57,6 +61,8 @@ while [[ $# -gt 0 ]]; do
     -v|--verbose) VERBOSE=1; shift ;;
     --yes|-y) YES=1; shift ;;
     --no-restart) NO_RESTART=1; shift ;;
+    --with-tts) WITH_TTS=1; shift ;;
+    --no-tts) WITH_TTS=0; shift ;;
     -h|--help) usage ;;
     *)
       die "unknown argument: $1 (try --help)"
@@ -203,6 +209,61 @@ if command -v npm >/dev/null 2>&1; then
   chmod +x "$HUB/scripts/"*.sh "$HUB/scripts/bizagent-agent" \
     "$HUB/agent-runtime/bin/bizagent-agent" 2>/dev/null || true
 fi
+
+# Optional: install oddbeaker-tts when missing (never clobber BIZAGENT_TTS_VOICE).
+ensure_tts_on_upgrade() {
+  if [[ -n "${BIZAGENT_SKIP_TTS:-}" || "$WITH_TTS" == "0" ]]; then
+    log "upgrade: skipping oddbeaker-tts (BIZAGENT_SKIP_TTS or --no-tts)"
+    return 0
+  fi
+  local helper="$HUB/scripts/install-oddbeaker-tts.sh"
+  if [[ ! -x "$helper" ]]; then
+    log "upgrade: install-oddbeaker-tts.sh not present — skip TTS"
+    return 0
+  fi
+  local tts_url="${BIZAGENT_TTS_URL:-http://127.0.0.1:9201}"
+  tts_url="${tts_url%/}"
+  local healthy=0
+  if curl -fsS --max-time 2 "$tts_url/health" >/dev/null 2>&1; then
+    healthy=1
+  fi
+  local voice_set=0
+  if [[ -f "$HUB/.bizagent/env" ]] && grep -qE '^(export[[:space:]]+)?BIZAGENT_TTS_VOICE=' "$HUB/.bizagent/env" 2>/dev/null; then
+    voice_set=1
+  fi
+  # Already healthy + voice persisted → nothing to do
+  if [[ "$healthy" -eq 1 && "$voice_set" -eq 1 && "$WITH_TTS" != "1" ]]; then
+    log "upgrade: oddbeaker-tts already healthy; voice setting preserved"
+    return 0
+  fi
+  # Auto path: only offer/install when missing
+  if [[ "$healthy" -eq 1 && "$WITH_TTS" != "1" ]]; then
+    # Service up but voice not in env — record default without clobber if later set
+    log "upgrade: oddbeaker-tts up — ensuring BIZAGENT_TTS_VOICE in .bizagent/env (no clobber)"
+    bash "$helper" --hub "$HUB" --yes --no-start || true
+    return 0
+  fi
+  local args=(--hub "$HUB")
+  if [[ "$YES" -eq 1 || ! -t 0 ]]; then
+    args+=(--yes)
+  else
+    # Interactive: ask once
+    printf 'oddbeaker-tts (console Kokoro TTS) is not healthy on this host. Install/start it now? [Y/n] '
+    read -r ans || ans="y"
+    ans="${ans:-y}"
+    if [[ "$ans" != "y" && "$ans" != "Y" && "$ans" != "yes" ]]; then
+      log "upgrade: skipped oddbeaker-tts install"
+      return 0
+    fi
+    args+=(--yes --prompt-voice)
+  fi
+  [[ -n "${BIZAGENT_TTS_VOICE:-}" ]] && args+=(--voice "$BIZAGENT_TTS_VOICE")
+  [[ -n "${BIZAGENT_TTS_SOURCE:-}" ]] && args+=(--source "$BIZAGENT_TTS_SOURCE")
+  log "upgrade: ensuring oddbeaker-tts (soft-fail)…"
+  bash "$helper" "${args[@]}" || log "upgrade: WARN oddbeaker-tts step failed — hub upgrade still ok"
+}
+
+ensure_tts_on_upgrade
 
 log "upgrade: done"
 log "upgrade: operator data (registry, cli.json, agents, company, KS, library, mail, .bizagent) was not overwritten"

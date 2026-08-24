@@ -16,6 +16,11 @@
 #   BIZAGENT_AUTO_UPDATE=0|1       Non-interactive: framework auto-update preference
 #                                  (0=manual-only default, 1=nightly may run scripts/upgrade.sh)
 #                                  Persisted as registry.json settings.auto_update
+#   BIZAGENT_TTS_VOICE=id          Non-interactive: Kokoro voice id (default af_heart)
+#   BIZAGENT_TTS_SOURCE=path|url   oddbeaker-tts checkout or git URL (default: discover/SSH)
+#   BIZAGENT_TTS_DIR=path          Install root for oddbeaker-tts (default ~/.bizagent/oddbeaker-tts)
+#   BIZAGENT_SKIP_TTS=1            Skip oddbeaker-tts install (console TTS stays browser-only)
+#   BIZAGENT_NONINTERACTIVE=1      No prompts (provider/key/voice use env/defaults)
 
 set -euo pipefail
 
@@ -1225,6 +1230,47 @@ write_tools_env_lines() {
   ok "tool paths written to .bizagent/env (PlantUML/Graphviz/Java)"
 }
 
+# --- optional oddbeaker-tts (Kokoro) local service ---
+# Installs/starts shared daemon on :9201 when possible; prompts for voice;
+# persists BIZAGENT_TTS_VOICE in .bizagent/env. Soft-fails so hub install still succeeds.
+ensure_oddbeaker_tts() {
+  if [[ -n "${BIZAGENT_SKIP_TTS:-}" ]]; then
+    ok "skipping oddbeaker-tts (BIZAGENT_SKIP_TTS)"
+    return 0
+  fi
+  local helper=""
+  if [[ -x "$INSTALL_DIR/scripts/install-oddbeaker-tts.sh" ]]; then
+    helper="$INSTALL_DIR/scripts/install-oddbeaker-tts.sh"
+  elif [[ -x "$(dirname "${BASH_SOURCE[0]}")/scripts/install-oddbeaker-tts.sh" ]]; then
+    helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/install-oddbeaker-tts.sh"
+  fi
+  if [[ -z "$helper" ]]; then
+    warn "install-oddbeaker-tts.sh missing — console TTS will use browser speechSynthesis only"
+    note "Later: place oddbeaker-tts on the host and run scripts/install-oddbeaker-tts.sh"
+    return 0
+  fi
+  step "Console TTS (oddbeaker-tts / Kokoro)"
+  note "Optional local service on 127.0.0.1:9201. UI TTS toggle stays off until you enable it."
+  note "One daemon per host — shared with other Oddbeaker products if already running."
+  local args=(--hub "$INSTALL_DIR" --yes)
+  # Interactive install: prompt for voice when a TTY exists
+  if [[ -r /dev/tty ]] && [[ -z "${BIZAGENT_NONINTERACTIVE:-}" ]]; then
+    args+=(--prompt-voice)
+  fi
+  if [[ -n "${BIZAGENT_TTS_VOICE:-}" ]]; then
+    args+=(--voice "$BIZAGENT_TTS_VOICE")
+  fi
+  if [[ -n "${BIZAGENT_TTS_SOURCE:-}" ]]; then
+    args+=(--source "$BIZAGENT_TTS_SOURCE")
+  fi
+  # Do not fail the whole BizAgent install if TTS cannot be built on this host.
+  if ! bash "$helper" "${args[@]}"; then
+    warn "oddbeaker-tts install reported failure — hub continues; browser TTS fallback remains"
+    return 0
+  fi
+  ok "oddbeaker-tts step finished (voice in .bizagent/env when set)"
+}
+
 # --- clone + handoff ---
 DEFAULT_DIR="$HOME/bizagent"
 BIZAGENT_SOURCE_EXPLICIT=0
@@ -1382,6 +1428,7 @@ main() {
   write_cli_json
   write_registry_seed
   write_env_file
+  ensure_oddbeaker_tts
 
   handoff
 }
