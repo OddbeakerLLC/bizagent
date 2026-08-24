@@ -36,7 +36,10 @@ outbox/
 user/
 journal/
 company/
-knowledge-stack/
+# Ops Knowledge Stack is hub-local; ship only framework playbook scaffold.
+knowledge-stack/*
+!knowledge-stack/playbooks/
+!knowledge-stack/playbooks/**
 agents/
 
 # Operator/product journals and sitemaps (ops hub only)

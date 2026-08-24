@@ -206,6 +206,9 @@ your `registry.json`).
   Markdown and PlantUML/SVG diagrams render in-browser (no `library/manifest.json`).
   `GET /api/library/repos`, `GET /api/library/tree?repo=…`,
   `GET /api/library/file?repo=&path=` (`?raw=1`, `?download=1`, `?source=1`, `?render=1`)
+- **Playbooks / consult** — cross-agent proven how-tos under `knowledge-stack/playbooks/`
+  (+ `INDEX.md`). Agents mail hub `consult: …` / `playbook candidate` (no fleet broadcast).
+  Design: [`docs/PLAYBOOKS-AND-CONSULT.md`](docs/PLAYBOOKS-AND-CONSULT.md).
 - **Company files** — topbar **Company** uploads into hub `company/` (Knowledge Stack
   inputs) when you cannot reach the hub disk; `GET/POST /api/company/files`
 - **Dynamic page title** — browser tab reads `BizAgent — {org name}` from `registry.json`
