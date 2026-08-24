@@ -888,22 +888,53 @@ async function speakViaServerTts(spokenText, gen) {
   }
   const data = await res.json().catch(() => ({}));
   if (gen !== ttsPlayGen) return false;
-  if (!data || !data.audio_url) {
-    // nothing_to_speak or empty — not a hard failure
+  // Empty / nothing_to_speak: success with no audio (do not fall back to browser noise).
+  if (!data || data.nothing_to_speak || !data.audio_url) {
+    logTtsDebug('server nothing to speak');
     return true;
+  }
+  // Proxy must rewrite /tts/x.wav → /api/tts/audio/x.wav. If rewrite failed, fall back.
+  if (typeof data.audio_url !== 'string' || !data.audio_url.startsWith('/api/tts/')) {
+    ttsServerAvailable = false;
+    throw new Error('synthesize missing proxied audio_url');
   }
   ttsServerAvailable = true;
   const audio = new Audio(data.audio_url);
+  // Same-origin /api path sends session cookie automatically (do not set crossOrigin).
   ttsAudioEl = audio;
-  await new Promise((resolve, reject) => {
-    audio.onended = () => resolve();
-    audio.onerror = () => reject(new Error('audio element error'));
-    const p = audio.play();
-    if (p && typeof p.then === 'function') {
-      p.then(() => { /* playing */ }).catch(reject);
-    }
-  });
-  if (ttsAudioEl === audio) ttsAudioEl = null;
+  logTtsDebug('server audio play', { url: data.audio_url });
+  try {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      let watch = null;
+      const finish = (err) => {
+        if (settled) return;
+        settled = true;
+        if (watch) {
+          try { clearInterval(watch); } catch (_) { /* ignore */ }
+          watch = null;
+        }
+        if (err) reject(err instanceof Error ? err : new Error(String(err)));
+        else resolve();
+      };
+      audio.onended = () => finish(null);
+      audio.onerror = () => finish(new Error('audio element error'));
+      // stopTtsSpeech mid-play bumps gen — resolve quietly (no browser fallback).
+      watch = setInterval(() => {
+        if (gen !== ttsPlayGen) {
+          try { audio.pause(); } catch (_) { /* ignore */ }
+          finish(null);
+        }
+      }, 200);
+      const p = audio.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => { /* playing; wait for onended */ }).catch((err) => finish(err));
+      }
+    });
+  } finally {
+    if (ttsAudioEl === audio) ttsAudioEl = null;
+  }
+  // Interrupted by newer speak/stop — success for this gen handoff.
   return true;
 }
 
@@ -1161,24 +1192,36 @@ function speakTtsText(text, opts) {
         if (ttsServerAvailable === null) await probeTtsServer(false);
         if (gen !== ttsPlayGen) return;
         if (ttsServerAvailable) {
-          await speakViaServerTts(spokenText, gen);
-          if (gen === ttsPlayGen && ttsUnavailableReason) setTtsUnavailable('');
-          updateTtsToggleUi();
-          return;
+          const ok = await speakViaServerTts(spokenText, gen);
+          if (gen !== ttsPlayGen) return;
+          if (ok) {
+            if (ttsUnavailableReason) setTtsUnavailable('');
+            updateTtsToggleUi();
+            return;
+          }
+          // Server path declined without throwing — try browser.
+          logTtsDebug('server speak declined → browser');
         }
       } catch (err) {
-        ttsServerAvailable = false;
+        // Only mark server down for transport/API failures — not autoplay / element errors.
+        const msg = String(err && err.message || err || '');
+        if (/synthesize HTTP|missing proxied|fetch|network|TTS unavailable|502|503/i.test(msg)) {
+          ttsServerAvailable = false;
+        }
         if (gen !== ttsPlayGen) return;
         logTtsSpeakErrorOnce(err);
-        logTtsDebug('server speak failed → browser', String(err && err.message || err));
+        logTtsDebug('server speak failed → browser', msg);
       }
       if (gen !== ttsPlayGen) return;
+      // Async hub replies are outside the original click gesture; resume synth first.
+      softUnlockBrowserSynth();
       speakViaBrowserTts(spokenText, gen);
       updateTtsToggleUi();
     })();
     return true;
   }
 
+  softUnlockBrowserSynth();
   return speakViaBrowserTts(spokenText, gen);
 }
 
@@ -1406,10 +1449,13 @@ function openThinkingStream(convId) {
     try { msg = JSON.parse(ev.data); } catch (_) { return; }
     if (msg && msg.done) {
       closeThinkingStream();
-      // Turn ended server-side — reload so a stripped launch-ack / real reply
-      // replaces the Thinking… block even if the push was missed.
+      // Turn ended server-side — soft-refresh messages so a stripped launch-ack /
+      // real reply replaces Thinking… if the push was missed.
+      // MUST NOT call loadConversation(): that resets ttsPrimed + stopTtsSpeech(),
+      // which cancels Kokoro/browser speech for the hub reply and marks it as the
+      // baseline (toggle speaks, subsequent hub replies stay silent).
       if (currentConversation === convId) {
-        loadConversation(convId).catch(() => {});
+        softReloadConversation(convId).catch(() => {});
       }
       return;
     }
@@ -1447,7 +1493,8 @@ async function stopThinking() {
       body: JSON.stringify({ conversationId: convId }),
     });
   } catch (_err) { /* best-effort */ }
-  if (currentConversation) await loadConversation(currentConversation);
+  // Soft reload: keep TTS priming/in-flight speech rules intact.
+  if (currentConversation) await softReloadConversation(currentConversation);
 }
 
 async function stopAgent(slug) {
@@ -1537,17 +1584,37 @@ async function loadConversations() {
   await loadConversation(currentConversation);
 }
 
+/**
+ * Soft refresh of the open conversation (thinking done, stop, missed push).
+ * Applies new messages via applyConversation — does NOT reset TTS priming or
+ * cancel in-flight speech. New hub replies still speak via maybeSpeakNewHubReplies.
+ */
+async function softReloadConversation(id) {
+  if (!id || id !== currentConversation) return;
+  try {
+    const conv = await api(`/api/conversations/${encodeURIComponent(id)}`);
+    applyConversation(id, conv);
+  } catch (err) {
+    logTtsDebug('softReloadConversation failed', String(err && err.message || err));
+  }
+}
+
 async function loadConversation(id) {
+  const switching = id !== currentConversation;
   currentConversation = id;
   // Prefer WS subscribe for conversation feed; falls back to SSE inside subscribeConversation.
   subscribeConversation(id);
   const conv = await api(`/api/conversations/${encodeURIComponent(id)}`);
   const messages = conv.messages || [];
   lastConversationStamp = conversationPollStamp(conv);
-  // Do not read history aloud when opening/switching conversations.
+  // Only reset TTS baseline when opening/switching conversations (not soft reloads).
+  // Hard load always re-baselines so history is not read aloud.
   ttsPrimed = false;
   lastSpokenHubKey = '';
   stopTtsSpeech();
+  if (switching) {
+    logTtsDebug('loadConversation switch', id);
+  }
   renderMessages(messages);
 }
 
