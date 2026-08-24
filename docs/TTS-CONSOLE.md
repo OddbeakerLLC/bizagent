@@ -85,15 +85,26 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
 - Turning TTS off cancels speech immediately.
 - Sending a user message cancels in-flight speech (avoids talking over the next turn).
 
+## Multi-reply reliability (browser fallback)
+
+Chrome `speechSynthesis` historically went silent after the first hub reply. Mitigations in `app.js`:
+
+1. **Retain utterance objects** (`ttsCurrentUtterance` / `ttsUtteranceQueue`) so GC cannot kill mid-session speech.
+2. **`resume()` after every `cancel()`** and before every `speak()` (cancel leaves `paused=true`).
+3. **Chunk long text** (~180 chars at sentence boundaries) and queue chunks with retained refs.
+4. **Keepalive** every 4s: if `speaking && paused`, call `resume()` (Chrome long-utterance stall).
+5. **Idle retry:** if `speak()` leaves the synth idle, re-`speak` once after 50ms.
+6. **Debug:** `localStorage.setItem('bizagent.tts.debug','1')` then reload → `[bizagent TTS]` console traces (enabled/paused/speaking/voices/gen).
+
 ## Autoplay / unlock
 
 Browsers often block both `speechSynthesis.speak()` and `HTMLAudioElement.play()` without a user gesture. Console TTS:
 
-1. **On toggle ON (click):** cancel/resume synth, play a tiny silent WAV to unlock audio elements, then speak “Text to speech on.” (server preferred, browser fallback).
+1. **On toggle ON (click):** cancel/resume synth, play a tiny silent WAV to unlock audio elements, then speak “Text to speech on.” (server preferred, browser fallback). Gesture unlock sticks for the tab session (HTMLAudio + synth).
 2. **Before browser speak:** if the synth is `paused` (common after `cancel()`), call `resume()`.
-3. **Missing engines:** button title explains; first failure logs once to the browser console.
+3. **Missing engines:** button title explains; first failure logs once to the browser console (includes synth snapshot).
 
-Restoring TTS from `localStorage` on reload does **not** auto-prime (no gesture yet). Click the TTS button off→on once after reload if speech is silent.
+Restoring TTS from `localStorage` on reload does **not** auto-prime (no gesture yet). Click the TTS button off→on once after reload if speech is silent. After that, **every** new hub reply should speak without re-toggling.
 
 ## Verify
 

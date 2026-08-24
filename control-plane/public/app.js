@@ -657,7 +657,16 @@ function messageClassName(msg) {
 // --- Console TTS (oddbeaker-tts HTTP preferred; browser speechSynthesis fallback) ---
 // Patterns adapted from Jobe PWA buildSpokenText / cleanLineForSpeech.
 // Server proxy: POST /api/tts/synthesize → local oddbeaker-tts :9201 (Kokoro).
+//
+// Chrome speechSynthesis pitfalls this module hardens against:
+// - Utterances must be retained (GC mid-speak → silence after reply #1).
+// - cancel() often leaves synth.paused=true; resume() before every speak.
+// - Long idle / multi-utterance sessions need a resume keepalive.
+// - speak() right after cancel() can no-op; microtask + retry once.
 const TTS_STORAGE_KEY = 'bizagent.tts.enabled';
+const TTS_DEBUG = (() => {
+  try { return __storage.getItem('bizagent.tts.debug') === '1'; } catch (_) { return false; }
+})();
 let ttsEnabled = false;
 /** After first paint of a conversation, only *new* hub replies are spoken. */
 let ttsPrimed = false;
@@ -672,6 +681,16 @@ let ttsServerAvailable = null;
 let ttsPlayGen = 0;
 /** Active HTMLAudioElement for server WAV playback (if any). */
 let ttsAudioEl = null;
+/**
+ * MUST retain current utterance(s) — Chrome GC's unreferenced SpeechSynthesisUtterance
+ * and speech dies after the first async hub reply.
+ */
+let ttsCurrentUtterance = null;
+let ttsUtteranceQueue = [];
+/** Interval that resumes a stuck paused+speaking synth (Chrome ~15s bug). */
+let ttsKeepAliveTimer = null;
+/** True after toggle-ON gesture unlocked HTMLAudio / synth this tab session. */
+let ttsGestureUnlocked = false;
 
 function hubMessageKey(msg) {
   if (!msg || msg.role !== 'hub') return '';
@@ -693,8 +712,65 @@ function getTtsVoices() {
   }
 }
 
+function ttsSynthSnapshot() {
+  const synth = getSpeechSynthesis();
+  if (!synth) return { synth: false };
+  let pending = 0;
+  let speaking = false;
+  let paused = false;
+  try {
+    speaking = !!synth.speaking;
+    paused = !!synth.paused;
+    pending = typeof synth.pending === 'boolean' ? (synth.pending ? 1 : 0) : 0;
+  } catch (_) { /* ignore */ }
+  return {
+    synth: true,
+    enabled: ttsEnabled,
+    speaking,
+    paused,
+    pending,
+    voices: getTtsVoices().length,
+    server: ttsServerAvailable,
+    gen: ttsPlayGen,
+    gesture: ttsGestureUnlocked,
+  };
+}
+
+function logTtsDebug(label, extra) {
+  if (!TTS_DEBUG) return;
+  try {
+    console.info('[bizagent TTS]', label, ttsSynthSnapshot(), extra || '');
+  } catch (_) { /* ignore */ }
+}
+
+function stopTtsKeepAlive() {
+  if (ttsKeepAliveTimer) {
+    try { clearInterval(ttsKeepAliveTimer); } catch (_) { /* ignore */ }
+    ttsKeepAliveTimer = null;
+  }
+}
+
+function startTtsKeepAlive() {
+  stopTtsKeepAlive();
+  ttsKeepAliveTimer = setInterval(() => {
+    if (!ttsEnabled) return;
+    const synth = getSpeechSynthesis();
+    if (!synth) return;
+    try {
+      // Chrome: speaking+paused stuck mid-utterance until resume().
+      if (synth.speaking && synth.paused) {
+        logTtsDebug('keepalive resume');
+        synth.resume();
+      }
+    } catch (_) { /* ignore */ }
+  }, 4000);
+}
+
 function stopTtsSpeech() {
   ttsPlayGen += 1;
+  stopTtsKeepAlive();
+  ttsCurrentUtterance = null;
+  ttsUtteranceQueue = [];
   try {
     if (ttsAudioEl) {
       ttsAudioEl.pause();
@@ -705,7 +781,11 @@ function stopTtsSpeech() {
   } catch (_) { /* ignore */ }
   try {
     const synth = getSpeechSynthesis();
-    if (synth) synth.cancel();
+    if (synth) {
+      synth.cancel();
+      // cancel() frequently leaves paused=true; clear it so the next speak works.
+      try { if (synth.paused) synth.resume(); } catch (_) { /* ignore */ }
+    }
   } catch (_) { /* ignore */ }
 }
 
@@ -764,7 +844,11 @@ function logTtsSpeakErrorOnce(err) {
   if (ttsSpeakErrorLogged) return;
   ttsSpeakErrorLogged = true;
   try {
-    console.warn('[bizagent TTS] speak failed (service down, autoplay, or no voices):', err || '');
+    console.warn(
+      '[bizagent TTS] speak failed (service down, autoplay, or no voices):',
+      err || '',
+      ttsSynthSnapshot(),
+    );
   } catch (_) { /* ignore */ }
 }
 
@@ -898,49 +982,159 @@ function buildSpokenText(text) {
 }
 
 /**
- * Browser speechSynthesis path (fallback when oddbeaker-tts is down).
+ * Chunk long text so Chrome does not silently drop multi-minute utterances.
+ * Prefer sentence boundaries under ~180 chars.
+ */
+function chunkSpokenText(text, maxLen) {
+  const limit = maxLen || 180;
+  const src = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!src) return [];
+  if (src.length <= limit) return [src];
+  const parts = [];
+  let rest = src;
+  while (rest.length > limit) {
+    let cut = -1;
+    const window = rest.slice(0, limit + 1);
+    const m = window.match(/.*[.!?][\s]/);
+    if (m && m[0].length > 40) cut = m[0].length;
+    if (cut < 0) {
+      const sp = rest.lastIndexOf(' ', limit);
+      cut = sp > 40 ? sp : limit;
+    }
+    parts.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) parts.push(rest);
+  return parts.filter(Boolean);
+}
+
+function clearBrowserUtteranceState() {
+  ttsCurrentUtterance = null;
+  ttsUtteranceQueue = [];
+  stopTtsKeepAlive();
+}
+
+/**
+ * Queue and speak via speechSynthesis. Retains utterance refs (Chrome GC fix).
  * @param {string} spokenText already-built spoken text
+ * @param {number} gen play generation — abort if stopTtsSpeech advanced it
  * @returns {boolean}
  */
-function speakViaBrowserTts(spokenText) {
+function speakViaBrowserTts(spokenText, gen) {
+  const playGen = gen == null ? ttsPlayGen : gen;
   const synth = getSpeechSynthesis();
   if (!synth) {
     setTtsUnavailable('No TTS (oddbeaker-tts down; speechSynthesis missing)');
     logTtsSpeakErrorOnce('speechSynthesis missing');
     return false;
   }
+  if (playGen !== ttsPlayGen) return false;
+
+  const chunks = chunkSpokenText(spokenText, 180);
+  if (!chunks.length) return false;
+
   ensureTtsResumed();
+  const voices = getTtsVoices();
+  if (!voices.length) {
+    setTtsUnavailable('No TTS (oddbeaker-tts down; empty browser voice list)');
+  } else if (ttsUnavailableReason) {
+    setTtsUnavailable('');
+  }
+
+  let preferred = null;
   try {
-    const voices = getTtsVoices();
-    if (!voices.length) {
-      setTtsUnavailable('No TTS (oddbeaker-tts down; empty browser voice list)');
-    } else if (ttsUnavailableReason) {
-      setTtsUnavailable('');
+    preferred = voices.find((v) =>
+      v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Daniel')
+    ) || null;
+  } catch (_) { /* ignore */ }
+
+  const utterances = chunks.map((chunk) => {
+    const u = new SpeechSynthesisUtterance(chunk);
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    u.volume = 1.0;
+    if (preferred) {
+      try { u.voice = preferred; } catch (_) { /* ignore */ }
     }
+    return u;
+  });
 
-    const utterance = new SpeechSynthesisUtterance(spokenText);
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
-    try {
-      const preferred = voices.find((v) =>
-        v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Daniel')
-      );
-      if (preferred) utterance.voice = preferred;
-    } catch (_) { /* ignore voice pick */ }
+  // Retain ALL chunks so GC cannot kill mid-queue speech.
+  ttsUtteranceQueue = utterances;
+  ttsCurrentUtterance = utterances[0] || null;
+  startTtsKeepAlive();
+  logTtsDebug('browser speak start', { chunks: chunks.length, chars: spokenText.length });
 
-    utterance.onerror = (ev) => {
-      logTtsSpeakErrorOnce(ev && (ev.error || ev));
+  let idx = 0;
+  const finishOk = () => {
+    if (playGen !== ttsPlayGen) return;
+    clearBrowserUtteranceState();
+    logTtsDebug('browser speak end');
+  };
+
+  const speakNext = () => {
+    if (playGen !== ttsPlayGen) return;
+    if (idx >= utterances.length) {
+      finishOk();
+      return;
+    }
+    const u = utterances[idx];
+    ttsCurrentUtterance = u;
+    let settled = false;
+    const advance = () => {
+      if (settled) return;
+      settled = true;
+      idx += 1;
+      // Yield a tick between chunks so cancel/resume state settles.
+      setTimeout(speakNext, 0);
+    };
+    u.onend = () => advance();
+    u.onerror = (ev) => {
+      const errName = ev && ev.error ? String(ev.error) : 'error';
+      // 'interrupted' / 'canceled' are expected when we stop for a newer reply.
+      if (errName === 'interrupted' || errName === 'canceled') {
+        logTtsDebug('utterance interrupted', errName);
+        // Do not advance — stopTtsSpeech owns the gen bump; leave queue.
+        return;
+      }
+      logTtsSpeakErrorOnce(errName);
+      logTtsDebug('utterance error', errName);
+      advance();
     };
 
-    ensureTtsResumed();
-    synth.speak(utterance);
-    ensureTtsResumed();
-    return true;
-  } catch (err) {
-    logTtsSpeakErrorOnce(err);
-    return false;
-  }
+    const doSpeak = (isRetry) => {
+      if (playGen !== ttsPlayGen) return;
+      try {
+        ensureTtsResumed();
+        synth.speak(u);
+        ensureTtsResumed();
+        // If speak() no-op'd (Chrome after cancel), retry once shortly.
+        if (!isRetry) {
+          setTimeout(() => {
+            if (playGen !== ttsPlayGen || settled) return;
+            try {
+              if (!synth.speaking && !synth.pending) {
+                logTtsDebug('browser speak retry (idle after speak)');
+                doSpeak(true);
+              }
+            } catch (err) {
+              logTtsSpeakErrorOnce(err);
+            }
+          }, 50);
+        }
+      } catch (err) {
+        logTtsSpeakErrorOnce(err);
+        advance();
+      }
+    };
+
+    // First chunk: yield after cancel() so Chrome accepts the new utterance.
+    if (idx === 0) setTimeout(() => doSpeak(false), 0);
+    else doSpeak(false);
+  };
+
+  speakNext();
+  return true;
 }
 
 /**
@@ -957,6 +1151,7 @@ function speakTtsText(text, opts) {
   // Bump gen + stop prior audio/utterance.
   stopTtsSpeech();
   const gen = ttsPlayGen;
+  logTtsDebug('speakTtsText', { raw: !!(opts && opts.raw), chars: spokenText.length });
 
   // Prefer server when known-available or not yet probed; fall back on failure.
   const tryServer = ttsServerAvailable !== false;
@@ -975,18 +1170,20 @@ function speakTtsText(text, opts) {
         ttsServerAvailable = false;
         if (gen !== ttsPlayGen) return;
         logTtsSpeakErrorOnce(err);
+        logTtsDebug('server speak failed → browser', String(err && err.message || err));
       }
       if (gen !== ttsPlayGen) return;
-      speakViaBrowserTts(spokenText);
+      speakViaBrowserTts(spokenText, gen);
       updateTtsToggleUi();
     })();
     return true;
   }
 
-  return speakViaBrowserTts(spokenText);
+  return speakViaBrowserTts(spokenText, gen);
 }
 
 function speakHubReply(text) {
+  logTtsDebug('speakHubReply', { chars: String(text || '').length });
   speakTtsText(text);
 }
 
@@ -1008,8 +1205,25 @@ function unlockHtmlAudioGesture() {
   } catch (_) { /* ignore */ }
 }
 
+/**
+ * Soft browser unlock used when starting a speak outside the original click
+ * (hub replies). Does not cancel in-flight speech; only resumes + optional
+ * zero-volume ping if synth looks dead.
+ */
+function softUnlockBrowserSynth() {
+  const synth = getSpeechSynthesis();
+  if (!synth) return;
+  try {
+    ensureTtsResumed();
+    // If completely idle and previously unlocked this session, a no-op resume is enough.
+    // If stuck paused with empty queue, resume again.
+    if (synth.paused) synth.resume();
+  } catch (_) { /* ignore */ }
+}
+
 /** Unlock autoplay + confirm enable inside the user-gesture click chain. */
 function primeTtsOnEnable() {
+  ttsGestureUnlocked = true;
   // Warm browser synth + unlock HTMLAudio under this click (Kokoro WAV + fallback).
   try {
     const synth = getSpeechSynthesis();
@@ -1027,26 +1241,32 @@ function primeTtsOnEnable() {
   const ok = speakTtsText('Text to speech on.', { raw: true });
   if (ok) setTtsUnavailable('');
   updateTtsToggleUi();
+  logTtsDebug('primed on enable');
 }
 
 function maybeSpeakNewHubReplies(messages) {
   const list = Array.isArray(messages) ? messages : [];
   let latestHub = null;
   for (let i = list.length - 1; i >= 0; i -= 1) {
-    if (list[i] && list[i].role === 'hub' && String(list[i].content || '').trim()) {
-      latestHub = list[i];
-      break;
-    }
+    const m = list[i];
+    if (!m || m.role !== 'hub') continue;
+    if (!String(m.content || '').trim()) continue;
+    latestHub = m;
+    break;
   }
   const key = hubMessageKey(latestHub);
   if (!ttsPrimed) {
     ttsPrimed = true;
     lastSpokenHubKey = key;
+    logTtsDebug('prime baseline hub key', key ? key.slice(0, 60) : '');
     return;
   }
   if (!key || key === lastSpokenHubKey) return;
   lastSpokenHubKey = key;
-  if (ttsEnabled && latestHub) speakHubReply(latestHub.content);
+  if (ttsEnabled && latestHub) {
+    softUnlockBrowserSynth();
+    speakHubReply(latestHub.content);
+  }
 }
 
 function setTtsEnabled(on, opts) {
