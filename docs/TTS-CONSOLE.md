@@ -85,6 +85,14 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
 - Turning TTS off cancels speech immediately.
 - Sending a user message cancels in-flight speech (avoids talking over the next turn).
 
+## Multi-reply reliability (Kokoro + browser)
+
+**Root cause (2026-08-24 silence after toggle):** when a hub turn finished, the thinking SSE `done` handler called `loadConversation()`, which always reset `ttsPrimed` and `stopTtsSpeech()`. The new hub reply was then treated as the baseline (not spoken), and any in-flight Kokoro WAV was cancelled. Toggle confirmation still worked because it does not go through that path.
+
+**Fix:** thinking `done` / stop use `softReloadConversation()` → `applyConversation()` only (no TTS baseline reset, no forced stop). Hard `loadConversation()` still baselines on open/switch so history is not read aloud.
+
+Also: server play failures fall back to `speechSynthesis` without permanently marking oddbeaker-tts down on autoplay errors.
+
 ## Multi-reply reliability (browser fallback)
 
 Chrome `speechSynthesis` historically went silent after the first hub reply. Mitigations in `app.js`:
