@@ -654,8 +654,9 @@ function messageClassName(msg) {
   return 'message system';
 }
 
-// --- Console TTS (browser speechSynthesis; default OFF) ---
+// --- Console TTS (oddbeaker-tts HTTP preferred; browser speechSynthesis fallback) ---
 // Patterns adapted from Jobe PWA buildSpokenText / cleanLineForSpeech.
+// Server proxy: POST /api/tts/synthesize → local oddbeaker-tts :9201 (Kokoro).
 const TTS_STORAGE_KEY = 'bizagent.tts.enabled';
 let ttsEnabled = false;
 /** After first paint of a conversation, only *new* hub replies are spoken. */
@@ -663,8 +664,14 @@ let ttsPrimed = false;
 let lastSpokenHubKey = '';
 /** One-shot console warn for speak failures (autoplay / missing voices). */
 let ttsSpeakErrorLogged = false;
-/** UI state when browser has no usable speechSynthesis / voices. */
+/** UI state when neither server nor browser TTS is usable. */
 let ttsUnavailableReason = '';
+/** Cached oddbeaker-tts availability (null = not probed yet). */
+let ttsServerAvailable = null;
+/** Generation token so late async audio is dropped after stop/new speak. */
+let ttsPlayGen = 0;
+/** Active HTMLAudioElement for server WAV playback (if any). */
+let ttsAudioEl = null;
 
 function hubMessageKey(msg) {
   if (!msg || msg.role !== 'hub') return '';
@@ -687,6 +694,15 @@ function getTtsVoices() {
 }
 
 function stopTtsSpeech() {
+  ttsPlayGen += 1;
+  try {
+    if (ttsAudioEl) {
+      ttsAudioEl.pause();
+      ttsAudioEl.removeAttribute('src');
+      try { ttsAudioEl.load(); } catch (_) { /* ignore */ }
+      ttsAudioEl = null;
+    }
+  } catch (_) { /* ignore */ }
   try {
     const synth = getSpeechSynthesis();
     if (synth) synth.cancel();
@@ -727,9 +743,15 @@ function updateTtsToggleUi() {
     btn.classList.add('tts-unavailable');
   } else {
     btn.classList.remove('tts-unavailable');
-    btn.title = ttsEnabled
+    let title = ttsEnabled
       ? 'Text-to-speech ON (click to disable)'
       : 'Text-to-speech OFF (click to enable)';
+    if (ttsEnabled && ttsServerAvailable === true) {
+      title += ' · oddbeaker-tts';
+    } else if (ttsEnabled && ttsServerAvailable === false) {
+      title += ' · browser voice fallback';
+    }
+    btn.title = title;
   }
 }
 
@@ -742,8 +764,63 @@ function logTtsSpeakErrorOnce(err) {
   if (ttsSpeakErrorLogged) return;
   ttsSpeakErrorLogged = true;
   try {
-    console.warn('[bizagent TTS] speak failed (autoplay policy, paused synth, or no voices):', err || '');
+    console.warn('[bizagent TTS] speak failed (service down, autoplay, or no voices):', err || '');
   } catch (_) { /* ignore */ }
+}
+
+/** Probe control-plane → oddbeaker-tts health (cached briefly). */
+async function probeTtsServer(force) {
+  if (!force && ttsServerAvailable !== null) return ttsServerAvailable;
+  try {
+    const res = await fetch('/api/tts/health', { credentials: 'same-origin' });
+    if (!res.ok) {
+      ttsServerAvailable = false;
+      return false;
+    }
+    const data = await res.json().catch(() => ({}));
+    ttsServerAvailable = !!(data && data.available);
+    return ttsServerAvailable;
+  } catch (_) {
+    ttsServerAvailable = false;
+    return false;
+  }
+}
+
+/**
+ * Speak via oddbeaker-tts (server proxy). Returns true if playback started.
+ * On failure returns false so caller can fall back to speechSynthesis.
+ */
+async function speakViaServerTts(spokenText, gen) {
+  const res = await fetch('/api/tts/synthesize', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: spokenText, raw: true }),
+  });
+  if (gen !== ttsPlayGen) return false;
+  if (!res.ok) {
+    ttsServerAvailable = false;
+    throw new Error(`synthesize HTTP ${res.status}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (gen !== ttsPlayGen) return false;
+  if (!data || !data.audio_url) {
+    // nothing_to_speak or empty — not a hard failure
+    return true;
+  }
+  ttsServerAvailable = true;
+  const audio = new Audio(data.audio_url);
+  ttsAudioEl = audio;
+  await new Promise((resolve, reject) => {
+    audio.onended = () => resolve();
+    audio.onerror = () => reject(new Error('audio element error'));
+    const p = audio.play();
+    if (p && typeof p.then === 'function') {
+      p.then(() => { /* playing */ }).catch(reject);
+    }
+  });
+  if (ttsAudioEl === audio) ttsAudioEl = null;
+  return true;
 }
 
 function cleanLineForSpeech(line) {
@@ -821,31 +898,22 @@ function buildSpokenText(text) {
 }
 
 /**
- * Speak text via speechSynthesis.
- * @param {string} text raw or already-built spoken text
- * @param {{ raw?: boolean }} [opts] raw=true skips buildSpokenText (confirmation phrases)
+ * Browser speechSynthesis path (fallback when oddbeaker-tts is down).
+ * @param {string} spokenText already-built spoken text
+ * @returns {boolean}
  */
-function speakTtsText(text, opts) {
-  if (!ttsEnabled) return false;
+function speakViaBrowserTts(spokenText) {
   const synth = getSpeechSynthesis();
   if (!synth) {
-    setTtsUnavailable('No browser voice (speechSynthesis missing)');
+    setTtsUnavailable('No TTS (oddbeaker-tts down; speechSynthesis missing)');
     logTtsSpeakErrorOnce('speechSynthesis missing');
     return false;
   }
-  const spokenText = opts && opts.raw ? String(text || '').trim() : buildSpokenText(text);
-  if (!spokenText) return false;
-
-  // cancel() can leave Chrome paused; resume before/after so later async speaks work.
-  stopTtsSpeech();
   ensureTtsResumed();
-
   try {
     const voices = getTtsVoices();
     if (!voices.length) {
-      // Voices often populate async; try once more after a tick is handled by onvoiceschanged.
-      // Still attempt speak — some engines work with default voice and empty list briefly.
-      setTtsUnavailable('No browser voice (empty voice list — try again or check OS TTS)');
+      setTtsUnavailable('No TTS (oddbeaker-tts down; empty browser voice list)');
     } else if (ttsUnavailableReason) {
       setTtsUnavailable('');
     }
@@ -867,7 +935,6 @@ function speakTtsText(text, opts) {
 
     ensureTtsResumed();
     synth.speak(utterance);
-    // Some Chromium builds need resume() right after speak() when previously cancelled.
     ensureTtsResumed();
     return true;
   } catch (err) {
@@ -876,28 +943,90 @@ function speakTtsText(text, opts) {
   }
 }
 
+/**
+ * Speak text: prefer oddbeaker-tts via /api/tts/*; fall back to speechSynthesis.
+ * @param {string} text raw or already-built spoken text
+ * @param {{ raw?: boolean }} [opts] raw=true skips buildSpokenText (confirmation phrases)
+ * @returns {boolean} true if a speak attempt was started (may finish async)
+ */
+function speakTtsText(text, opts) {
+  if (!ttsEnabled) return false;
+  const spokenText = opts && opts.raw ? String(text || '').trim() : buildSpokenText(text);
+  if (!spokenText) return false;
+
+  // Bump gen + stop prior audio/utterance.
+  stopTtsSpeech();
+  const gen = ttsPlayGen;
+
+  // Prefer server when known-available or not yet probed; fall back on failure.
+  const tryServer = ttsServerAvailable !== false;
+  if (tryServer) {
+    (async () => {
+      try {
+        if (ttsServerAvailable === null) await probeTtsServer(false);
+        if (gen !== ttsPlayGen) return;
+        if (ttsServerAvailable) {
+          await speakViaServerTts(spokenText, gen);
+          if (gen === ttsPlayGen && ttsUnavailableReason) setTtsUnavailable('');
+          updateTtsToggleUi();
+          return;
+        }
+      } catch (err) {
+        ttsServerAvailable = false;
+        if (gen !== ttsPlayGen) return;
+        logTtsSpeakErrorOnce(err);
+      }
+      if (gen !== ttsPlayGen) return;
+      speakViaBrowserTts(spokenText);
+      updateTtsToggleUi();
+    })();
+    return true;
+  }
+
+  return speakViaBrowserTts(spokenText);
+}
+
 function speakHubReply(text) {
   speakTtsText(text);
 }
 
+/** Tiny silent WAV — play under user gesture to unlock later HTMLAudioElement plays. */
+function unlockHtmlAudioGesture() {
+  try {
+    if (typeof Audio === 'undefined') return;
+    // Minimal valid WAV (very short silence).
+    const silent = new Audio(
+      'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
+    );
+    silent.volume = 0.01;
+    const p = silent.play();
+    if (p && typeof p.then === 'function') {
+      p.then(() => {
+        try { silent.pause(); } catch (_) { /* ignore */ }
+      }).catch(() => { /* autoplay still blocked — browser path may still work */ });
+    }
+  } catch (_) { /* ignore */ }
+}
+
 /** Unlock autoplay + confirm enable inside the user-gesture click chain. */
 function primeTtsOnEnable() {
-  const synth = getSpeechSynthesis();
-  if (!synth) {
-    setTtsUnavailable('No browser voice (speechSynthesis missing)');
-    logTtsSpeakErrorOnce('speechSynthesis missing');
-    return;
-  }
+  // Warm browser synth + unlock HTMLAudio under this click (Kokoro WAV + fallback).
   try {
-    synth.cancel();
-    ensureTtsResumed();
-    // Warm voice list under the gesture when possible.
-    getTtsVoices();
+    const synth = getSpeechSynthesis();
+    if (synth) {
+      synth.cancel();
+      ensureTtsResumed();
+      getTtsVoices();
+    }
   } catch (err) {
     logTtsSpeakErrorOnce(err);
   }
+  unlockHtmlAudioGesture();
+  // Re-probe so toggle-ON picks up a newly started oddbeaker-tts daemon.
+  ttsServerAvailable = null;
   const ok = speakTtsText('Text to speech on.', { raw: true });
-  if (ok && getTtsVoices().length) setTtsUnavailable('');
+  if (ok) setTtsUnavailable('');
+  updateTtsToggleUi();
 }
 
 function maybeSpeakNewHubReplies(messages) {
@@ -946,7 +1075,8 @@ function bindTtsToggle() {
     // Toggle OFF: stop. Toggle ON: enable + speak confirmation in this gesture.
     setTtsEnabled(!ttsEnabled, { prime: true });
   });
-  // Chrome loads voices async; warm the list so first speak can pick a voice.
+  // Background probe for oddbeaker-tts; browser voices remain fallback.
+  probeTtsServer(true).then(() => updateTtsToggleUi()).catch(() => {});
   try {
     const synth = getSpeechSynthesis();
     if (synth) {
@@ -954,14 +1084,17 @@ function bindTtsToggle() {
       synth.onvoiceschanged = () => {
         try {
           const voices = getTtsVoices();
+          // Only surface browser-voice warnings when server TTS is known down.
+          if (ttsServerAvailable) {
+            if (ttsUnavailableReason) setTtsUnavailable('');
+            return;
+          }
           if (voices.length && ttsUnavailableReason) setTtsUnavailable('');
-          else if (!voices.length && ttsEnabled) {
-            setTtsUnavailable('No browser voice (empty voice list — try again or check OS TTS)');
+          else if (!voices.length && ttsEnabled && ttsServerAvailable === false) {
+            setTtsUnavailable('No TTS (oddbeaker-tts down; empty browser voice list)');
           }
         } catch (_) { /* ignore */ }
       };
-    } else {
-      setTtsUnavailable('No browser voice (speechSynthesis missing)');
     }
   } catch (_) { /* ignore */ }
 }
