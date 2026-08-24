@@ -14,8 +14,12 @@ HUB="${BIZAGENT_HUB:-$ROOT}"
 # This ensures XAI_API_KEY and BIZAGENT_* variables are available.
 load_env() {
   if [ -f "$HUB/.bizagent/env" ]; then
+    # Export assignments so KEY=val lines (e.g. BIZAGENT_TTS_VOICE) reach the node child.
+    # Matches dispatcher / agent launch (set -a; . env).
+    set -a
     # shellcheck disable=SC1091
     . "$HUB/.bizagent/env" 2>/dev/null || true
+    set +a
     echo "Loaded environment from $HUB/.bizagent/env"
   elif [ -f "$HOME/.bashrc" ]; then
     # shellcheck disable=SC1091

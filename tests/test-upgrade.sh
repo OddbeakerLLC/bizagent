@@ -105,3 +105,10 @@ echo "$nout2" | grep -q 'UPGRADE_RAN_OK' \
   || fail "nightly did not run upgrade when auto_update=true: $nout2"
 
 echo "  ok: upgrade"
+
+# oddbeaker-tts on upgrade path
+grep -q 'install-oddbeaker-tts\|ensure_tts_on_upgrade\|with-tts' "$SCRIPT" \
+  || fail "upgrade.sh missing oddbeaker-tts ensure step"
+grep -q 'BIZAGENT_TTS_VOICE' "$ROOT/scripts/install-oddbeaker-tts.sh" \
+  || fail "install-oddbeaker-tts missing voice persistence"
+
