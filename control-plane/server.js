@@ -127,6 +127,12 @@ const {
   setOnConversationMutated,
 } = require("./lib/hub-turn-safety");
 const { ensureHubRuntimePrompt } = require("./lib/hub-memory");
+const {
+  ttsHealth,
+  ttsSynthesize,
+  ttsFetchAudio,
+  rewriteAudioUrl,
+} = require("./lib/tts-proxy");
 const { agentMailStatus, routeOutboxes } = require("./lib/mail");
 const { getProfile, setProfile } = require("./lib/profile");
 const { logEvent, logHubTurn, logError, appendLog } = require("./lib/log");
@@ -1272,6 +1278,62 @@ async function handleApi(config, req, res) {
   }
 
   // POST /api/library removed — library is write-via-hub/agents only.
+
+  // --- Console TTS proxy → local oddbeaker-tts (Kokoro, default :9201) ---
+  // Browser falls back to speechSynthesis when available=false / synthesize fails.
+  if (url.pathname === "/api/tts/health" && req.method === "GET") {
+    const health = await ttsHealth();
+    return send(res, 200, health);
+  }
+
+  if (url.pathname === "/api/tts/synthesize" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const result = await ttsSynthesize({
+        text: body.text,
+        voice: body.voice,
+        speed: body.speed,
+        raw: !!body.raw,
+      });
+      const audioPath = rewriteAudioUrl(result.audio_url);
+      return send(res, 200, {
+        ...result,
+        audio_url: audioPath,
+        engine: "oddbeaker-tts",
+      });
+    } catch (err) {
+      const code = err && err.code;
+      if (code === "bad_request") return send(res, 400, { error: err.message });
+      const status =
+        code === "upstream" && err.status >= 400 && err.status < 600
+          ? err.status
+          : 502;
+      return send(res, status, {
+        error: err.message || "TTS unavailable",
+        available: false,
+      });
+    }
+  }
+
+  const ttsAudioMatch = url.pathname.match(/^\/api\/tts\/audio\/([^/]+)$/);
+  if (ttsAudioMatch && req.method === "GET") {
+    try {
+      const filename = decodeURIComponent(ttsAudioMatch[1] || "");
+      const audio = await ttsFetchAudio(filename);
+      res.writeHead(200, {
+        "Content-Type": audio.contentType || "audio/wav",
+        "Cache-Control": "private, max-age=3600",
+        "Content-Length": audio.buffer.length,
+      });
+      res.end(audio.buffer);
+      return null;
+    } catch (err) {
+      const code = err && err.code;
+      if (code === "bad_request") return send(res, 400, { error: err.message });
+      if (code === "not_found") return send(res, 404, { error: err.message });
+      return send(res, 502, { error: err.message || "TTS audio unavailable" });
+    }
+  }
 
   // --- Chat uploads drop zone (.bizagent/uploads/ or company/) ---
   if (url.pathname === "/api/uploads" && req.method === "POST") {
