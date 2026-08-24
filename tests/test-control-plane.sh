@@ -315,15 +315,17 @@ grep -q "Number.isFinite(offset)" "$ROOT/control-plane/server.js" \
   || fail "thinking stream does not guard against stale/missing logByteOffset"
 grep -q "clearThinking" "$ROOT/control-plane/lib/hub-turn-safety.js" \
   || fail "hub turn completion does not clear stale thinking entry"
-# PlantUML preview: render .puml source to SVG inline.
-grep -q "/api/plantuml/render" "$ROOT/control-plane/server.js" \
-  || fail "server missing PlantUML render endpoint"
+# PlantUML: Library file path only (no topbar scratch button /api/plantuml/render).
 grep -q "renderPlantUml" "$ROOT/control-plane/lib/plantuml.js" \
   || fail "missing PlantUML render module"
-grep -q "plantumlBtn" "$ROOT/control-plane/public/index.html" \
-  || fail "UI missing PlantUML preview button"
-grep -q "plantumlOutput" "$ROOT/control-plane/public/app.js" \
-  || fail "UI missing PlantUML preview output handling"
+grep -q "wantRender" "$ROOT/control-plane/server.js" \
+  || fail "server missing Library PlantUML ?render=1 path"
+grep -q "library-diagram\|render=1\|render:" "$ROOT/control-plane/public/library.js" \
+  || fail "Library UI missing diagram preview path"
+! grep -q "plantumlBtn" "$ROOT/control-plane/public/index.html" \
+  || fail "UI still has removed PlantUML scratch button"
+! grep -q "/api/plantuml/render" "$ROOT/control-plane/server.js" \
+  || fail "server still exposes removed /api/plantuml/render"
 # Click-to-stop: running agent status light → /api/agent/:slug/stop
 grep -q 'agentStopMatch' "$ROOT/control-plane/server.js" \
   || fail "server missing /api/agent/:slug/stop route"
@@ -1858,13 +1860,60 @@ const root = process.argv[2];
 const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(`${root}/control-plane/public/app.js`, 'utf8');
+const noop = () => {};
+const el = () => ({
+  addEventListener: noop,
+  textContent: '',
+  innerHTML: '',
+  dataset: {},
+  value: '',
+  style: {},
+  classList: { toggle: noop, add: noop, remove: noop, contains: () => false },
+  setAttribute: noop,
+  getAttribute: () => null,
+  appendChild: noop,
+  removeChild: noop,
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  title: '',
+  disabled: false,
+  checked: false,
+  focus: noop,
+  click: noop,
+});
 const sandbox = {
-  document: { getElementById: () => ({ addEventListener: () => {}, textContent: '', dataset: {}, value: '' }), addEventListener: () => {} },
+  document: {
+    getElementById: el,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: el,
+    addEventListener: noop,
+    body: el(),
+    documentElement: el(),
+  },
   setInterval: () => 0,
+  setTimeout: () => 0,
+  clearInterval: noop,
+  clearTimeout: noop,
+  localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  navigator: { userAgent: 'node-test' },
+  location: { hash: '', href: 'http://localhost/', pathname: '/', search: '' },
+  history: { replaceState: noop, pushState: noop },
+  speechSynthesis: undefined,
+  SpeechSynthesisUtterance: function () {},
+  Audio: function () { this.play = () => Promise.resolve(); this.pause = noop; },
+  URL: URL,
+  Blob: function () {},
   fetch: () => Promise.reject(new Error('no network in test')),
-  EventSource: function() { this.onmessage = null; this.onerror = null; this.close = () => {}; },
+  EventSource: function() { this.onmessage = null; this.onerror = null; this.close = noop; },
   console,
+  addEventListener: noop,
+  removeEventListener: noop,
 };
+sandbox.window = sandbox;
+sandbox.self = sandbox;
+sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(src, sandbox);
 const bare = sandbox.renderMarkdown('8 of 12 agents responded.');
@@ -2221,7 +2270,8 @@ if (/Keep that file compact\. Compress older turns/i.test(prompt)) {
   console.error('slim prompt still asks LLM to compress session');
   process.exit(3);
 }
-if (Buffer.byteLength(prompt, 'utf8') > 6000) {
+// Budget allows slim always-on prompt + compact playbooks/consult rule (~6.5–7KB).
+if (Buffer.byteLength(prompt, 'utf8') > 7000) {
   console.error('always-on hub prompt too large:', Buffer.byteLength(prompt, 'utf8'));
   process.exit(4);
 }

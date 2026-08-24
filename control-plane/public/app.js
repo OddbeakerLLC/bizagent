@@ -815,9 +815,11 @@ function saveTtsEnabled(on) {
 
 function updateTtsToggleUi() {
   const btn = document.getElementById('ttsToggle');
-  if (!btn) return;
+  if (!btn || !btn.classList) return;
   btn.classList.toggle('active', ttsEnabled);
-  btn.setAttribute('aria-pressed', ttsEnabled ? 'true' : 'false');
+  if (typeof btn.setAttribute === 'function') {
+    btn.setAttribute('aria-pressed', ttsEnabled ? 'true' : 'false');
+  }
   if (ttsUnavailableReason) {
     btn.title = ttsUnavailableReason;
     btn.classList.add('tts-unavailable');
