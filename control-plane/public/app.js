@@ -677,10 +677,19 @@ let ttsSpeakErrorLogged = false;
 let ttsUnavailableReason = '';
 /** Cached oddbeaker-tts availability (null = not probed yet). */
 let ttsServerAvailable = null;
+/** ms timestamp of last successful/failed probe (for sticky-false recovery). */
+let ttsServerProbedAt = 0;
+/** Re-check oddbeaker-tts after this long when last result was unavailable. */
+const TTS_REPROBE_MS = 15000;
 /** Generation token so late async audio is dropped after stop/new speak. */
 let ttsPlayGen = 0;
 /** Active HTMLAudioElement for server WAV playback (if any). */
 let ttsAudioEl = null;
+/** Object URL for the active server WAV (revoked on stop/end). */
+let ttsObjectUrl = null;
+/** Web Audio graph for Kokoro WAV (unlocked under toggle-ON gesture). */
+let ttsAudioCtx = null;
+let ttsAudioSource = null;
 /**
  * MUST retain current utterance(s) — Chrome GC's unreferenced SpeechSynthesisUtterance
  * and speech dies after the first async hub reply.
@@ -766,11 +775,28 @@ function startTtsKeepAlive() {
   }, 4000);
 }
 
+function revokeTtsObjectUrl() {
+  if (!ttsObjectUrl) return;
+  try { URL.revokeObjectURL(ttsObjectUrl); } catch (_) { /* ignore */ }
+  ttsObjectUrl = null;
+}
+
+function stopTtsAudioGraph() {
+  try {
+    if (ttsAudioSource) {
+      try { ttsAudioSource.stop(0); } catch (_) { /* ignore */ }
+      try { ttsAudioSource.disconnect(); } catch (_) { /* ignore */ }
+      ttsAudioSource = null;
+    }
+  } catch (_) { /* ignore */ }
+}
+
 function stopTtsSpeech() {
   ttsPlayGen += 1;
   stopTtsKeepAlive();
   ttsCurrentUtterance = null;
   ttsUtteranceQueue = [];
+  stopTtsAudioGraph();
   try {
     if (ttsAudioEl) {
       ttsAudioEl.pause();
@@ -779,6 +805,7 @@ function stopTtsSpeech() {
       ttsAudioEl = null;
     }
   } catch (_) { /* ignore */ }
+  revokeTtsObjectUrl();
   try {
     const synth = getSpeechSynthesis();
     if (synth) {
@@ -854,57 +881,125 @@ function logTtsSpeakErrorOnce(err) {
   } catch (_) { /* ignore */ }
 }
 
-/** Probe control-plane → oddbeaker-tts health (cached briefly). */
+/**
+ * Probe control-plane → oddbeaker-tts health.
+ * Caches positives indefinitely until a real failure; re-probes sticky-false
+ * after TTS_REPROBE_MS so a pre-login 401 or brief outage does not pin browser TTS.
+ */
 async function probeTtsServer(force) {
-  if (!force && ttsServerAvailable !== null) return ttsServerAvailable;
+  const now = Date.now();
+  if (!force && ttsServerAvailable === true) return true;
+  if (
+    !force
+    && ttsServerAvailable === false
+    && ttsServerProbedAt
+    && (now - ttsServerProbedAt) < TTS_REPROBE_MS
+  ) {
+    return false;
+  }
   try {
     const res = await fetch('/api/tts/health', { credentials: 'same-origin' });
     if (!res.ok) {
+      // 401 before session is ready is not "service down" — leave cache unset.
+      if (res.status === 401 || res.status === 403) {
+        logTtsDebug('probe auth not ready', res.status);
+        return ttsServerAvailable === true;
+      }
       ttsServerAvailable = false;
+      ttsServerProbedAt = now;
       return false;
     }
     const data = await res.json().catch(() => ({}));
     ttsServerAvailable = !!(data && data.available);
+    ttsServerProbedAt = now;
     return ttsServerAvailable;
   } catch (_) {
     ttsServerAvailable = false;
+    ttsServerProbedAt = now;
     return false;
   }
 }
 
+/** Ensure AudioContext exists and is running (call under user gesture when possible). */
+async function ensureTtsAudioContext() {
+  const AC = typeof window !== 'undefined'
+    && (window.AudioContext || window.webkitAudioContext);
+  if (!AC) return null;
+  if (!ttsAudioCtx) {
+    try { ttsAudioCtx = new AC(); } catch (_) { return null; }
+  }
+  try {
+    if (ttsAudioCtx.state === 'suspended') await ttsAudioCtx.resume();
+  } catch (_) { /* ignore */ }
+  return ttsAudioCtx;
+}
+
 /**
- * Speak via oddbeaker-tts (server proxy). Returns true if playback started.
- * On failure returns false so caller can fall back to speechSynthesis.
+ * Play a WAV ArrayBuffer via Web Audio (preferred) or HTMLAudio blob URL.
+ * Web Audio stays unlocked after toggle-ON resume(), so async hub replies
+ * do not hit the HTMLMediaElement autoplay gate that forced speechSynthesis.
+ * @returns {'webaudio'|'element'} which path started
  */
-async function speakViaServerTts(spokenText, gen) {
-  const res = await fetch('/api/tts/synthesize', {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: spokenText, raw: true }),
-  });
-  if (gen !== ttsPlayGen) return false;
-  if (!res.ok) {
-    ttsServerAvailable = false;
-    throw new Error(`synthesize HTTP ${res.status}`);
+async function playTtsWavBuffer(arrayBuffer, gen) {
+  if (gen !== ttsPlayGen) return 'webaudio';
+  const ctx = await ensureTtsAudioContext();
+  if (ctx && typeof ctx.decodeAudioData === 'function') {
+    // copy: decodeAudioData may detach the buffer
+    const copy = arrayBuffer.slice ? arrayBuffer.slice(0) : arrayBuffer;
+    let decoded;
+    try {
+      decoded = await ctx.decodeAudioData(copy);
+    } catch (err) {
+      logTtsDebug('decodeAudioData failed', String(err && err.message || err));
+      decoded = null;
+    }
+    if (gen !== ttsPlayGen) return 'webaudio';
+    if (decoded) {
+      stopTtsAudioGraph();
+      const source = ctx.createBufferSource();
+      source.buffer = decoded;
+      source.connect(ctx.destination);
+      ttsAudioSource = source;
+      logTtsDebug('server webaudio play', { seconds: decoded.duration });
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        let watch = null;
+        const finish = (err) => {
+          if (settled) return;
+          settled = true;
+          if (watch) {
+            try { clearInterval(watch); } catch (_) { /* ignore */ }
+            watch = null;
+          }
+          if (ttsAudioSource === source) ttsAudioSource = null;
+          if (err) reject(err instanceof Error ? err : new Error(String(err)));
+          else resolve();
+        };
+        source.onended = () => finish(null);
+        watch = setInterval(() => {
+          if (gen !== ttsPlayGen) {
+            try { source.stop(0); } catch (_) { /* ignore */ }
+            finish(null);
+          }
+        }, 200);
+        try {
+          source.start(0);
+        } catch (err) {
+          finish(err);
+        }
+      });
+      return 'webaudio';
+    }
   }
-  const data = await res.json().catch(() => ({}));
-  if (gen !== ttsPlayGen) return false;
-  // Empty / nothing_to_speak: success with no audio (do not fall back to browser noise).
-  if (!data || data.nothing_to_speak || !data.audio_url) {
-    logTtsDebug('server nothing to speak');
-    return true;
-  }
-  // Proxy must rewrite /tts/x.wav → /api/tts/audio/x.wav. If rewrite failed, fall back.
-  if (typeof data.audio_url !== 'string' || !data.audio_url.startsWith('/api/tts/')) {
-    ttsServerAvailable = false;
-    throw new Error('synthesize missing proxied audio_url');
-  }
-  ttsServerAvailable = true;
-  const audio = new Audio(data.audio_url);
-  // Same-origin /api path sends session cookie automatically (do not set crossOrigin).
+
+  // Fallback: blob URL + HTMLAudio (still better than speechSynthesis when Kokoro worked).
+  revokeTtsObjectUrl();
+  const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
+  const objUrl = URL.createObjectURL(blob);
+  ttsObjectUrl = objUrl;
+  const audio = new Audio(objUrl);
   ttsAudioEl = audio;
-  logTtsDebug('server audio play', { url: data.audio_url });
+  logTtsDebug('server element play', { bytes: arrayBuffer.byteLength || 0 });
   try {
     await new Promise((resolve, reject) => {
       let settled = false;
@@ -921,7 +1016,6 @@ async function speakViaServerTts(spokenText, gen) {
       };
       audio.onended = () => finish(null);
       audio.onerror = () => finish(new Error('audio element error'));
-      // stopTtsSpeech mid-play bumps gen — resolve quietly (no browser fallback).
       watch = setInterval(() => {
         if (gen !== ttsPlayGen) {
           try { audio.pause(); } catch (_) { /* ignore */ }
@@ -930,13 +1024,78 @@ async function speakViaServerTts(spokenText, gen) {
       }, 200);
       const p = audio.play();
       if (p && typeof p.then === 'function') {
-        p.then(() => { /* playing; wait for onended */ }).catch((err) => finish(err));
+        p.then(() => { /* playing */ }).catch((err) => finish(err));
       }
     });
   } finally {
     if (ttsAudioEl === audio) ttsAudioEl = null;
+    if (ttsObjectUrl === objUrl) revokeTtsObjectUrl();
   }
-  // Interrupted by newer speak/stop — success for this gen handoff.
+  return 'element';
+}
+
+/**
+ * Speak via oddbeaker-tts (server proxy).
+ * Returns true when Kokoro produced audio (or nothing-to-speak) — caller must NOT
+ * fall back to speechSynthesis after a successful synthesize, even if local play fails.
+ * Throws only on transport/API failure (real service-down → browser fallback OK).
+ */
+async function speakViaServerTts(spokenText, gen) {
+  const res = await fetch('/api/tts/synthesize', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: spokenText, raw: true }),
+  });
+  if (gen !== ttsPlayGen) return false;
+  if (!res.ok) {
+    ttsServerAvailable = false;
+    ttsServerProbedAt = Date.now();
+    throw new Error(`synthesize HTTP ${res.status}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (gen !== ttsPlayGen) return false;
+  // Empty / nothing_to_speak: success with no audio (do not fall back to browser noise).
+  if (!data || data.nothing_to_speak || !data.audio_url) {
+    logTtsDebug('server nothing to speak');
+    ttsServerAvailable = true;
+    ttsServerProbedAt = Date.now();
+    return true;
+  }
+  // Proxy must rewrite /tts/x.wav → /api/tts/audio/x.wav. If rewrite failed, real failure.
+  if (typeof data.audio_url !== 'string' || !data.audio_url.startsWith('/api/tts/')) {
+    ttsServerAvailable = false;
+    ttsServerProbedAt = Date.now();
+    throw new Error('synthesize missing proxied audio_url');
+  }
+  ttsServerAvailable = true;
+  ttsServerProbedAt = Date.now();
+
+  // Fetch WAV as blob (credentials) so playback does not depend on media element
+  // re-requesting a cookie'd URL, and so Web Audio can decode it.
+  const audioRes = await fetch(data.audio_url, { credentials: 'same-origin' });
+  if (gen !== ttsPlayGen) return false;
+  if (!audioRes.ok) {
+    // Synthesize succeeded; audio fetch failed — treat as play error, not "use browser TTS".
+    throw new Error(`tts audio HTTP ${audioRes.status}`);
+  }
+  const buf = await audioRes.arrayBuffer();
+  if (gen !== ttsPlayGen) return false;
+  if (!buf || !buf.byteLength) {
+    throw new Error('tts audio empty body');
+  }
+
+  try {
+    await playTtsWavBuffer(buf, gen);
+  } catch (err) {
+    // Kokoro already synthesized successfully. Do not signal browser fallback.
+    // Tag so speakTtsText keeps server preferred and stays silent rather than
+    // switching to speechSynthesis (the operator-visible bug).
+    const playErr = err instanceof Error ? err : new Error(String(err || 'play failed'));
+    playErr.code = 'tts_play_failed';
+    playErr.serverOk = true;
+    throw playErr;
+  }
   return true;
 }
 
@@ -1171,7 +1330,9 @@ function speakViaBrowserTts(spokenText, gen) {
 }
 
 /**
- * Speak text: prefer oddbeaker-tts via /api/tts/*; fall back to speechSynthesis.
+ * Speak text: prefer oddbeaker-tts via /api/tts/*; fall back to speechSynthesis
+ * ONLY when the service is actually down/unreachable — never after a successful
+ * Kokoro synthesize whose local play hit autoplay/decode issues.
  * @param {string} text raw or already-built spoken text
  * @param {{ raw?: boolean }} [opts] raw=true skips buildSpokenText (confirmation phrases)
  * @returns {boolean} true if a speak attempt was started (may finish async)
@@ -1186,14 +1347,21 @@ function speakTtsText(text, opts) {
   const gen = ttsPlayGen;
   logTtsDebug('speakTtsText', { raw: !!(opts && opts.raw), chars: spokenText.length });
 
-  // Prefer server when known-available or not yet probed; fall back on failure.
-  const tryServer = ttsServerAvailable !== false;
+  // Always try server unless a recent probe proved it down (sticky-false expires).
+  const tryServer = ttsServerAvailable !== false
+    || !ttsServerProbedAt
+    || (Date.now() - ttsServerProbedAt) >= TTS_REPROBE_MS;
+
   if (tryServer) {
     (async () => {
+      let allowBrowserFallback = true;
       try {
-        if (ttsServerAvailable === null) await probeTtsServer(false);
+        if (ttsServerAvailable !== true) await probeTtsServer(false);
         if (gen !== ttsPlayGen) return;
-        if (ttsServerAvailable) {
+        // Probe said down → browser. Probe unknown/true → attempt synthesize.
+        if (ttsServerAvailable === false) {
+          logTtsDebug('server unavailable → browser');
+        } else {
           const ok = await speakViaServerTts(spokenText, gen);
           if (gen !== ttsPlayGen) return;
           if (ok) {
@@ -1201,21 +1369,36 @@ function speakTtsText(text, opts) {
             updateTtsToggleUi();
             return;
           }
-          // Server path declined without throwing — try browser.
-          logTtsDebug('server speak declined → browser');
+          // Declined without throw (gen race / empty) — do not browser-noise.
+          allowBrowserFallback = false;
+          logTtsDebug('server speak declined (no browser fallback)');
         }
       } catch (err) {
-        // Only mark server down for transport/API failures — not autoplay / element errors.
         const msg = String(err && err.message || err || '');
-        if (/synthesize HTTP|missing proxied|fetch|network|TTS unavailable|502|503/i.test(msg)) {
-          ttsServerAvailable = false;
+        const playOnly = !!(err && (err.code === 'tts_play_failed' || err.serverOk));
+        if (playOnly) {
+          // Kokoro synthesized OK; local play failed. Stay on server path — never
+          // speechSynthesis (that was the unwanted fallback the operator heard).
+          allowBrowserFallback = false;
+          ttsServerAvailable = true;
+          logTtsSpeakErrorOnce(err);
+          logTtsDebug('server play failed (no browser fallback)', msg);
+          if (ttsUnavailableReason) setTtsUnavailable('');
+          updateTtsToggleUi();
+        } else {
+          // Transport/API failure — real service problem.
+          if (/synthesize HTTP|missing proxied|Failed to fetch|NetworkError|TTS unavailable|502|503|401|403/i.test(msg)
+            || /tts audio HTTP|TypeError/i.test(msg)) {
+            ttsServerAvailable = false;
+            ttsServerProbedAt = Date.now();
+          }
+          if (gen !== ttsPlayGen) return;
+          logTtsSpeakErrorOnce(err);
+          logTtsDebug('server speak failed → browser', msg);
         }
-        if (gen !== ttsPlayGen) return;
-        logTtsSpeakErrorOnce(err);
-        logTtsDebug('server speak failed → browser', msg);
       }
       if (gen !== ttsPlayGen) return;
-      // Async hub replies are outside the original click gesture; resume synth first.
+      if (!allowBrowserFallback) return;
       softUnlockBrowserSynth();
       speakViaBrowserTts(spokenText, gen);
       updateTtsToggleUi();
@@ -1232,8 +1415,16 @@ function speakHubReply(text) {
   speakTtsText(text);
 }
 
-/** Tiny silent WAV — play under user gesture to unlock later HTMLAudioElement plays. */
+/**
+ * Unlock media under the toggle-ON user gesture:
+ * 1) AudioContext.resume() — primary path for async Kokoro WAV via Web Audio
+ * 2) silent HTMLAudio data-URI — secondary unlock for element fallback
+ */
 function unlockHtmlAudioGesture() {
+  // Web Audio unlock (survives across async synthesize → hub replies).
+  try {
+    ensureTtsAudioContext().catch(() => {});
+  } catch (_) { /* ignore */ }
   try {
     if (typeof Audio === 'undefined') return;
     // Minimal valid WAV (very short silence).
@@ -1245,23 +1436,25 @@ function unlockHtmlAudioGesture() {
     if (p && typeof p.then === 'function') {
       p.then(() => {
         try { silent.pause(); } catch (_) { /* ignore */ }
-      }).catch(() => { /* autoplay still blocked — browser path may still work */ });
+      }).catch(() => { /* autoplay still blocked — Web Audio path may still work */ });
     }
   } catch (_) { /* ignore */ }
 }
 
 /**
  * Soft browser unlock used when starting a speak outside the original click
- * (hub replies). Does not cancel in-flight speech; only resumes + optional
- * zero-volume ping if synth looks dead.
+ * (hub replies). Does not cancel in-flight speech; only resumes synth + AudioContext.
  */
 function softUnlockBrowserSynth() {
+  try {
+    if (ttsAudioCtx && ttsAudioCtx.state === 'suspended') {
+      ttsAudioCtx.resume().catch(() => {});
+    }
+  } catch (_) { /* ignore */ }
   const synth = getSpeechSynthesis();
   if (!synth) return;
   try {
     ensureTtsResumed();
-    // If completely idle and previously unlocked this session, a no-op resume is enough.
-    // If stuck paused with empty queue, resume again.
     if (synth.paused) synth.resume();
   } catch (_) { /* ignore */ }
 }
@@ -1269,7 +1462,7 @@ function softUnlockBrowserSynth() {
 /** Unlock autoplay + confirm enable inside the user-gesture click chain. */
 function primeTtsOnEnable() {
   ttsGestureUnlocked = true;
-  // Warm browser synth + unlock HTMLAudio under this click (Kokoro WAV + fallback).
+  // Warm browser synth + unlock Web Audio / HTMLAudio under this click.
   try {
     const synth = getSpeechSynthesis();
     if (synth) {
@@ -1281,8 +1474,10 @@ function primeTtsOnEnable() {
     logTtsSpeakErrorOnce(err);
   }
   unlockHtmlAudioGesture();
-  // Re-probe so toggle-ON picks up a newly started oddbeaker-tts daemon.
+  // Re-probe so toggle-ON picks up a newly started oddbeaker-tts daemon
+  // (and clears any sticky-false from a pre-login 401 probe).
   ttsServerAvailable = null;
+  ttsServerProbedAt = 0;
   const ok = speakTtsText('Text to speech on.', { raw: true });
   if (ok) setTtsUnavailable('');
   updateTtsToggleUi();
@@ -1330,6 +1525,11 @@ function setTtsEnabled(on, opts) {
   }
 }
 
+/** Probe oddbeaker-tts after session is ready (avoids sticky-false from pre-login 401). */
+function refreshTtsServerProbe() {
+  probeTtsServer(true).then(() => updateTtsToggleUi()).catch(() => {});
+}
+
 function bindTtsToggle() {
   ttsEnabled = loadTtsEnabled();
   updateTtsToggleUi();
@@ -1340,8 +1540,8 @@ function bindTtsToggle() {
     // Toggle OFF: stop. Toggle ON: enable + speak confirmation in this gesture.
     setTtsEnabled(!ttsEnabled, { prime: true });
   });
-  // Background probe for oddbeaker-tts; browser voices remain fallback.
-  probeTtsServer(true).then(() => updateTtsToggleUi()).catch(() => {});
+  // Do NOT probe here — page script runs before login cookie is proven.
+  // boot()/login success calls refreshTtsServerProbe().
   try {
     const synth = getSpeechSynthesis();
     if (synth) {
@@ -1701,6 +1901,8 @@ async function boot() {
     sessionActive = true;
     const named = await ensureDisplayName();
     setAuthenticated(true, displayName ? `Signed in as ${displayName}` : 'Signed in');
+    // Session cookie is valid — probe Kokoro now (not at bindTtsToggle pre-login).
+    refreshTtsServerProbe();
     if (!named) return;
     // Prefetch CLI/model catalog for the agent config dialog (non-blocking).
     loadCliModels().catch(() => {});

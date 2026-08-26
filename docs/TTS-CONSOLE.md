@@ -105,28 +105,38 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
 
 **Fix:** thinking `done` / stop use `softReloadConversation()` → `applyConversation()` only (no TTS baseline reset, no forced stop). Hard `loadConversation()` still baselines on open/switch so history is not read aloud.
 
-Also: server play failures fall back to `speechSynthesis` without permanently marking oddbeaker-tts down on autoplay errors.
+## Unwanted browser fallback (2026-08-26)
+
+**Root cause:** when oddbeaker-tts was healthy, `POST /api/tts/synthesize` succeeded and returned a proxied WAV URL, but async hub replies (and often the toggle confirmation after the network round-trip) called `HTMLAudioElement.play()` **outside** the original user-gesture window. Chrome rejected play (`NotAllowedError` / autoplay). `speakTtsText` treated that as “server failed” and fell through to `speechSynthesis` — so the operator heard the built-in browser voice even though Kokoro had already synthesized audio. A secondary footgun: `bindTtsToggle()` probed `/api/tts/health` before login (401), which could sticky-cache `ttsServerAvailable = false` and skip Kokoro entirely until reload.
+
+**Fix (client only — oddbeaker-tts unchanged):**
+
+1. **Web Audio unlock** on toggle ON (`AudioContext.resume()` under the click).
+2. **Fetch WAV as ArrayBuffer** (cookie’d) and play via **`decodeAudioData` + BufferSource** (gesture-unlocked context survives async synthesize). HTMLAudio blob URL is secondary.
+3. **No `speechSynthesis` after successful synthesize** — play-only failures stay on the Kokoro path (silent + one console warn) instead of switching engines mid-session.
+4. **Browser fallback only** on real transport/API failure (health down, synthesize 5xx, network).
+5. **Probe after session** (`boot` / toggle ON), not at script bind; sticky-false **re-probes after 15s**.
 
 ## Multi-reply reliability (browser fallback)
 
-Chrome `speechSynthesis` historically went silent after the first hub reply. Mitigations in `app.js`:
+Chrome `speechSynthesis` historically went silent after the first hub reply. Mitigations in `app.js` (fallback path only):
 
 1. **Retain utterance objects** (`ttsCurrentUtterance` / `ttsUtteranceQueue`) so GC cannot kill mid-session speech.
 2. **`resume()` after every `cancel()`** and before every `speak()` (cancel leaves `paused=true`).
 3. **Chunk long text** (~180 chars at sentence boundaries) and queue chunks with retained refs.
 4. **Keepalive** every 4s: if `speaking && paused`, call `resume()` (Chrome long-utterance stall).
 5. **Idle retry:** if `speak()` leaves the synth idle, re-`speak` once after 50ms.
-6. **Debug:** `localStorage.setItem('bizagent.tts.debug','1')` then reload → `[bizagent TTS]` console traces (enabled/paused/speaking/voices/gen).
+6. **Debug:** `localStorage.setItem('bizagent.tts.debug','1')` then reload → `[bizagent TTS]` console traces (enabled/paused/speaking/voices/gen/server).
 
 ## Autoplay / unlock
 
 Browsers often block both `speechSynthesis.speak()` and `HTMLAudioElement.play()` without a user gesture. Console TTS:
 
-1. **On toggle ON (click):** cancel/resume synth, play a tiny silent WAV to unlock audio elements, then speak “Text to speech on.” (server preferred, browser fallback). Gesture unlock sticks for the tab session (HTMLAudio + synth).
-2. **Before browser speak:** if the synth is `paused` (common after `cancel()`), call `resume()`.
-3. **Missing engines:** button title explains; first failure logs once to the browser console (includes synth snapshot).
+1. **On toggle ON (click):** cancel/resume synth, **resume AudioContext**, play a tiny silent WAV, then speak “Text to speech on.” via Kokoro (Web Audio). Browser `speechSynthesis` only if `:9201` / proxy is actually down.
+2. **Hub replies (async):** same Web Audio path — no gesture required after toggle unlock.
+3. **Missing engines:** button title explains; first failure logs once to the browser console (includes synth snapshot). Toggle title shows `· oddbeaker-tts` when server path is preferred.
 
-Restoring TTS from `localStorage` on reload does **not** auto-prime (no gesture yet). Click the TTS button off→on once after reload if speech is silent. After that, **every** new hub reply should speak without re-toggling.
+Restoring TTS from `localStorage` on reload does **not** auto-prime (no gesture yet). Click the TTS button off→on once after reload if speech is silent. After that, **every** new hub reply should speak via Kokoro without re-toggling when `:9201` is up.
 
 ## Verify
 
@@ -139,8 +149,12 @@ curl -sS http://127.0.0.1:9201/health
 curl -sS -b 'bizagent_session=…' http://127.0.0.1:8787/api/tts/health
 # → {"ok":true,"available":true,"url":"http://127.0.0.1:9201",...}
 
-# 3. UI: enable TTS toggle → hear confirmation; send a hub-bound message → hear reply.
-# 4. Stop oddbeaker-tts → toggle still works via browser speechSynthesis.
+# 3. UI: hard-refresh console → enable TTS → hear Kokoro confirmation (not OS voice).
+#    Toggle title should include "oddbeaker-tts". Send a message → hub reply also Kokoro.
+#    Debug: localStorage.setItem('bizagent.tts.debug','1'); reload → look for
+#    "[bizagent TTS] server webaudio play" (not "server speak failed → browser").
+# 4. Stop oddbeaker-tts → next speak uses browser speechSynthesis; restart service
+#    → within ~15s or toggle OFF/ON, Kokoro is preferred again.
 ```
 
 ## Browser / OS limits (fallback only)
@@ -149,3 +163,4 @@ curl -sS -b 'bizagent_session=…' http://127.0.0.1:8787/api/tts/health
 - Remote desktop, locked-down VMs, headless, or some Linux installs may report an empty voice list.
 - Quality and voice choice vary by OS when falling back; Kokoro quality is consistent when oddbeaker-tts is up.
 - Tab must stay open; background-tab throttling can delay or pause speech.
+- Edge case: if Web Audio decode/play fails after a good synthesize (corrupt WAV, suspended context never unlocked), console stays silent rather than switching to browser voice — re-toggle TTS ON to re-unlock.
