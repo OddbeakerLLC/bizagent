@@ -162,9 +162,68 @@ ensure_npm() {
   ok "npm ready"
 }
 
+# Minimum Node major — keep in sync with agent-runtime engines and scripts/lib/require-node.sh
+BIZAGENT_MIN_NODE_MAJOR="${BIZAGENT_MIN_NODE_MAJOR:-18}"
+
+_node_major() {
+  local ver major
+  ver="$(node -v 2>/dev/null || node --version 2>/dev/null || true)"
+  ver="${ver#v}"
+  major="${ver%%.*}"
+  [[ "$major" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$major"
+}
+
+_die_node_too_old() {
+  local detected="$1"
+  cat >&2 <<EOF
+
+${RED}✗ Node.js ${detected} is too old (need v${BIZAGENT_MIN_NODE_MAJOR}+).${NC}
+
+Detected: ${detected}
+Required: v${BIZAGENT_MIN_NODE_MAJOR}.0.0 or newer
+
+This machine/setup may not run BizAgent until Node is upgraded.
+Older distro packages (common on WSL / Ubuntu 20.04) often ship Node 12 or 16,
+which can look "installed" then fail when the control plane or agent-runtime starts.
+
+Fix (WSL / Ubuntu / Debian) — pick one:
+
+  # NodeSource current LTS (recommended on WSL)
+  curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+  sudo apt-get install -y nodejs
+
+  # or nvm (user-local, no sudo)
+  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  # restart shell, then:
+  nvm install --lts
+  nvm use --lts
+
+Then confirm:  node -v   # should print v${BIZAGENT_MIN_NODE_MAJOR}.x or newer
+and re-run this installer.
+
+EOF
+  exit 1
+}
+
+_require_node_version() {
+  local detected major
+  if ! have node; then
+    die "Node.js not found on PATH (need v${BIZAGENT_MIN_NODE_MAJOR}+)."
+  fi
+  detected="$(node -v 2>/dev/null || node --version 2>/dev/null || echo unknown)"
+  if ! major="$(_node_major)"; then
+    _die_node_too_old "$detected"
+  fi
+  if [[ "$major" -lt "$BIZAGENT_MIN_NODE_MAJOR" ]]; then
+    _die_node_too_old "$detected"
+  fi
+  ok "node ${detected} (>= v${BIZAGENT_MIN_NODE_MAJOR})"
+}
+
 ensure_node() {
   if have node; then
-    ok "node present"
+    _require_node_version
     return
   fi
   note "node not found — installing Node.js..."
@@ -178,7 +237,8 @@ ensure_node() {
   if ! have node; then
     die "Node.js was installed but 'node' still is not on PATH. Open a new terminal and re-run this installer."
   fi
-  ok "node installed"
+  # Distro packages (esp. WSL/Ubuntu) may install Node below our minimum — fail before clone/start.
+  _require_node_version
 }
 
 ensure_curl() {

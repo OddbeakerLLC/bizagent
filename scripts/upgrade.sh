@@ -189,6 +189,19 @@ args=(repair --hub "$HUB" --yes)
 [[ -n "$REF" ]] && args+=(--ref "$REF")
 [[ "$NO_RESTART" -eq 1 ]] && args+=(--no-restart)
 
+# Fail before touching the live hub if Node is missing/too old (WSL footgun).
+REQUIRE_NODE="$HUB/scripts/lib/require-node.sh"
+if [[ ! -f "$REQUIRE_NODE" ]]; then
+  REQUIRE_NODE="$SCRIPT_DIR/lib/require-node.sh"
+fi
+if [[ -f "$REQUIRE_NODE" ]]; then
+  # shellcheck disable=SC1090
+  source "$REQUIRE_NODE"
+  bizagent_require_node || die "Node.js v${BIZAGENT_MIN_NODE_MAJOR:-18}+ required before upgrade"
+else
+  command -v node >/dev/null 2>&1 || die "node is required for upgrade"
+fi
+
 log "upgrade: invoking factory-reset.sh ${args[*]}"
 bash "$REPAIR" "${args[@]}"
 
