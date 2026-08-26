@@ -113,7 +113,7 @@ curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.
 ```
 
 This installs **all runtime dependencies first** if missing — `git`, `python3`,
-`curl`, Node.js/`npm`, `cron`, **Java (JRE 17+)**, **Graphviz (`dot`)**, and
+`curl`, **Node.js 18+**/`npm`, `cron`, **Java (JRE 17+)**, **Graphviz (`dot`)**, and
 **PlantUML** (jar + wrapper; needed for the web UI diagram preview) — then
 installs the **bizagent-agent** runtime; sets a default LLM provider (override
 with `BIZAGENT_PROVIDER=chatgpt|claude|gemini|…`); **prompts for that
@@ -127,7 +127,7 @@ the control plane; queues first-run setup mail when ready; and prints your URL.
 | git | clone hub + product repos | `git` | — (required via pkg) |
 | python3 | installer seeding + small scripts | `python3` | — (required via pkg) |
 | curl | downloads + API-key hello check | `curl` | — (required via pkg) |
-| Node.js + npm | control plane + agent-runtime | `nodejs npm` / `node` | — (required via pkg) |
+| Node.js **18+** + npm | control plane + agent-runtime | `nodejs npm` / `node` (must be **v18+**; distro Node 12/16 is too old) | — (required via pkg; use NodeSource or nvm on WSL if apt is stale) |
 | cron | nightly / scheduled hub jobs | `cron` / `cronie` (macOS ships cron) | — |
 | Java 17+ | PlantUML renderer | `openjdk-17-jre-headless` / `java-17-openjdk-headless` / `openjdk@17` | Temurin JDK → `~/.bizagent/tools/jdk` |
 | Graphviz (`dot`) | PlantUML non-sequence diagrams | `graphviz` | deb-extract or wrapper → `~/.bizagent/tools/` |
@@ -178,6 +178,23 @@ source override is active.
 bizagent uses `cron` for the nightly pass, so on Windows you'll need WSL.
 In PowerShell, run `wsl --install`, reboot, then run the one-liner above
 inside your new WSL shell.
+
+**Node 18+ required.** Older Ubuntu images on WSL (especially Windows 10) often
+ship Node 12 or 16 via `apt`. The installer checks the version and **exits
+non-zero** if Node is below v18 — it will not silently continue. If that
+happens, install a current LTS before re-running:
+
+```sh
+# NodeSource LTS (recommended on WSL)
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+sudo apt-get install -y nodejs
+node -v   # expect v18+ / v20+ / v22+
+
+# or nvm (user-local)
+curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+# restart shell, then:
+nvm install --lts && nvm use --lts
+```
 
 ### Manual install
 
