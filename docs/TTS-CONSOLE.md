@@ -90,8 +90,12 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
 - New **hub** replies only (`role === 'hub'`), after the conversation view is primed.
 - Skips user messages, status/launch-ack/thinking, and empty bodies.
 - Initial conversation load and conversation switches **do not** read history aloud.
-- Client preprocess (Jobe-style): skip fenced code (announce snippet), summarize tables, shorten long lists/prose, strip markdown/URLs/emoji.
+- **Full hub reply always renders in the console UI** (markdown unchanged).
+- **TTS speaks a short summary only** (about 1–3 sentences / ~280 chars): big-picture prose after scrubbing paths, filenames, SHAs, fenced code, tables, and long lists. Not the raw reply and not a near-verbatim scrub.
+- Summary failure → minimal fallback *“Reply ready — see the console.”* (never dumps full text). Toggle confirmation still uses `raw: true` (“Text to speech on.”).
+- Client helpers: `buildSpokenSummary` (hub replies) + retained `buildSpokenText` / `cleanLineForSpeech` (lighter Jobe-style path kept for non-summary callers).
 - Server path sends **preprocessed** text with `raw: true` so oddbeaker-tts does not double-process. (Upstream can still preprocess if `raw` is false.)
+- Jobe is unchanged; BizAgent summary mode is console-only (`speakTtsText(..., { summary: true })`).
 
 ## Interrupt behavior
 
