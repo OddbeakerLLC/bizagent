@@ -95,9 +95,11 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
 
 ## Interrupt behavior
 
-- New speakable hub reply cancels any in-flight utterance **and** HTMLAudio playback, then speaks the new text.
-- Turning TTS off cancels speech immediately.
+- New speakable hub reply cancels any in-flight utterance **and** HTMLAudio / Web Audio playback, then speaks the new text.
+- Turning TTS **off** hard-stops immediately: bumps play generation, cancels synth **without** resume, stops BufferSource / HTMLAudio, and **suspends** the AudioContext so a late `source.start()` after an in-flight decode cannot be heard. `ttsEnabled` is cleared first so async synthesize/play paths bail before starting audio. No browser `speechSynthesis` fallback while disabled.
+- Turning TTS **on** resumes AudioContext under the click gesture and speaks the confirmation phrase.
 - Sending a user message cancels in-flight speech (avoids talking over the next turn).
+- Persistence: OFF removes `bizagent.tts.enabled`; ON sets `"1"`. Hard-refresh restores the chosen state (still needs one off→on click after reload to re-unlock autoplay if ON was restored).
 
 ## Multi-reply reliability (Kokoro + browser)
 
