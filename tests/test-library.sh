@@ -13,6 +13,12 @@ grep -q 'bizagent-library\|openLibraryTab' "$ROOT/control-plane/public/app.js" |
 [ -f "$ROOT/control-plane/public/library.js" ] || fail "library.js (page) missing"
 grep -q 'library-accordion\|libraryAccordion' "$ROOT/control-plane/public/library.html" || fail "library page missing accordion root"
 grep -q 'groupLibraryRepos\|library-acc-product\|libraryExpandedProduct' "$ROOT/control-plane/public/library.js" || fail "library page missing product→project nesting"
+grep -q 'ensureLibraryTreesLoaded\|applyLibraryFilter' "$ROOT/control-plane/public/library.js" || fail "library page missing filter tree prefetch"
+grep -q 'repoTreeMatchesFilter' "$ROOT/control-plane/public/library.js" || fail "library page missing repoTreeMatchesFilter"
+# File-only filter: product/project labels must not keep empty shells visible
+if grep -E 'label\.includes\(q\)|product_name.*includes\(q\)' "$ROOT/control-plane/public/library.js" >/dev/null; then
+  fail "library filter still matches product/project labels (should be file name/path only)"
+fi
 grep -q 'library-acc-nested' "$ROOT/control-plane/public/styles.css" || fail "styles missing nested product accordion"
 grep -q 'library-diagram\|libraryEntryKind\|render=1\|render:' "$ROOT/control-plane/public/library.js" || fail "library page missing diagram preview path"
 grep -qE "docs/|company/|reports/" "$ROOT/control-plane/lib/hub-memory.js" || fail "hub prompt missing library hub-dir convention"
@@ -397,6 +403,61 @@ if (!threw) {
 if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
   console.error('manifest.json was created');
   process.exit(28);
+}
+
+// Client filter helpers: file name/path only; hide empty dirs/products
+{
+  const pageJs = fs.readFileSync(path.join(process.argv[2], 'control-plane/public/library.js'), 'utf8');
+  // Evaluate pure filter helpers in isolation (no DOM).
+  const start = pageJs.indexOf('function nodeMatchesFilter');
+  const end = pageJs.indexOf('function renderTreeNodes');
+  if (start < 0 || end < 0 || end <= start) {
+    console.error('could not locate filter helpers in library.js');
+    process.exit(29);
+  }
+  const fns = {};
+  // eslint-disable-next-line no-new-func
+  new Function('exports', pageJs.slice(start, end)
+    + '\nexports.nodeMatchesFilter = nodeMatchesFilter;'
+    + '\nexports.filterTree = filterTree;')(fns);
+  const tree = [
+    {
+      type: 'dir', name: 'docs', path: 'docs',
+      children: [
+        { type: 'file', name: 'alpha-plan.md', path: 'docs/alpha-plan.md' },
+        { type: 'file', name: 'readme.md', path: 'docs/readme.md' },
+        {
+          type: 'dir', name: 'empty-ish', path: 'docs/empty-ish',
+          children: [
+            { type: 'file', name: 'other.txt', path: 'docs/empty-ish/other.txt' },
+          ],
+        },
+      ],
+    },
+    {
+      type: 'dir', name: 'noise', path: 'noise',
+      children: [{ type: 'file', name: 'zzz.md', path: 'noise/zzz.md' }],
+    },
+  ];
+  const filtered = fns.filterTree(tree, 'alpha');
+  if (filtered.length !== 1 || filtered[0].name !== 'docs') {
+    console.error('filterTree should keep only matching branch', filtered);
+    process.exit(30);
+  }
+  const kids = filtered[0].children || [];
+  if (kids.length !== 1 || kids[0].name !== 'alpha-plan.md') {
+    console.error('filterTree should drop non-matching files and empty dirs', kids);
+    process.exit(31);
+  }
+  if (fns.filterTree(tree, 'no-such-file').length !== 0) {
+    console.error('filterTree should yield empty for no matches');
+    process.exit(32);
+  }
+  // Product label text is NOT a file match (UI uses filterTree only)
+  if (fns.nodeMatchesFilter({ type: 'file', name: 'x.md', path: 'x.md' }, 'Demo Product')) {
+    console.error('unexpected file match on product label query');
+    process.exit(33);
+  }
 }
 
 fs.rmSync(hub, { recursive: true, force: true });
