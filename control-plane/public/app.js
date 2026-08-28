@@ -1295,6 +1295,182 @@ function cleanLineForSpeech(line) {
     .trim();
 }
 
+/**
+ * Drop paths, filenames, SHAs, and other dense tokens that sound awful in TTS.
+ * Used by hub-reply summary mode (not the lighter buildSpokenText path).
+ */
+function scrubDenseSpeechTokens(text) {
+  let t = String(text || '');
+  // Absolute / home / relative multi-segment paths (with or without trailing slash)
+  t = t.replace(/(?:~|\/|\.{1,2}\/)(?:[\w.-]+\/)*[\w.-]+\/?/g, ' ');
+  t = t.replace(/\b(?:[\w.-]+\/){1,}[\w.-]*\/?/g, ' ');
+  t = t.replace(/\b[A-Za-z]:\\[^\s]+/g, ' ');
+  // Bare filenames with common extensions
+  t = t.replace(
+    /\b[\w.-]+\.(?:js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|kt|md|markdown|txt|json|jsonc|ya?ml|toml|ini|env|sh|bash|zsh|ps1|css|scss|html?|vue|svelte|wasm|lock|wav|mp3|png|jpe?g|gif|svg|webp|ico|puml|sql|proto|gradle|xml|csv|tsv|log|diff|patch)\b/gi,
+    ' '
+  );
+  // Short git SHAs / commit-ish hex
+  t = t.replace(/\b[0-9a-f]{7,40}\b/gi, ' ');
+  // long kebab or snake identifiers (agent slugs, once-keys, etc.)
+  t = t.replace(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+){3,}\b/g, ' ');
+  t = t.replace(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+){3,}\b/g, ' ');
+  // Collapse leftover punctuation / connector noise after token drops
+  t = t.replace(/[`*_#~<>[\](){}|\\/]/g, ' ');
+  // "Updated and scripts See agents." style leftovers after path wipe
+  t = t.replace(
+    /\b(?:updated|changed|modified|edited|touched|fixed|added|removed|deleted|see|check|review)\b(?:\s+(?:and|or|with|via|from|to|in|on|at|of|for|the|a|an|also|files?|paths?|scripts?|docs?|commits?|agents?|repos?|branches?|main|master))*\s*[.:]?\s*$/gi,
+    ' '
+  );
+  t = t.replace(/\b(?:and|or|with|via|from|to|in|on|at|of|for|see|also)\s*(?=[,.;:!?]|$)/gi, ' ');
+  t = t.replace(/(?:^|\s)(?:and|or)\s+(?=and\b|or\b|[,.;:!?]|$)/gi, ' ');
+  t = t.replace(/\s{2,}/g, ' ');
+  t = t.replace(/\s+([,.;:!?])/g, '$1');
+  t = t.replace(/([,.;:!?]){2,}/g, '$1');
+  t = t.replace(/^[,.;:\s]+|[,.;:\s]+$/g, '');
+  // Drop hollow lead-ins left after scrubbing objects ("Updated.", "Changed files:")
+  t = t.replace(
+    /^(?:updated|changed|modified|edited|touched|fixed|added|removed|deleted|see|files?|paths?|commits?|scripts?|docs?|agents?)\s*[:.]?\s*$/i,
+    ''
+  );
+  return t.trim();
+}
+
+/**
+ * Split cleaned prose into sentence-ish chunks for summary selection.
+ */
+function splitSpeechSentences(text) {
+  const src = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!src) return [];
+  const parts = src.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+  return parts.map((p) => p.trim()).filter((p) => p.length > 1);
+}
+
+/**
+ * Brief spoken summary for hub→operator replies (1–3 short sentences).
+ * Full markdown stays on screen; TTS only gets the big picture.
+ * Returns null when nothing useful remains (caller uses minimal fallback).
+ */
+function buildSpokenSummary(text) {
+  const blocks = String(text || '').split(/\n{2,}/);
+  const proseChunks = [];
+  let inCodeBlock = false;
+  let hadCode = false;
+  let hadTable = false;
+  let listHints = [];
+
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+    const lines = trimmed.split(/\n/);
+    const fenceCount = (trimmed.match(/```/g) || []).length;
+
+    if (inCodeBlock) {
+      if (fenceCount % 2 === 1) inCodeBlock = false;
+      continue;
+    }
+    if (trimmed.startsWith('```') || /^```/m.test(trimmed)) {
+      if (fenceCount % 2 === 1) inCodeBlock = true;
+      hadCode = true;
+      continue;
+    }
+
+    const tableLines = lines.filter((l) => l.trim().startsWith('|'));
+    if (tableLines.length >= 2) {
+      hadTable = true;
+      continue;
+    }
+
+    const listLines = lines.filter((l) => /^\s*(?:[-*]|\d+\.)\s/.test(l));
+    if (listLines.length >= 2) {
+      // Keep at most one short list cue from the first item — not the whole list.
+      if (listHints.length < 1) {
+        const first = scrubDenseSpeechTokens(
+          cleanLineForSpeech(listLines[0].replace(/^\s*(?:[-*]|\d+\.)\s+/, ''))
+        );
+        if (first && first.length >= 12 && first.length <= 120) listHints.push(first);
+      }
+      // Also keep any non-list lead-in line in the same block (e.g. "Done when:")
+      const lead = lines
+        .filter((l) => !/^\s*(?:[-*]|\d+\.)\s/.test(l) && !/^\s*```/.test(l))
+        .map((l) => scrubDenseSpeechTokens(cleanLineForSpeech(l)))
+        .filter(Boolean)
+        .join('. ');
+      if (lead) proseChunks.push(lead);
+      continue;
+    }
+
+    const prose = scrubDenseSpeechTokens(
+      lines.map((l) => cleanLineForSpeech(l)).join('. ')
+    );
+    if (prose) proseChunks.push(prose);
+  }
+
+  let combined = proseChunks.join('. ').replace(/\s{2,}/g, ' ').trim();
+  // Drop leftover empty shells after scrub
+  combined = scrubDenseSpeechTokens(combined)
+    .replace(/(?:^|\s)(?:link|path|file)(?:\s|$)/gi, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\.\s*\./g, '.')
+    .trim();
+
+  const sentences = splitSpeechSentences(combined)
+    .map((s) => scrubDenseSpeechTokens(s))
+    .map((s) => s.replace(/^\W+/, '').trim())
+    .filter((s) => {
+      if (!s || s.length < 10) return false;
+      // Reject leftover path-heavy, symbol-heavy, or hollow fragments
+      const words = s.split(/\s+/).filter((w) => /[A-Za-z]{2,}/.test(w));
+      if (words.length < 2) return false;
+      // Need at least one content word that is not a weak verb/noun shell
+      const content = words.filter((w) =>
+        !/^(?:updated|changed|modified|edited|touched|fixed|added|removed|deleted|see|check|files?|paths?|commits?|scripts?|docs?|agents?|and|or|with|the|a|an|to|of|in|on|at|for|from|via|also|main|master|public|live|hub|static|applied)$/i.test(w)
+      );
+      if (content.length < 1 && words.length < 4) return false;
+      const wordChars = (s.match(/[A-Za-z]/g) || []).length;
+      return wordChars >= 8 && wordChars / Math.max(s.length, 1) > 0.5;
+    });
+
+  const picked = [];
+  let total = 0;
+  const maxChars = 280;
+  const maxSentences = 3;
+  for (const s of sentences) {
+    if (picked.length >= maxSentences) break;
+    const next = /[.!?]$/.test(s) ? s : `${s}.`;
+    if (picked.length && total + next.length + 1 > maxChars) break;
+    if (!picked.length && next.length > maxChars) {
+      // Single long sentence: hard-cut at word boundary
+      const cut = next.slice(0, maxChars - 1);
+      const sp = cut.lastIndexOf(' ');
+      picked.push(`${(sp > 40 ? cut.slice(0, sp) : cut).trim()}.`);
+      break;
+    }
+    picked.push(next);
+    total += next.length + 1;
+  }
+
+  let result = picked.join(' ').replace(/\s{2,}/g, ' ').trim();
+
+  // If prose was empty but structure existed, give a tiny structural cue.
+  if (!result) {
+    if (listHints.length) {
+      result = `Reply covers ${listHints[0]}. Details are on screen.`;
+    } else if (hadCode || hadTable) {
+      result = 'Reply ready — see the console.';
+    }
+  }
+
+  if (!result) return null;
+  result = result.replace(/\.{2,}/g, '.').replace(/\s{2,}/g, ' ').trim();
+  // Guard absurdly short noise
+  if (result.length < 12) return null;
+  return result;
+}
+
+/** Minimal fallback when summary generation yields nothing useful. */
+const TTS_REPLY_FALLBACK = 'Reply ready — see the console.';
+
 function buildSpokenText(text) {
   const blocks = String(text || '').split(/\n{2,}/);
   const spoken = [];
@@ -1518,12 +1694,28 @@ function speakViaBrowserTts(spokenText, gen) {
  * ONLY when the service is actually down/unreachable — never after a successful
  * Kokoro synthesize whose local play hit autoplay/decode issues.
  * @param {string} text raw or already-built spoken text
- * @param {{ raw?: boolean }} [opts] raw=true skips buildSpokenText (confirmation phrases)
+ * @param {{ raw?: boolean, summary?: boolean }} [opts]
+ *   raw=true skips preprocess (confirmation phrases).
+ *   summary=true (hub replies) speaks a brief big-picture summary only —
+ *   never the full scrubbed body. On summary failure uses TTS_REPLY_FALLBACK
+ *   (or silence if even that is empty) — never dumps the full reply.
  * @returns {boolean} true if a speak attempt was started (may finish async)
  */
 function speakTtsText(text, opts) {
   if (!ttsEnabled) return false;
-  const spokenText = opts && opts.raw ? String(text || '').trim() : buildSpokenText(text);
+  let spokenText;
+  if (opts && opts.raw) {
+    spokenText = String(text || '').trim();
+  } else if (opts && opts.summary) {
+    try {
+      spokenText = buildSpokenSummary(text) || TTS_REPLY_FALLBACK;
+    } catch (err) {
+      logTtsDebug('summary failed', String(err && err.message || err));
+      spokenText = TTS_REPLY_FALLBACK;
+    }
+  } else {
+    spokenText = buildSpokenText(text);
+  }
   if (!spokenText) return false;
 
   // Bump gen + stop prior audio/utterance.
@@ -1598,8 +1790,9 @@ function speakTtsText(text, opts) {
 }
 
 function speakHubReply(text) {
-  logTtsDebug('speakHubReply', { chars: String(text || '').length });
-  speakTtsText(text);
+  // Hub replies: full markdown stays in the console UI; TTS gets a short summary only.
+  logTtsDebug('speakHubReply', { chars: String(text || '').length, mode: 'summary' });
+  speakTtsText(text, { summary: true });
 }
 
 /**
