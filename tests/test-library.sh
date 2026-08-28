@@ -12,6 +12,8 @@ grep -q 'bizagent-library\|openLibraryTab' "$ROOT/control-plane/public/app.js" |
 [ -f "$ROOT/control-plane/public/library.html" ] || fail "library.html missing"
 [ -f "$ROOT/control-plane/public/library.js" ] || fail "library.js (page) missing"
 grep -q 'library-accordion\|libraryAccordion' "$ROOT/control-plane/public/library.html" || fail "library page missing accordion root"
+grep -q 'groupLibraryRepos\|library-acc-product\|libraryExpandedProduct' "$ROOT/control-plane/public/library.js" || fail "library page missing product→project nesting"
+grep -q 'library-acc-nested' "$ROOT/control-plane/public/styles.css" || fail "styles missing nested product accordion"
 grep -q 'library-diagram\|libraryEntryKind\|render=1\|render:' "$ROOT/control-plane/public/library.js" || fail "library page missing diagram preview path"
 grep -qE "docs/|company/|reports/" "$ROOT/control-plane/lib/hub-memory.js" || fail "hub prompt missing library hub-dir convention"
 grep -qE "\.puml|ALLOWED_EXT.*puml|puml" "$ROOT/control-plane/lib/library.js" || fail "library.js missing .puml allowlist"
@@ -261,6 +263,45 @@ const expectedOrder = ['repo:demo:alpha-repo', 'repo:demo:demo-repo', 'repo:zebr
 if (JSON.stringify(projectIds) !== JSON.stringify(expectedOrder)) {
   console.error('repo sort order', projectIds, 'expected', expectedOrder);
   process.exit(24);
+}
+// Product grouping metadata on every project entry (client nests Product → Project)
+for (const r of repos.filter((x) => x.kind === 'project')) {
+  if (!r.product || !r.product_name) {
+    console.error('missing product metadata', r);
+    process.exit(29);
+  }
+}
+const demoAlpha = repos.find((r) => r.id === 'repo:demo:alpha-repo');
+const demoDemo = repos.find((r) => r.id === 'repo:demo:demo-repo');
+const zebra = repos.find((r) => r.id === 'repo:zebra:zebra-repo');
+if (!demoAlpha || demoAlpha.product !== 'demo' || demoAlpha.product_name !== 'Demo Product') {
+  console.error('demo alpha product meta', demoAlpha);
+  process.exit(30);
+}
+if (!demoDemo || demoDemo.product !== 'demo' || demoDemo.product_name !== 'Demo Product') {
+  console.error('demo demo product meta', demoDemo);
+  process.exit(31);
+}
+if (!zebra || zebra.product !== 'zebra' || zebra.product_name !== 'Zebra Product') {
+  console.error('zebra product meta', zebra);
+  process.exit(32);
+}
+// Single-project products still carry product fields (consistent nest UX)
+if (zebra.product !== 'zebra') {
+  console.error('single-project product slug', zebra);
+  process.exit(33);
+}
+// Empty / missing project path skipped; empty projects array yields no entries
+const emptyReg = {
+  products: [
+    { slug: 'empty', name: 'Empty Product', projects: [] },
+    { slug: 'badpath', name: 'Bad Path', projects: [{ name: 'gone', path: '' }] },
+  ],
+};
+const emptyRepos = listLibraryRepos(hub, emptyReg).repos.filter((r) => r.kind === 'project');
+if (emptyRepos.length !== 0) {
+  console.error('empty/missing path should yield no project repos', emptyRepos);
+  process.exit(34);
 }
 
 const tree = getLibraryRepoTree(hub, registry, 'repo:demo:demo-repo');
