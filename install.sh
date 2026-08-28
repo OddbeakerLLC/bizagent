@@ -35,6 +35,23 @@ note() { printf "  ${DIM}%s${NC}\n" "$1"; }
 warn() { printf "  ${YELLOW}!${NC} %s\n" "$1"; }
 die()  { printf "\n${RED}✗ %s${NC}\n\n" "$1" >&2; exit 1; }
 
+# Wipe dep-install noise before the first onboarding questions.
+# Only on a real TTY and interactive installs — never on failure paths
+# (call only after deps succeed) or CI/non-interactive runs.
+clear_screen_for_onboarding() {
+  if [[ -n "${BIZAGENT_NONINTERACTIVE:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -r /dev/tty ]]; then
+    return 0
+  fi
+  if command -v clear >/dev/null 2>&1; then
+    clear >/dev/tty 2>/dev/null || true
+  else
+    printf '\033c' >/dev/tty 2>/dev/null || true
+  fi
+}
+
 banner() {
   cat <<'EOF'
 
@@ -1479,6 +1496,10 @@ main() {
   ensure_java
   ensure_graphviz
   ensure_plantuml
+
+  # Deps succeeded — blank the terminal so provider/key questions aren't buried
+  # under apt/npm noise. Skipped when non-interactive or no TTY.
+  clear_screen_for_onboarding
 
   step "Default LLM provider"
   select_default_provider
