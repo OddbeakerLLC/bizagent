@@ -12,81 +12,93 @@
 ## § 0 — Detect state first, every run
 
 ```
-If  registry.json  exists  ->  the system is BUILT.   Go to § 3 (Operating).
-Else                       ->  the system is UNBUILT. Do § 1, then § 2.
+registry.json missing                         -> UNBUILT. Do § 1, then § 2.
+registry.json exists AND (org set OR ≥1 product with slug/name)
+                                              -> BUILT / configured. Go to § 3.
+registry.json exists BUT org empty AND products=[]
+                                              -> MINIMAL install seed (still first-run).
+                                                 Do § 1, then § 2. Do NOT treat as BUILT.
 ```
 
-Do this check before anything else. Never run the interview on a built system
-unless the operator explicitly asks to reconfigure.
+The installer always writes a minimal `registry.json` (empty `org`, empty
+`products`) so the control plane can start. **That file alone does not mean
+the hub is built.** Only a non-empty org and/or real products means BUILT.
+
+Never run the full § 1 interview on a configured/BUILT system unless the
+operator explicitly asks to reconfigure. On reinstall of a configured hub,
+welcome only — ask what they want to work on; never rebuild.
+
+Fresh-install seed (`scripts/seed-first-run.sh`, queued by root `install.sh`
+and `install/install.sh`) opens a **Welcome** console conversation, may
+pre-send a short first hub bubble (TTS-friendly), and leaves
+`inbox/*-install-first-run.md` for the hub turn. Idempotent: re-install must
+not spawn a second parallel setup chat.
 
 ---
 
-## § 1 — Interview the operator (run only when unbuilt)
+## § 1 — Interview the operator (run only when unbuilt / minimal)
 
 You are setting up an agentic product-development hub for whoever cloned this
 repository. Your job here is to gather _their_ inputs. Be conversational and
-ask roughly one thing at a time — do not dump all questions at once.
+ask **exactly one thing at a time** — do not dump all questions at once.
+Keep each operator-visible reply short enough for TTS.
 
-Ask for:
+**Zero-repo path is first-class:** if they have no project folders yet, still
+write a minimal registry (org + settings defaults, `products: []`) and finish
+§ 2 scaffolding so they can add products later. Do not block setup on repos.
 
-1. **Organization name.**
-2. **Where their project repositories live.** Accept either a parent folder
-   path or an explicit list of repo paths.
+**Skip anything the installer already set** when present: LLM provider/model
+(+ API key in `.bizagent/env`), control-plane auth (`.bizagent/auth.json`),
+and framework-remote detach. Detect stock/minimal vs already-configured
+registry before asking.
+
+Approved beat order (one question per turn):
+
+1. **Welcome + organization name.**
+2. **Where their project repositories live.** Accept a parent folder path, an
+   explicit list of repo paths, or **none yet** (zero-repo → skip 3–4 product
+   grouping, keep `products: []`).
    - If they give a folder: list its sub-directories, briefly inspect each one
      (README, language, obvious purpose), then **propose** a grouping of repos
      into _products_. Present the proposal and invite corrections. Iterate
      until they approve it.
-   - If they cannot point you at a folder: ask them to list each repo, its
-     path, and (optionally) its git remote.
-3. **Confirmation of the product groupings.** Each product needs a short
-   lowercase `slug` (e.g. `jobe-ai`). One agent is created per product; an
+   - If they list repos: path + optional git remote per repo.
+3. **Confirmation of the product groupings** (skip if zero-repo). Each product
+   needs a short lowercase `slug` (e.g. `jobe-ai`). One agent per product; an
    agent owns one or more project repos.
-
-   **Agent names.** For each confirmed product, derive a short name: a
-   single-word product name uses its first letter ("Widgets" → **Agent W**);
-   a multi-word name uses the first letter of each word ("Jobe AI" →
-   **Agent JA**). If the proposed name conflicts with an already-confirmed
-   agent, fall back to the first two letters of each product's first word
-   (e.g. "Agent Wi" vs "Agent Wr"); extend to three letters if still
-   clashing; if still unresolvable, ask the operator to choose manually.
-   Present the proposal and wait for the operator's explicit response:
+4. **Agent names** per confirmed product (skip if zero-repo). Derive a short
+   name: single-word product → first letter ("Widgets" → **Agent W**);
+   multi-word → first letter of each word ("Jobe AI" → **Agent JA**). On
+   conflict, fall back to first two letters of each product's first word
+   (e.g. "Agent Wi" vs "Agent Wr"); extend to three if still clashing; if
+   still unresolvable, ask the operator to choose. Present and wait:
    "I'd suggest calling this agent **Agent W**. Want to use that, or do you
-   have a different name in mind?" If the operator proposes a name that
-   conflicts with an existing agent, flag it and ask them to choose again.
-   Record the confirmed name; it becomes the `agent_name` field in
+   have a different name in mind?" Record confirmed `agent_name` in
    `registry.json`.
-
-4. **Cross-product relationships** — which products' agents need to message
-   each other directly. Most products have none.
-5. **Nightly maintenance time** — default `23:00`.
-6. **Knowledge Stack** — `enabled` (default `true`) plus `refresh_day`
+5. **Peer messaging?** Default **hub-and-spoke / no** direct cross-product
+   agent chat. Most products have none. (No peer-chat protocol work.)
+6. **Nightly maintenance time** — default `23:00`.
+7. **Knowledge Stack** — on/off (default `true`) plus `refresh_day`
    (default `sunday`) and `refresh_time` (default `01:00`) if enabled. The
-   Knowledge Stack is a directory of synthesized docs PTL keeps fresh for
-   chat-with-documents tools (NotebookLM, MSTY). Skip (`false`) if the
-   operator doesn't use such tools.
-7. **Archive threshold** — auto-archive inbox messages left unactioned for how
-   many days. Default `30`.
-8. **Agent autonomy level** — `maintenance-only` (journals, sitemaps, routing),
-   `+monitoring` (also flags failing builds / stale branches), or `+light-dev`
-   (also makes small changes and proposes them). Default `maintenance-only`.
-9. **Hub git remote (private ops backup)** — strongly recommended. The
-    installer removes the public framework `origin` so ops data cannot push
-    there. Ask for a **private** remote URL (GitHub private repo, bare repo on
-    this machine, or private host) and store it as `hub.remote` in
-    `registry.json`. Blank means local-only nightly commits (no off-box backup
-    of journals, Knowledge Stack, registry, or hub code tweaks). Never a
-    public framework URL.
-10. **LLM provider + model** — the runtime is always **bizagent-agent**
-    (`scripts/bizagent-agent`). Set `registry.json` `settings.hub_agent.provider`
-    to a key in `cli.json` (e.g. `grok`, `chatgpt`, `claude`, `gemini`, `venice`,
-    `ollama`) and `settings.hub_agent.model` to a model id for that provider.
-    Installer defaults these; the web UI can change them per agent. Ensure the
-    matching API key is in `.bizagent/env` (see `cli.json` `keyEnv`). Run
-    `bash scripts/check-hub-ready.sh` before expecting hub turns. Legacy
-    `cliName` is an alias for `provider` only.
-11. **Control-plane login** — username and password for the local web UI. Store
-    only the salted password hash generated by
+   Knowledge Stack is synthesized docs PTL keeps fresh for chat-with-documents
+   tools (NotebookLM, MSTY). Skip (`false`) if unused.
+8. **Auto-archive days** — inbox messages left unactioned. Default `30`.
+9. **Agent autonomy** — `maintenance-only` (default), `+monitoring`, or
+   `+light-dev`.
+10. **Private hub remote or local-only.** Installer removes public framework
+    `origin`. Ask for a **private** remote URL (GitHub private, bare repo on
+    this machine, or private host) as `hub.remote`. Blank = local-only nightly
+    commits. Never a public framework URL.
+11. **LLM provider + model** — only if not already in env/registry from the
+    installer. Runtime is always **bizagent-agent**. Set
+    `settings.hub_agent.provider` (key in `cli.json`) and
+    `settings.hub_agent.model`. Ensure matching API key in `.bizagent/env`.
+    Legacy `cliName` aliases `provider` only.
+12. **Control-plane login** — only if not already set (no `.bizagent/auth.json`).
+    Username + password; store only the salted hash from
     `node scripts/bizagent-control-plane.js auth-init`.
+13. **Build summary + next steps** — products/projects (or zero-repo), deferred
+    items, cron, control-plane service offer, how to start directing work.
 
 **Do not ask** about message transport, hub-and-spoke topology, the
 journal/sitemap formats, or the real-time vs nightly model. Those decisions are

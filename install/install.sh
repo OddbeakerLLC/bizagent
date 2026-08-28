@@ -272,36 +272,12 @@ fi
 step "Starting"
 bash "$HUB/scripts/control-plane.sh" start "$HUB"
 
-# --- 6. Pre-flight + first-run inbox seed ---
+# --- 6. Pre-flight + first-run inbox seed (shared with root install.sh) ---
 step "First-run readiness"
-READY=0
-if [[ -x "$HUB/scripts/check-hub-ready.sh" ]]; then
-  if bash "$HUB/scripts/check-hub-ready.sh" "$HUB"; then
-    READY=1
-  else
-    printf "  ! Hub is not ready to run turns (see above). Fix provider/model/API key, then re-check:\n"
-    note "  bash scripts/check-hub-ready.sh"
-  fi
+if [[ -x "$HUB/scripts/seed-first-run.sh" ]]; then
+  bash "$HUB/scripts/seed-first-run.sh" "$HUB" || true
 else
-  note "check-hub-ready.sh missing — skipping pre-flight"
-  READY=1
-fi
-
-mkdir -p "$HUB/inbox"
-TODAY="$(date -u +%Y-%m-%d)"
-SEED_FILE="$HUB/inbox/${TODAY}-install-first-run.md"
-# Glob-guard: skip if any prior-date seed already exists (prevents duplicate on same-day re-run).
-_EXISTING=$(ls "$HUB/inbox/"*"-install-first-run.md" 2>/dev/null | head -1)
-if [ -z "$_EXISTING" ]; then
-  if [[ "$READY" -eq 1 ]]; then
-    printf '---\nfrom: installer\nto: hub\ndate: %s\nsubject: first-run setup\n---\n\nA new bizagent installation just completed. Welcome the operator in the web UI, interview them about their organization and products (gather → build → distribute), write registry.json and agent dirs as needed, and report when setup is done.\n\nPrerequisites are already checked: bizagent-agent runtime, hub provider/model, and API key in .bizagent/env.\n' \
-      "$TODAY" > "$SEED_FILE"
-    ok "first-run message queued (hub is ready to execute it)"
-  else
-    printf '---\nfrom: installer\nto: hub\ndate: %s\nsubject: first-run setup blocked\n---\n\nInstallation finished but the hub was NOT ready to launch (missing provider, model, API key, or agent-runtime deps). Do not run product onboarding until the operator fixes that.\n\nOperator: run `bash scripts/check-hub-ready.sh`, fix any ✗ items, restart control plane, then send a console message: "Run first-run setup / interview me and onboard my products."\n' \
-      "$TODAY" > "$SEED_FILE"
-    printf "  ! first-run seed written as BLOCKED (will not usefully execute until ready)\n"
-  fi
+  warn "scripts/seed-first-run.sh missing — no first-run welcome seed"
 fi
 
 # --- 7. Open browser ---

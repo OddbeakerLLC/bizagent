@@ -1916,7 +1916,14 @@ async function loadConversations() {
     option.textContent = conv.name;
     select.appendChild(option);
   });
-  currentConversation = currentConversation || convs[0].id;
+  // Prefer installer Welcome / first-run chat so the first bubble is visible (and TTS can speak it).
+  if (!currentConversation) {
+    const welcome = convs.find((c) => {
+      const n = String(c.name || '').toLowerCase();
+      return n === 'welcome' || n.includes('first-run') || n.includes('first run');
+    });
+    currentConversation = (welcome && welcome.id) || convs[0].id;
+  }
   select.value = currentConversation;
   await loadConversation(currentConversation);
 }
