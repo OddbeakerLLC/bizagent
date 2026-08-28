@@ -71,7 +71,7 @@ function setAuthenticated(isAuthenticated, message) {
   if (!isAuthenticated) {
     document.getElementById('namePanel').hidden = true;
     hideCompanyModal();
-    stopTtsSpeech();
+    stopTtsSpeech({ hard: true });
   }
   setAuthStatus(message || (isAuthenticated ? 'Signed in' : 'Login required'), isAuthenticated ? 'ok' : 'warn');
 }
@@ -925,7 +925,15 @@ function stopTtsAudioGraph() {
   } catch (_) { /* ignore */ }
 }
 
-function stopTtsSpeech() {
+/**
+ * Stop all in-flight TTS (server WAV + browser synth).
+ * @param {{ hard?: boolean }} [opts] hard=true (toggle OFF / logout): do not
+ *   resume speechSynthesis after cancel, and suspend AudioContext so a late
+ *   BufferSource.start() after we null ttsAudioSource cannot be heard.
+ *   Soft stop (default) still resumes synth so the next speak works in Chrome.
+ */
+function stopTtsSpeech(opts) {
+  const hard = !!(opts && opts.hard);
   ttsPlayGen += 1;
   stopTtsKeepAlive();
   ttsCurrentUtterance = null;
@@ -940,14 +948,24 @@ function stopTtsSpeech() {
     }
   } catch (_) { /* ignore */ }
   revokeTtsObjectUrl();
+  if (hard && ttsAudioCtx) {
+    try {
+      if (ttsAudioCtx.state === 'running') ttsAudioCtx.suspend();
+    } catch (_) { /* ignore */ }
+  }
   try {
     const synth = getSpeechSynthesis();
     if (synth) {
       synth.cancel();
-      // cancel() frequently leaves paused=true; clear it so the next speak works.
-      try { if (synth.paused) synth.resume(); } catch (_) { /* ignore */ }
+      // Soft stop only: cancel() frequently leaves paused=true; clear it so the
+      // next speak works. Hard stop (disable) must NOT resume — that can let a
+      // just-canceled utterance continue on some Chrome builds.
+      if (!hard) {
+        try { if (synth.paused) synth.resume(); } catch (_) { /* ignore */ }
+      }
     }
   } catch (_) { /* ignore */ }
+  if (hard) logTtsDebug('hard stop (disabled)');
 }
 
 /** Resume if cancel()/browser left synth paused (common Chrome gotcha). */
@@ -1074,9 +1092,15 @@ async function ensureTtsAudioContext() {
  * do not hit the HTMLMediaElement autoplay gate that forced speechSynthesis.
  * @returns {'webaudio'|'element'} which path started
  */
+/** True when this play generation is still current and TTS is still enabled. */
+function ttsPlayStillActive(gen) {
+  return gen === ttsPlayGen && !!ttsEnabled;
+}
+
 async function playTtsWavBuffer(arrayBuffer, gen) {
-  if (gen !== ttsPlayGen) return 'webaudio';
+  if (!ttsPlayStillActive(gen)) return 'webaudio';
   const ctx = await ensureTtsAudioContext();
+  if (!ttsPlayStillActive(gen)) return 'webaudio';
   if (ctx && typeof ctx.decodeAudioData === 'function') {
     // copy: decodeAudioData may detach the buffer
     const copy = arrayBuffer.slice ? arrayBuffer.slice(0) : arrayBuffer;
@@ -1087,9 +1111,15 @@ async function playTtsWavBuffer(arrayBuffer, gen) {
       logTtsDebug('decodeAudioData failed', String(err && err.message || err));
       decoded = null;
     }
-    if (gen !== ttsPlayGen) return 'webaudio';
+    // Re-check after await: toggle OFF bumps gen and may suspend the context.
+    if (!ttsPlayStillActive(gen)) return 'webaudio';
     if (decoded) {
       stopTtsAudioGraph();
+      // Ensure context is running only when still enabled (hard-stop may have suspended it).
+      try {
+        if (ctx.state === 'suspended') await ctx.resume();
+      } catch (_) { /* ignore */ }
+      if (!ttsPlayStillActive(gen)) return 'webaudio';
       const source = ctx.createBufferSource();
       source.buffer = decoded;
       source.connect(ctx.destination);
@@ -1110,12 +1140,22 @@ async function playTtsWavBuffer(arrayBuffer, gen) {
           else resolve();
         };
         source.onended = () => finish(null);
+        // Poll often so toggle-OFF cuts audio immediately (not up to 200ms later).
         watch = setInterval(() => {
-          if (gen !== ttsPlayGen) {
+          if (!ttsPlayStillActive(gen)) {
             try { source.stop(0); } catch (_) { /* ignore */ }
+            try { source.disconnect(); } catch (_) { /* ignore */ }
+            if (ttsAudioSource === source) ttsAudioSource = null;
             finish(null);
           }
-        }, 200);
+        }, 50);
+        // Final gate: never start if disable won the race after assign.
+        if (!ttsPlayStillActive(gen)) {
+          try { source.disconnect(); } catch (_) { /* ignore */ }
+          if (ttsAudioSource === source) ttsAudioSource = null;
+          finish(null);
+          return;
+        }
         try {
           source.start(0);
         } catch (err) {
@@ -1127,6 +1167,7 @@ async function playTtsWavBuffer(arrayBuffer, gen) {
   }
 
   // Fallback: blob URL + HTMLAudio (still better than speechSynthesis when Kokoro worked).
+  if (!ttsPlayStillActive(gen)) return 'webaudio';
   revokeTtsObjectUrl();
   const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
   const objUrl = URL.createObjectURL(blob);
@@ -1151,11 +1192,16 @@ async function playTtsWavBuffer(arrayBuffer, gen) {
       audio.onended = () => finish(null);
       audio.onerror = () => finish(new Error('audio element error'));
       watch = setInterval(() => {
-        if (gen !== ttsPlayGen) {
+        if (!ttsPlayStillActive(gen)) {
           try { audio.pause(); } catch (_) { /* ignore */ }
           finish(null);
         }
-      }, 200);
+      }, 50);
+      if (!ttsPlayStillActive(gen)) {
+        try { audio.pause(); } catch (_) { /* ignore */ }
+        finish(null);
+        return;
+      }
       const p = audio.play();
       if (p && typeof p.then === 'function') {
         p.then(() => { /* playing */ }).catch((err) => finish(err));
@@ -1175,20 +1221,21 @@ async function playTtsWavBuffer(arrayBuffer, gen) {
  * Throws only on transport/API failure (real service-down → browser fallback OK).
  */
 async function speakViaServerTts(spokenText, gen) {
+  if (!ttsPlayStillActive(gen)) return false;
   const res = await fetch('/api/tts/synthesize', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: spokenText, raw: true }),
   });
-  if (gen !== ttsPlayGen) return false;
+  if (!ttsPlayStillActive(gen)) return false;
   if (!res.ok) {
     ttsServerAvailable = false;
     ttsServerProbedAt = Date.now();
     throw new Error(`synthesize HTTP ${res.status}`);
   }
   const data = await res.json().catch(() => ({}));
-  if (gen !== ttsPlayGen) return false;
+  if (!ttsPlayStillActive(gen)) return false;
   // Empty / nothing_to_speak: success with no audio (do not fall back to browser noise).
   if (!data || data.nothing_to_speak || !data.audio_url) {
     logTtsDebug('server nothing to speak');
@@ -1208,13 +1255,13 @@ async function speakViaServerTts(spokenText, gen) {
   // Fetch WAV as blob (credentials) so playback does not depend on media element
   // re-requesting a cookie'd URL, and so Web Audio can decode it.
   const audioRes = await fetch(data.audio_url, { credentials: 'same-origin' });
-  if (gen !== ttsPlayGen) return false;
+  if (!ttsPlayStillActive(gen)) return false;
   if (!audioRes.ok) {
     // Synthesize succeeded; audio fetch failed — treat as play error, not "use browser TTS".
     throw new Error(`tts audio HTTP ${audioRes.status}`);
   }
   const buf = await audioRes.arrayBuffer();
-  if (gen !== ttsPlayGen) return false;
+  if (!ttsPlayStillActive(gen)) return false;
   if (!buf || !buf.byteLength) {
     throw new Error('tts audio empty body');
   }
@@ -1355,7 +1402,8 @@ function speakViaBrowserTts(spokenText, gen) {
     logTtsSpeakErrorOnce('speechSynthesis missing');
     return false;
   }
-  if (playGen !== ttsPlayGen) return false;
+  // Disabled or superseded — never queue browser speech.
+  if (!ttsPlayStillActive(playGen)) return false;
 
   const chunks = chunkSpokenText(spokenText, 180);
   if (!chunks.length) return false;
@@ -1394,13 +1442,13 @@ function speakViaBrowserTts(spokenText, gen) {
 
   let idx = 0;
   const finishOk = () => {
-    if (playGen !== ttsPlayGen) return;
+    if (!ttsPlayStillActive(playGen)) return;
     clearBrowserUtteranceState();
     logTtsDebug('browser speak end');
   };
 
   const speakNext = () => {
-    if (playGen !== ttsPlayGen) return;
+    if (!ttsPlayStillActive(playGen)) return;
     if (idx >= utterances.length) {
       finishOk();
       return;
@@ -1430,7 +1478,8 @@ function speakViaBrowserTts(spokenText, gen) {
     };
 
     const doSpeak = (isRetry) => {
-      if (playGen !== ttsPlayGen) return;
+      // Toggle OFF / newer speak must never call synth.speak.
+      if (!ttsPlayStillActive(playGen)) return;
       try {
         ensureTtsResumed();
         synth.speak(u);
@@ -1438,7 +1487,7 @@ function speakViaBrowserTts(spokenText, gen) {
         // If speak() no-op'd (Chrome after cancel), retry once shortly.
         if (!isRetry) {
           setTimeout(() => {
-            if (playGen !== ttsPlayGen || settled) return;
+            if (!ttsPlayStillActive(playGen) || settled) return;
             try {
               if (!synth.speaking && !synth.pending) {
                 logTtsDebug('browser speak retry (idle after speak)');
@@ -1480,6 +1529,8 @@ function speakTtsText(text, opts) {
   // Bump gen + stop prior audio/utterance.
   stopTtsSpeech();
   const gen = ttsPlayGen;
+  // Disable can race the lines above; never start a new speak when already off.
+  if (!ttsEnabled || !ttsPlayStillActive(gen)) return false;
   logTtsDebug('speakTtsText', { raw: !!(opts && opts.raw), chars: spokenText.length });
 
   // Always try server unless a recent probe proved it down (sticky-false expires).
@@ -1492,13 +1543,14 @@ function speakTtsText(text, opts) {
       let allowBrowserFallback = true;
       try {
         if (ttsServerAvailable !== true) await probeTtsServer(false);
-        if (gen !== ttsPlayGen) return;
+        // Toggle OFF must win over any in-flight synthesize/play.
+        if (!ttsPlayStillActive(gen)) return;
         // Probe said down → browser. Probe unknown/true → attempt synthesize.
         if (ttsServerAvailable === false) {
           logTtsDebug('server unavailable → browser');
         } else {
           const ok = await speakViaServerTts(spokenText, gen);
-          if (gen !== ttsPlayGen) return;
+          if (!ttsPlayStillActive(gen)) return;
           if (ok) {
             if (ttsUnavailableReason) setTtsUnavailable('');
             updateTtsToggleUi();
@@ -1527,12 +1579,12 @@ function speakTtsText(text, opts) {
             ttsServerAvailable = false;
             ttsServerProbedAt = Date.now();
           }
-          if (gen !== ttsPlayGen) return;
+          if (!ttsPlayStillActive(gen)) return;
           logTtsSpeakErrorOnce(err);
           logTtsDebug('server speak failed → browser', msg);
         }
       }
-      if (gen !== ttsPlayGen) return;
+      if (!ttsPlayStillActive(gen)) return;
       if (!allowBrowserFallback) return;
       softUnlockBrowserSynth();
       speakViaBrowserTts(spokenText, gen);
@@ -1598,6 +1650,7 @@ function softUnlockBrowserSynth() {
 function primeTtsOnEnable() {
   ttsGestureUnlocked = true;
   // Warm browser synth + unlock Web Audio / HTMLAudio under this click.
+  // Hard-stop on disable may have left AudioContext suspended and synth paused.
   try {
     const synth = getSpeechSynthesis();
     if (synth) {
@@ -1609,6 +1662,10 @@ function primeTtsOnEnable() {
     logTtsSpeakErrorOnce(err);
   }
   unlockHtmlAudioGesture();
+  // Explicit resume under this user gesture (survives prior hard-stop suspend).
+  try {
+    ensureTtsAudioContext().catch(() => {});
+  } catch (_) { /* ignore */ }
   // Re-probe so toggle-ON picks up a newly started oddbeaker-tts daemon
   // (and clears any sticky-false from a pre-login 401 probe).
   ttsServerAvailable = null;
@@ -1647,11 +1704,13 @@ function maybeSpeakNewHubReplies(messages) {
 function setTtsEnabled(on, opts) {
   const next = !!on;
   const wasOn = ttsEnabled;
+  // Set flag first so in-flight async speak paths see disabled immediately.
   ttsEnabled = next;
   saveTtsEnabled(ttsEnabled);
   updateTtsToggleUi();
   if (!ttsEnabled) {
-    stopTtsSpeech();
+    // Hard stop: cancel audio/synth, suspend Web Audio, do not resume synth.
+    stopTtsSpeech({ hard: true });
     return;
   }
   // Prime only on user toggle ON (click gesture unlocks later async speaks).
