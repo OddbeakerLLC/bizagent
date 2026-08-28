@@ -372,13 +372,34 @@ function groupLibraryRepos(repos) {
   return { hub, products };
 }
 
+/** True when repo has ≥1 file whose name/path matches q. Product/project labels do not match. */
 function repoTreeMatchesFilter(repo, q) {
   if (!q) return true;
-  const label = `${repo.label || ''} ${repo.name || ''} ${repo.product_name || ''} ${repo.product || ''}`.toLowerCase();
-  if (label.includes(q)) return true;
   const cached = libraryTrees[repo.id];
-  if (!cached || cached.error) return true; // keep visible until loaded / on error
+  if (!cached || cached.error) return false;
   return filterTree(cached.tree || [], q).length > 0;
+}
+
+/** Prefetch viewable-file trees so filter can hide empty products/projects. */
+async function ensureLibraryTreesLoaded(repoIds) {
+  const ids = repoIds || libraryRepos.map((r) => r.id);
+  const missing = ids.filter((id) => id && !libraryTrees[id]);
+  if (!missing.length) return;
+  await Promise.all(missing.map(async (repoId) => {
+    try {
+      const data = await api(`/api/library/tree?repo=${encodeURIComponent(repoId)}`);
+      libraryTrees[repoId] = data;
+    } catch (err) {
+      libraryTrees[repoId] = { error: err.message || 'Failed to load tree', tree: [] };
+    }
+  }));
+}
+
+/** Debounced filter path: load trees when querying, then re-render (hides non-matches). */
+async function applyLibraryFilter() {
+  const q = libraryFilterQuery();
+  if (q) await ensureLibraryTreesLoaded();
+  renderAccordion();
 }
 
 function fillRepoBody(body, repo, q) {
@@ -411,12 +432,16 @@ function renderProjectItem(repo, q) {
   const item = document.createElement('div');
   item.className = 'library-acc-item library-acc-project';
   item.dataset.repoId = repo.id;
-  if (libraryExpandedId === repo.id) item.classList.add('is-expanded');
+  // While filtering, open every project that still has matching files so hits are reachable.
+  const projectOpen = q
+    ? repoTreeMatchesFilter(repo, q)
+    : libraryExpandedId === repo.id;
+  if (projectOpen) item.classList.add('is-expanded');
 
   const head = document.createElement('button');
   head.type = 'button';
   head.className = 'library-acc-head library-acc-project-head';
-  head.setAttribute('aria-expanded', libraryExpandedId === repo.id ? 'true' : 'false');
+  head.setAttribute('aria-expanded', projectOpen ? 'true' : 'false');
   const avail = repo.available === false ? ' · offline' : '';
   head.innerHTML = `<span class="library-acc-chevron" aria-hidden="true"></span>`
     + `<span class="library-acc-title">${escapeHtml(repo.label || repo.name)}</span>`
@@ -426,7 +451,7 @@ function renderProjectItem(repo, q) {
 
   const body = document.createElement('div');
   body.className = 'library-acc-body';
-  if (libraryExpandedId === repo.id) fillRepoBody(body, repo, q);
+  if (projectOpen) fillRepoBody(body, repo, q);
   item.appendChild(body);
   return item;
 }
@@ -447,12 +472,15 @@ function renderAccordion() {
     const item = document.createElement('div');
     item.className = 'library-acc-item library-acc-hub';
     item.dataset.repoId = repo.id;
-    if (libraryExpandedId === repo.id) item.classList.add('is-expanded');
+    const hubOpen = q
+      ? repoTreeMatchesFilter(repo, q)
+      : libraryExpandedId === repo.id;
+    if (hubOpen) item.classList.add('is-expanded');
 
     const head = document.createElement('button');
     head.type = 'button';
     head.className = 'library-acc-head';
-    head.setAttribute('aria-expanded', libraryExpandedId === repo.id ? 'true' : 'false');
+    head.setAttribute('aria-expanded', hubOpen ? 'true' : 'false');
     head.innerHTML = `<span class="library-acc-chevron" aria-hidden="true"></span>`
       + `<span class="library-acc-title">${escapeHtml(repo.label || repo.name || 'Hub')}</span>`
       + `<span class="library-acc-meta">Hub</span>`;
@@ -461,7 +489,7 @@ function renderAccordion() {
 
     const body = document.createElement('div');
     body.className = 'library-acc-body';
-    if (libraryExpandedId === repo.id) fillRepoBody(body, repo, q);
+    if (hubOpen) fillRepoBody(body, repo, q);
     item.appendChild(body);
     root.appendChild(item);
   }
@@ -682,7 +710,9 @@ async function initLibraryPage() {
   if (filter) {
     filter.addEventListener('input', () => {
       clearTimeout(libraryFilterTimer);
-      libraryFilterTimer = setTimeout(() => renderAccordion(), 120);
+      libraryFilterTimer = setTimeout(() => {
+        applyLibraryFilter().catch(() => renderAccordion());
+      }, 120);
     });
   }
 
