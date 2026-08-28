@@ -64,12 +64,120 @@ function isTableRow(line) {
   return t.includes('|') && !/^```/.test(t);
 }
 
+/** CommonMark-ish thematic break: --- / *** / ___ alone on a line. */
+function isThematicBreak(line) {
+  return /^(?:-{3,}|\*{3,}|_{3,})\s*$/.test(String(line || '').trim());
+}
+
+/** Light LaTeX → readable text (no KaTeX dependency). */
+function prettifyLatex(src) {
+  let s = String(src || '').replace(/\s+/g, ' ').trim();
+  for (let n = 0; n < 6; n++) {
+    const before = s;
+    s = s.replace(/\\(?:text|mathrm|mathbf|boldsymbol|operatorname)\{([^{}]*)\}/g, '$1');
+    s = s.replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, '($1)/($2)');
+    s = s.replace(/\\sqrt\{([^{}]*)\}/g, '√($1)');
+    if (s === before) break;
+  }
+  const symbols = [
+    [/\\times\b/g, '×'], [/\\cdot\b/g, '·'], [/\\pm\b/g, '±'],
+    [/\\leq\b/g, '≤'], [/\\geq\b/g, '≥'], [/\\neq\b/g, '≠'], [/\\approx\b/g, '≈'],
+    [/\\infty\b/g, '∞'], [/\\sum\b/g, '∑'], [/\\prod\b/g, '∏'], [/\\int\b/g, '∫'],
+    [/\\partial\b/g, '∂'], [/\\nabla\b/g, '∇'],
+    [/\\lceil\b/g, '⌈'], [/\\rceil\b/g, '⌉'], [/\\lfloor\b/g, '⌊'], [/\\rfloor\b/g, '⌋'],
+    [/\\langle\b/g, '⟨'], [/\\rangle\b/g, '⟩'],
+    [/\\ldots\b/g, '…'], [/\\cdots\b/g, '⋯'], [/\\to\b/g, '→'], [/\\rightarrow\b/g, '→'],
+    [/\\left\b/g, ''], [/\\right\b/g, ''],
+    [/\\,/g, ' '], [/\\;/g, ' '], [/\\!/g, ''], [/\\quad\b/g, ' '], [/\\qquad\b/g, '  '],
+  ];
+  for (const [re, rep] of symbols) s = s.replace(re, rep);
+  s = s.replace(/\\([a-zA-Z]+)/g, '$1');
+  s = s.replace(/[{}]/g, '');
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+function mathBlockHtml(src, display) {
+  const raw = String(src || '').trim();
+  const pretty = prettifyLatex(raw) || raw;
+  const title = escapeHtml(raw);
+  const body = escapeHtml(pretty);
+  if (display) {
+    return `<div class="md-math md-math-block" title="${title}"><code>${body}</code></div>`;
+  }
+  return `<span class="md-math md-math-inline" title="${title}"><code>${body}</code></span>`;
+}
+
+/**
+ * Try to consume a display-math block starting at lines[i].
+ * Supports \[...\] and $$...$$ (single- or multi-line). Returns null if not math.
+ */
+function tryConsumeDisplayMath(lines, i) {
+  const t = String(lines[i] || '').trim();
+  let m = /^\\\[(.+)\\\]\s*$/.exec(t);
+  if (m) return { end: i + 1, src: m[1] };
+  m = /^\$\$([^$]+)\$\$\s*$/.exec(t);
+  if (m) return { end: i + 1, src: m[1] };
+  let closer = null;
+  let first = '';
+  if (t === '\\[' || t.startsWith('\\[')) {
+    closer = '\\]';
+    first = t === '\\[' ? '' : t.slice(2);
+  } else if (t === '$$') {
+    closer = '$$';
+    first = '';
+  } else if (t.startsWith('$$')) {
+    closer = '$$';
+    first = t.slice(2);
+  } else {
+    return null;
+  }
+  if (closer === '\\]' && first.includes('\\]')) {
+    const idx = first.indexOf('\\]');
+    return { end: i + 1, src: first.slice(0, idx) };
+  }
+  if (closer === '$$' && first.includes('$$')) {
+    const idx = first.indexOf('$$');
+    return { end: i + 1, src: first.slice(0, idx) };
+  }
+  const buf = [];
+  if (first.trim()) buf.push(first);
+  let j = i + 1;
+  while (j < lines.length) {
+    const lj = lines[j];
+    const tj = String(lj || '').trim();
+    if (closer === '\\]' && tj.includes('\\]')) {
+      const idx = lj.indexOf('\\]');
+      const before = idx >= 0 ? lj.slice(0, idx) : '';
+      if (before.trim()) buf.push(before);
+      return { end: j + 1, src: buf.join('\n') };
+    }
+    if (closer === '$$' && tj.includes('$$')) {
+      const idx = lj.indexOf('$$');
+      const before = idx >= 0 ? lj.slice(0, idx) : '';
+      if (before.trim()) buf.push(before);
+      return { end: j + 1, src: buf.join('\n') };
+    }
+    buf.push(lj);
+    j++;
+  }
+  return null;
+}
+
 function renderInline(text) {
   const codeSpans = [];
   let s = text.replace(/`([^`]+)`/g, (_, code) => {
     codeSpans.push(escapeHtml(code));
     return `\x00CODESPAN:${codeSpans.length - 1}\x00`;
   });
+  const maths = [];
+  const pushMath = (src, display) => {
+    maths.push(mathBlockHtml(src, display));
+    return `\x00MATH:${maths.length - 1}\x00`;
+  };
+  s = s.replace(/\\\((.+?)\\\)/g, (_, src) => pushMath(src, false));
+  s = s.replace(/\$\$([^$\n]+?)\$\$/g, (_, src) => pushMath(src, true));
+  s = s.replace(/\$([^\s$][^$\n]*?[^\s$])\$/g, (_, src) => pushMath(src, false));
+  s = s.replace(/\$([^\s$])\$/g, (_, src) => pushMath(src, false));
   s = escapeHtml(s);
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
@@ -86,6 +194,7 @@ function renderInline(text) {
       : match
   ));
   s = s.replace(/\x00CODESPAN:(\d+)\x00/g, (_, i) => `<code>${codeSpans[Number(i)]}</code>`);
+  s = s.replace(/\x00MATH:(\d+)\x00/g, (_, i) => maths[Number(i)]);
   return s;
 }
 
@@ -124,6 +233,23 @@ function renderMarkdown(text) {
       }
       i++;
       htmlParts.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    const displayMath = tryConsumeDisplayMath(lines, i);
+    if (displayMath) {
+      flushParagraph();
+      flushList();
+      htmlParts.push(mathBlockHtml(displayMath.src, true));
+      i = displayMath.end;
+      continue;
+    }
+
+    if (isThematicBreak(line)) {
+      flushParagraph();
+      flushList();
+      htmlParts.push('<hr>');
+      i++;
       continue;
     }
 
