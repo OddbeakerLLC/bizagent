@@ -285,6 +285,23 @@ function listLibraryRepos(hub, registry) {
     }
   }
 
+  // Hub always first; remaining repos by product_name → project name/label.
+  repos.sort((a, b) => {
+    const aHub = a.kind === 'hub' || a.id === 'hub'
+      || a.kind === 'hub-library' || a.id === 'hub-library';
+    const bHub = b.kind === 'hub' || b.id === 'hub'
+      || b.kind === 'hub-library' || b.id === 'hub-library';
+    if (aHub !== bHub) return aHub ? -1 : 1;
+    if (aHub && bHub) return 0;
+    const ap = String(a.product_name || a.product || '').toLowerCase();
+    const bp = String(b.product_name || b.product || '').toLowerCase();
+    if (ap !== bp) return ap.localeCompare(bp);
+    const an = String(a.label || a.name || '').toLowerCase();
+    const bn = String(b.label || b.name || '').toLowerCase();
+    if (an !== bn) return an.localeCompare(bn);
+    return 0;
+  });
+
   return { repos };
 }
 

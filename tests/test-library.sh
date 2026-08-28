@@ -179,23 +179,43 @@ if (plantumlOk) {
 }
 
 // Repo accordion browse: hub + project repo tree
+const zebraRoot = path.join(hub, 'zebra-repo');
+const alphaRoot = path.join(hub, 'alpha-repo');
+const demoRoot = path.join(hub, 'demo-repo');
 const registry = {
   products: [
+    {
+      slug: 'zebra',
+      name: 'Zebra Product',
+      projects: [
+        {
+          name: 'zebra-repo',
+          path: zebraRoot,
+          remote: 'ssh://example/zebra-repo.git',
+        },
+      ],
+    },
     {
       slug: 'demo',
       name: 'Demo Product',
       projects: [
         {
           name: 'demo-repo',
-          path: path.join(hub, 'demo-repo'),
+          path: demoRoot,
           remote: 'ssh://example/demo-repo.git',
+        },
+        {
+          name: 'alpha-repo',
+          path: alphaRoot,
+          remote: 'ssh://example/alpha-repo.git',
         },
       ],
     },
   ],
 };
-const demoRoot = path.join(hub, 'demo-repo');
 fs.mkdirSync(path.join(demoRoot, 'docs', 'diagrams'), { recursive: true });
+fs.mkdirSync(zebraRoot, { recursive: true });
+fs.mkdirSync(alphaRoot, { recursive: true });
 fs.writeFileSync(path.join(demoRoot, 'README.md'), '# Demo\n\nHello repo.\n');
 fs.writeFileSync(path.join(demoRoot, 'docs', 'plan.md'), '# Plan\n\nNested.\n');
 fs.writeFileSync(
@@ -205,6 +225,8 @@ fs.writeFileSync(
 fs.writeFileSync(path.join(demoRoot, 'secret.env'), 'NOPE=1\n');
 fs.mkdirSync(path.join(demoRoot, 'node_modules', 'x'), { recursive: true });
 fs.writeFileSync(path.join(demoRoot, 'node_modules', 'x', 'readme.md'), 'skip\n');
+fs.writeFileSync(path.join(zebraRoot, 'README.md'), '# Zebra\n');
+fs.writeFileSync(path.join(alphaRoot, 'README.md'), '# Alpha\n');
 
 // Hub curated content for include filter checks
 fs.mkdirSync(path.join(hub, 'company'), { recursive: true });
@@ -228,6 +250,17 @@ if (repos.some((r) => r.id === 'hub-library')) {
 if (!repos.some((r) => r.id === 'repo:demo:demo-repo' && r.available)) {
   console.error('missing demo repo', repos);
   process.exit(17);
+}
+// Hub first, then product_name → project name (case-insensitive)
+if (repos[0].id !== 'hub') {
+  console.error('hub not first', repos.map((r) => r.id));
+  process.exit(23);
+}
+const projectIds = repos.filter((r) => r.kind === 'project').map((r) => r.id);
+const expectedOrder = ['repo:demo:alpha-repo', 'repo:demo:demo-repo', 'repo:zebra:zebra-repo'];
+if (JSON.stringify(projectIds) !== JSON.stringify(expectedOrder)) {
+  console.error('repo sort order', projectIds, 'expected', expectedOrder);
+  process.exit(24);
 }
 
 const tree = getLibraryRepoTree(hub, registry, 'repo:demo:demo-repo');
