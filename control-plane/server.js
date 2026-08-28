@@ -1043,7 +1043,7 @@ async function handleApi(config, req, res) {
     }
   }
 
-  // Accordion roots: Hub (filtered) + registry project repos.
+  // Accordion entries: Hub (filtered) + registry project repos (product metadata for nested UI).
   if (url.pathname === "/api/library/repos" && req.method === "GET") {
     try {
       ensureLibrary(config.hub);

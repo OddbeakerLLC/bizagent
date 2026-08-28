@@ -3,9 +3,9 @@
 /**
  * Operator-facing Library — browse hub curated dirs + registry project repos.
  *
- * Accordion roots:
- *   - Hub (hub root filtered to docs/, company/, reports/)
- *   - Each registry project repo (viewable-file tree)
+ * Accordion data (UI nests Product → Project):
+ *   - Hub (hub root filtered to docs/, company/, reports/) — pinned first
+ *   - Each registry project repo with product + product_name metadata
  *
  * No library/manifest.json. Filesystem walk + inclusion filters only.
  *
@@ -226,7 +226,10 @@ function matchesIgnore(name, patterns) {
 }
 
 /**
- * List accordion roots: Hub (filtered hub dirs) + registry project repos.
+ * List accordion entries: Hub (filtered hub dirs) + registry project repos.
+ * Flat list with product/product_name on each project so the client can nest
+ * Product → Project → files. Hub is always first; projects sorted by
+ * product_name then project name (case-insensitive).
  * @returns {{ repos: Array<object> }}
  */
 function listLibraryRepos(hub, registry) {

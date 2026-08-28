@@ -365,6 +365,36 @@ body.library-page {
 .library-acc-item.is-expanded > .library-acc-body {
   display: block;
 }
+.library-acc-product > .library-acc-product-head .library-acc-title {
+  font-weight: 700;
+}
+.library-acc-nested {
+  margin: 0;
+  padding: 0;
+  border-left: 2px solid #e5e7eb;
+  margin-left: 6px;
+}
+.library-acc-nested .library-acc-item {
+  border-bottom: 1px solid #eef0f3;
+}
+.library-acc-nested .library-acc-item:last-child {
+  border-bottom: none;
+}
+.library-acc-nested .library-acc-head {
+  padding: 8px 10px 8px 8px;
+  background: transparent;
+}
+.library-acc-nested .library-acc-item.is-expanded > .library-acc-head {
+  background: #e8f0fe;
+}
+.library-acc-nested .library-acc-body {
+  padding: 2px 6px 8px 10px;
+  background: #f3f4f6;
+}
+.library-acc-nested .library-acc-title {
+  font-weight: 600;
+  font-size: 12px;
+}
 .library-tree {
   list-style: none;
   margin: 0;

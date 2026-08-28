@@ -27,15 +27,15 @@
 
     <div class="library-page-body" id="libraryMain">
       <p class="company-help library-help">
-        Browse viewable files by project repo. Expand one section at a time; click a file to preview
-        (markdown, PlantUML diagrams, SVG/PNG). Hub curated dirs
-        (<code>docs/</code>, <code>company/</code>, <code>reports/</code>) live under
-        <strong>Hub</strong>.
+        Browse viewable files nested by product → project. Hub curated dirs
+        (<code>docs/</code>, <code>company/</code>, <code>reports/</code>) stay under
+        <strong>Hub</strong> (pinned first). Expand a product, then a project; click a file to preview
+        (markdown, PlantUML diagrams, SVG/PNG).
       </p>
       <div class="library-layout">
         <div class="library-sidebar">
           <input id="libraryFilter" type="search" class="library-filter" placeholder="Filter files…" autocomplete="off">
-          <div id="libraryAccordion" class="library-accordion" role="tree" aria-label="Project repositories"></div>
+          <div id="libraryAccordion" class="library-accordion" role="tree" aria-label="Hub, products, and projects"></div>
         </div>
         <div class="library-preview">
           <div id="libraryPreviewTitle" class="library-preview-title">Select a file</div>

@@ -3,7 +3,8 @@
 
 let libraryRepos = [];
 let libraryTrees = Object.create(null); // repoId -> tree payload
-let libraryExpandedId = '';
+let libraryExpandedId = ''; // expanded project repo id (or hub)
+let libraryExpandedProduct = ''; // expanded product slug ('' when only hub open)
 let librarySelected = null; // { repoId, path, id }
 let libraryFilterTimer = null;
 
@@ -331,6 +332,105 @@ function renderTreeNodes(nodes, repoId, depth) {
   return ul;
 }
 
+function isHubRepo(repo) {
+  return !!(repo && (repo.kind === 'hub' || repo.kind === 'hub-library'
+    || repo.id === 'hub' || repo.id === 'hub-library'));
+}
+
+function productKey(repo) {
+  if (isHubRepo(repo)) return 'hub';
+  return String(repo.product || repo.product_name || 'product');
+}
+
+function productLabel(repo) {
+  if (isHubRepo(repo)) return 'Hub';
+  return String(repo.product_name || repo.product || 'Product');
+}
+
+/** Group flat API repos into Hub + products (each with projects). Order preserved from API. */
+function groupLibraryRepos(repos) {
+  const hub = [];
+  const products = [];
+  const byKey = Object.create(null);
+  for (const repo of repos || []) {
+    if (isHubRepo(repo)) {
+      hub.push(repo);
+      continue;
+    }
+    const key = productKey(repo);
+    if (!byKey[key]) {
+      const group = {
+        key,
+        name: productLabel(repo),
+        projects: [],
+      };
+      byKey[key] = group;
+      products.push(group);
+    }
+    byKey[key].projects.push(repo);
+  }
+  return { hub, products };
+}
+
+function repoTreeMatchesFilter(repo, q) {
+  if (!q) return true;
+  const label = `${repo.label || ''} ${repo.name || ''} ${repo.product_name || ''} ${repo.product || ''}`.toLowerCase();
+  if (label.includes(q)) return true;
+  const cached = libraryTrees[repo.id];
+  if (!cached || cached.error) return true; // keep visible until loaded / on error
+  return filterTree(cached.tree || [], q).length > 0;
+}
+
+function fillRepoBody(body, repo, q) {
+  const cached = libraryTrees[repo.id];
+  if (!cached) {
+    body.innerHTML = '<p class="company-file-empty">Loading…</p>';
+    return;
+  }
+  if (cached.error) {
+    body.innerHTML = `<p class="company-file-empty">${escapeHtml(cached.error)}</p>`;
+    return;
+  }
+  const tree = filterTree(cached.tree || [], q);
+  if (!tree.length) {
+    body.innerHTML = q
+      ? '<p class="company-file-empty">No viewable files match this filter.</p>'
+      : '<p class="company-file-empty">No viewable files in this repo.</p>';
+    return;
+  }
+  body.appendChild(renderTreeNodes(tree, repo.id, 0));
+  if (cached.truncated) {
+    const note = document.createElement('p');
+    note.className = 'library-tree-truncated';
+    note.textContent = 'Tree truncated (too many nodes).';
+    body.appendChild(note);
+  }
+}
+
+function renderProjectItem(repo, q) {
+  const item = document.createElement('div');
+  item.className = 'library-acc-item library-acc-project';
+  item.dataset.repoId = repo.id;
+  if (libraryExpandedId === repo.id) item.classList.add('is-expanded');
+
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'library-acc-head library-acc-project-head';
+  head.setAttribute('aria-expanded', libraryExpandedId === repo.id ? 'true' : 'false');
+  const avail = repo.available === false ? ' · offline' : '';
+  head.innerHTML = `<span class="library-acc-chevron" aria-hidden="true"></span>`
+    + `<span class="library-acc-title">${escapeHtml(repo.label || repo.name)}</span>`
+    + `<span class="library-acc-meta">${escapeHtml(avail.trim())}</span>`;
+  head.addEventListener('click', () => toggleRepo(repo.id));
+  item.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'library-acc-body';
+  if (libraryExpandedId === repo.id) fillRepoBody(body, repo, q);
+  item.appendChild(body);
+  return item;
+}
+
 function renderAccordion() {
   const root = document.getElementById('libraryAccordion');
   if (!root) return;
@@ -340,10 +440,12 @@ function renderAccordion() {
     return;
   }
   const q = libraryFilterQuery();
+  const { hub, products } = groupLibraryRepos(libraryRepos);
 
-  for (const repo of libraryRepos) {
+  for (const repo of hub) {
+    if (q && !repoTreeMatchesFilter(repo, q)) continue;
     const item = document.createElement('div');
-    item.className = 'library-acc-item';
+    item.className = 'library-acc-item library-acc-hub';
     item.dataset.repoId = repo.id;
     if (libraryExpandedId === repo.id) item.classList.add('is-expanded');
 
@@ -351,44 +453,76 @@ function renderAccordion() {
     head.type = 'button';
     head.className = 'library-acc-head';
     head.setAttribute('aria-expanded', libraryExpandedId === repo.id ? 'true' : 'false');
-    const product = (repo.kind === 'hub' || repo.kind === 'hub-library')
-      ? 'Hub'
-      : (repo.product_name || repo.product || '');
-    const avail = repo.available === false ? ' · offline' : '';
     head.innerHTML = `<span class="library-acc-chevron" aria-hidden="true"></span>`
-      + `<span class="library-acc-title">${escapeHtml(repo.label || repo.name)}</span>`
-      + `<span class="library-acc-meta">${escapeHtml(product)}${escapeHtml(avail)}</span>`;
+      + `<span class="library-acc-title">${escapeHtml(repo.label || repo.name || 'Hub')}</span>`
+      + `<span class="library-acc-meta">Hub</span>`;
     head.addEventListener('click', () => toggleRepo(repo.id));
     item.appendChild(head);
 
     const body = document.createElement('div');
     body.className = 'library-acc-body';
-    if (libraryExpandedId === repo.id) {
-      const cached = libraryTrees[repo.id];
-      if (!cached) {
-        body.innerHTML = '<p class="company-file-empty">Loading…</p>';
-      } else if (cached.error) {
-        body.innerHTML = `<p class="company-file-empty">${escapeHtml(cached.error)}</p>`;
-      } else {
-        const tree = filterTree(cached.tree || [], q);
-        if (!tree.length) {
-          body.innerHTML = q
-            ? '<p class="company-file-empty">No viewable files match this filter.</p>'
-            : '<p class="company-file-empty">No viewable files in this repo.</p>';
-        } else {
-          body.appendChild(renderTreeNodes(tree, repo.id, 0));
-          if (cached.truncated) {
-            const note = document.createElement('p');
-            note.className = 'library-tree-truncated';
-            note.textContent = 'Tree truncated (too many nodes).';
-            body.appendChild(note);
-          }
-        }
+    if (libraryExpandedId === repo.id) fillRepoBody(body, repo, q);
+    item.appendChild(body);
+    root.appendChild(item);
+  }
+
+  for (const product of products) {
+    const visibleProjects = product.projects.filter((p) => repoTreeMatchesFilter(p, q));
+    if (q && !visibleProjects.length) continue;
+
+    const item = document.createElement('div');
+    item.className = 'library-acc-item library-acc-product';
+    item.dataset.product = product.key;
+    const productOpen = libraryExpandedProduct === product.key
+      || (!!q && visibleProjects.length > 0);
+    if (productOpen) item.classList.add('is-expanded');
+
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'library-acc-head library-acc-product-head';
+    head.setAttribute('aria-expanded', productOpen ? 'true' : 'false');
+    const count = visibleProjects.length;
+    const meta = count === 1 ? '1 project' : `${count} projects`;
+    head.innerHTML = `<span class="library-acc-chevron" aria-hidden="true"></span>`
+      + `<span class="library-acc-title">${escapeHtml(product.name)}</span>`
+      + `<span class="library-acc-meta">${escapeHtml(meta)}</span>`;
+    head.addEventListener('click', () => toggleProduct(product.key));
+    item.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'library-acc-body library-acc-product-body';
+    if (productOpen) {
+      const nest = document.createElement('div');
+      nest.className = 'library-acc-nested';
+      for (const proj of visibleProjects) {
+        nest.appendChild(renderProjectItem(proj, q));
       }
+      body.appendChild(nest);
     }
     item.appendChild(body);
     root.appendChild(item);
   }
+}
+
+function toggleProduct(key) {
+  if (libraryExpandedProduct === key) {
+    libraryExpandedProduct = '';
+    // Collapse nested project if it belonged to this product.
+    const open = libraryRepos.find((r) => r.id === libraryExpandedId);
+    if (open && !isHubRepo(open) && productKey(open) === key) {
+      libraryExpandedId = '';
+    }
+    renderAccordion();
+    return;
+  }
+  libraryExpandedProduct = key;
+  // Closing other products is implicit (single expanded product).
+  // Keep hub file pane independent; clear project expand if switching products.
+  const open = libraryRepos.find((r) => r.id === libraryExpandedId);
+  if (open && !isHubRepo(open) && productKey(open) !== key) {
+    libraryExpandedId = '';
+  }
+  renderAccordion();
 }
 
 async function toggleRepo(repoId) {
@@ -398,6 +532,10 @@ async function toggleRepo(repoId) {
     return;
   }
   libraryExpandedId = repoId;
+  const repo = libraryRepos.find((r) => r.id === repoId);
+  if (repo && !isHubRepo(repo)) {
+    libraryExpandedProduct = productKey(repo);
+  }
   renderAccordion();
   if (!libraryTrees[repoId]) {
     try {
@@ -433,7 +571,16 @@ async function openLibraryFile(repoId, filePath) {
     const doc = await api(qs);
     if (titleEl) {
       const repo = libraryRepos.find((r) => r.id === repoId);
-      const prefix = repo ? `${repo.label || repo.name} / ` : '';
+      let prefix = '';
+      if (repo) {
+        if (isHubRepo(repo)) {
+          prefix = `${repo.label || repo.name || 'Hub'} / `;
+        } else {
+          const prod = productLabel(repo);
+          const proj = repo.label || repo.name || '';
+          prefix = prod && proj ? `${prod} / ${proj} / ` : `${proj} / `;
+        }
+      }
       titleEl.textContent = `${prefix}${doc.title || doc.path || filePath}`;
     }
     const kind = libraryEntryKind(doc);
@@ -501,9 +648,13 @@ async function refreshLibraryRepos() {
     // Drop cached trees so Refresh re-reads disk.
     libraryTrees = Object.create(null);
     const keep = libraryExpandedId;
+    const keepProduct = libraryExpandedProduct;
     libraryExpandedId = '';
+    libraryExpandedProduct = '';
     renderAccordion();
+    if (keepProduct) libraryExpandedProduct = keepProduct;
     if (keep) await toggleRepo(keep);
+    else if (keepProduct) renderAccordion();
   } catch (err) {
     if (root) root.innerHTML = '';
     libraryRepos = [];
