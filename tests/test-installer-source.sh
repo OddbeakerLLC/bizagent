@@ -104,8 +104,12 @@ grep -q 'rejected by the provider' "$ROOT/install/install.sh" \
   || fail "install/install.sh does not re-prompt after a failed API key validation"
 grep -qE 'api_key_var_for_provider|api_key_var_for_cli' "$ROOT/install/install.sh" \
   || fail "install/install.sh missing API key → .bizagent/env step"
-grep -q 'check-hub-ready' "$ROOT/install/install.sh" \
-  || fail "install/install.sh missing first-run readiness check"
+grep -q 'seed-first-run\|check-hub-ready' "$ROOT/install/install.sh" \
+  || fail "install/install.sh missing first-run readiness / seed"
+grep -q 'seed-first-run' "$ROOT/install.sh" \
+  || fail "root install.sh missing seed-first-run handoff"
+[ -x "$ROOT/scripts/seed-first-run.sh" ] \
+  || fail "scripts/seed-first-run.sh missing or not executable"
 grep -q '\.bizagent/env' "$ROOT/install/install.sh" \
   || fail "install/install.sh does not write .bizagent/env"
 grep -qE 'bizagent-agent|LLM provider|check-hub-ready' "$ROOT/README.md" \

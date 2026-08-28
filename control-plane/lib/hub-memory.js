@@ -54,6 +54,26 @@ function extractAgentSections(agentText) {
 }
 
 /**
+ * Classify registry for first-run vs operating.
+ * Installer writes empty org + products=[] — that is MINIMAL, not BUILT.
+ * @returns {'missing'|'minimal'|'configured'}
+ */
+function classifyRegistryState(hub) {
+  const regPath = path.join(hub, 'registry.json');
+  try {
+    if (!fs.existsSync(regPath)) return 'missing';
+    const r = JSON.parse(fs.readFileSync(regPath, 'utf8'));
+    const org = String((r && r.org) || '').trim();
+    const products = Array.isArray(r && r.products) ? r.products : [];
+    const hasProducts = products.some((p) => p && (p.slug || p.name));
+    if (org || hasProducts) return 'configured';
+    return 'minimal';
+  } catch (_err) {
+    return 'missing';
+  }
+}
+
+/**
  * Slim always-on hub runtime prompt (Phase 1).
  * Fat detail (Knowledge Stack, journal schemas, Claude hook, nightly) is
  * on-demand via paths — open only when the turn needs it.
@@ -63,6 +83,32 @@ function extractAgentSections(agentText) {
 function deriveHubRuntimePrompt(hub) {
   const sessionRel = path.relative(hub, hubSessionFile(hub));
   const hubAbs = path.resolve(hub);
+  const regState = classifyRegistryState(hub);
+  const systemStateBlock = (() => {
+    if (regState === 'configured') {
+      return [
+        `- Hub root (absolute): \`${hubAbs}\``,
+        '- Registry state: **BUILT / configured** (org and/or products present).',
+        '- **Never** run full setup/interview (§1) or rebuild the hub unless the operator explicitly asks to reconfigure.',
+        '- On installer first-run seed for a configured hub: short welcome + “what do you want to work on?” only.',
+        '- Do **not** re-read root `AGENT.md` for §0 detect-built. Operational rules are in this prompt; open `AGENT.md` only when a turn needs setup/ops detail the operator requested.',
+      ];
+    }
+    if (regState === 'minimal') {
+      return [
+        `- Hub root (absolute): \`${hubAbs}\``,
+        '- Registry state: **MINIMAL install seed** (`registry.json` exists but org empty and products=[]). This is **first-run**, not BUILT.',
+        '- On `install-first-run` / Welcome seed: continue the console conversation; keep replies short (TTS). One question at a time per AGENT.md §1.',
+        '- Approved beats: org → repos (or none) → product groupings/slugs → agent names → peer messaging (default no) → nightly 23:00 → KS → archive days 30 → autonomy maintenance-only → private hub remote → LLM (skip if set) → CP login (skip if auth exists) → summary/next steps.',
+        '- Zero-repo is OK: write minimal registry + scaffolding; add products later. Hub-and-spoke stays; no peer-chat protocol work.',
+        '- Skip installer-already-set provider/key/CP auth/detach. After §1 answers, do §2 generate. Open `AGENT.md` §1–§2 for the full checklist.',
+      ];
+    }
+    return [
+      `- Hub root (absolute): \`${hubAbs}\``,
+      '- Registry state: **missing** — treat as UNBUILT. Follow AGENT.md §1 then §2.',
+    ];
+  })();
   return [
     '# BizAgent Hub Runtime Prompt',
     '',
@@ -81,20 +127,19 @@ function deriveHubRuntimePrompt(hub) {
     'If it matches gather → build → distribute, it can be a BizAgent product (not only software).',
     'BizAgent is a product-development OS — not search, not only a coding assistant. Details: `AGENT.md` / architecture.',
     '',
-    '## System state (always true on runtime launches)',
+    '## System state',
     '',
-    `- Hub root (absolute): \`${hubAbs}\``,
-    '- The system is **BUILT**. `registry.json` exists. **Never** run setup/interview or §0 "detect state".',
-    '- Do **not** re-read root `AGENT.md` for setup. Operational rules are in this prompt.',
+    ...systemStateBlock,
     '',
     '## Non-negotiable limits',
     '',
-    '1. You **NEVER** write code, edit project files, update sitemaps, or write journal entries for any product.',
-    '2. You **NEVER** do work that belongs to a product agent — even if small or faster yourself.',
+    '1. You **NEVER** write code, edit project files, update sitemaps, or write journal entries for any product — **except** during authorized first-run §2 generate (registry, agent dirs, onboard scripts) when registry is minimal/UNBUILT.',
+    '2. You **NEVER** do work that belongs to a product agent — even if small or faster yourself (after the hub is configured).',
     '3. Operator task → identify owning agent by **agent_name** → message their inbox (`to:` slug) → wait for reply → report back.',
-    '4. Do **not** start product implementation. If you already touched a product repo or `agents/<slug>/` for product work: stop, undo, delegate.',
+    '4. Do **not** start product implementation. If you already touched a product repo or `agents/<slug>/` for product work outside first-run generate: stop, undo, delegate.',
     '5. **Hub machinery is user-gated.** By default do **not** edit `control-plane/`, the web UI, dispatch/auth, `templates/`, hub `scripts/` behavior, `cli.json`, or registry schema/shape.',
     '   Soft ops without a special ask: route/archive mail, hub journal tags, KS capture, playbook file/index updates, read registry, delegate.',
+    '   First-run §2 may write `registry.json`, agent mailboxes, and run onboard/auth-init as specified in AGENT.md.',
     '6. **Hub code changes only when the operator explicitly requests** a hub/control-plane/UI/ops-code change. Then: minimal scoped diff, no speculative refactors, no drive-by cleanups.',
     '7. If hub machinery is wrecked: tell the operator to run `scripts/factory-reset.sh repair` (or `scripts/upgrade.sh`) from a shell (keeps registry/agents). Do not improvise a half-reset.',
     '8. **Framework updates:** operator can ask anytime to check/apply updates via `scripts/upgrade.sh` (dry-run first if unsure). Nightly auto-upgrade only when `registry.json` → `settings.auto_update` is true (default false).',
@@ -156,7 +201,7 @@ function deriveHubRuntimePrompt(hub) {
     '',
     '## On-demand references (open only if this turn needs them)',
     '',
-    '- Full setup/ops manual: `AGENT.md` (never for §0 detect-built on a live hub)',
+    '- Full setup/ops manual: `AGENT.md` (first-run §1–§2 when registry minimal; never §0 “exists ⇒ built” on install seed)',
     '- Knowledge Stack / weekly refresh: `WEEKLY.md`, `company/`, `knowledge-stack/`',
     '- **Library** (UI browse): hub `docs/`, `company/`, `reports/` (+ registry project repos). No `library/manifest.json`. Docs: `docs/YYYY-MM-DD-<slug>.md`. Diagrams: `docs/diagrams/<name>.puml` (+ rendered `.svg`).',
     '- Nightly housekeeping: `NIGHTLY.md`',
@@ -428,7 +473,8 @@ function buildHubTurnPrompt(hub) {
     '1. Read **Pending mail** and **Session excerpt** below (already inlined — avoid tool-reads unless needed).',
     '2. Deliver operator-visible text via reserved body file or `scripts/write-message.sh` (never free-form outbox; never stdout-only).',
     '3. Archive each handled inbox message to `inbox/archive/`.',
-    '4. Do not implement product work; do not edit hub machinery unless the operator explicitly asked; do not run setup; do not rewrite session memory.',
+    '4. Do not implement product work; do not edit hub machinery unless the operator explicitly asked; do not rewrite session memory.',
+    '5. Setup/interview only when registry is **minimal/UNBUILT** or pending mail is first-run seed — never full §1 rebuild on a configured hub.',
     '',
     '## Pending mail',
     '',
@@ -637,6 +683,7 @@ function compactHubSession(hub, conversation, sessionOrUserId) {
 module.exports = {
   buildAgentTurnPrompt,
   buildHubTurnPrompt,
+  classifyRegistryState,
   compactHubSession,
   deriveHubRuntimePrompt,
   ensureHubRuntimeCwd,

@@ -550,8 +550,12 @@ grep -q "agent-detail" "$ROOT/control-plane/public/styles.css" \
   || fail "install/install.sh missing"
 [ -x "$ROOT/install/install.sh" ] \
   || fail "install/install.sh is not executable"
-grep -q "install-first-run" "$ROOT/install/install.sh" \
-  || fail "installer does not drop first-run inbox seed"
+grep -q "seed-first-run" "$ROOT/install/install.sh" \
+  || fail "installer does not call seed-first-run.sh"
+grep -q "seed-first-run" "$ROOT/install.sh" \
+  || fail "root install.sh does not call seed-first-run.sh"
+grep -q "install-first-run" "$ROOT/scripts/seed-first-run.sh" \
+  || fail "seed-first-run.sh does not write install-first-run inbox seed"
 
 if command -v node >/dev/null 2>&1; then
   node --check "$SERVER" || fail "server.js syntax check failed"

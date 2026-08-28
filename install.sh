@@ -1422,6 +1422,15 @@ PY
 )
   port="${port:-8787}"
 
+  # First-run inbox + Welcome conversation seed BEFORE control-plane start so
+  # the first UI load can show the short PTL bubble (and TTS can speak it).
+  step "First-run readiness"
+  if [[ -x "$INSTALL_DIR/scripts/seed-first-run.sh" ]]; then
+    bash "$INSTALL_DIR/scripts/seed-first-run.sh" "$INSTALL_DIR" || true
+  else
+    warn "scripts/seed-first-run.sh missing — no first-run welcome seed"
+  fi
+
   step "Starting BizAgent"
   bash "$INSTALL_DIR/scripts/control-plane.sh" start "$INSTALL_DIR"
 
