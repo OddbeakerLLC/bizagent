@@ -20,6 +20,8 @@ if grep -E 'label\.includes\(q\)|product_name.*includes\(q\)' "$ROOT/control-pla
   fail "library filter still matches product/project labels (should be file name/path only)"
 fi
 grep -q 'library-acc-nested' "$ROOT/control-plane/public/styles.css" || fail "styles missing nested product accordion"
+grep -q 'blockquote' "$ROOT/control-plane/public/library.js" || fail "library.js missing blockquote render"
+grep -q 'library-preview-body blockquote' "$ROOT/control-plane/public/styles.css" || fail "styles missing blockquote CSS"
 grep -q 'library-diagram\|libraryEntryKind\|render=1\|render:' "$ROOT/control-plane/public/library.js" || fail "library page missing diagram preview path"
 grep -qE "docs/|company/|reports/" "$ROOT/control-plane/lib/hub-memory.js" || fail "hub prompt missing library hub-dir convention"
 grep -qE "\.puml|ALLOWED_EXT.*puml|puml" "$ROOT/control-plane/lib/library.js" || fail "library.js missing .puml allowlist"
@@ -457,6 +459,52 @@ if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
   if (fns.nodeMatchesFilter({ type: 'file', name: 'x.md', path: 'x.md' }, 'Demo Product')) {
     console.error('unexpected file match on product label query');
     process.exit(33);
+  }
+}
+
+// Client markdown: multi-paragraph blockquotes → <blockquote>
+{
+  const pageJs = fs.readFileSync(path.join(process.argv[2], 'control-plane/public/library.js'), 'utf8');
+  const start = pageJs.indexOf('function escapeHtml');
+  const end = pageJs.indexOf('function showAuthGate');
+  if (start < 0 || end < 0 || end <= start) {
+    console.error('could not locate markdown helpers in library.js');
+    process.exit(34);
+  }
+  const md = {};
+  // eslint-disable-next-line no-new-func
+  new Function('exports', pageJs.slice(start, end)
+    + '\nexports.renderMarkdown = renderMarkdown;')(md);
+  const sample = [
+    '> You want extra cash flow — not a second job and not a crash course in trading.',
+    '>',
+    '> Synthetic Mining runs small spot cycles on your exchange, 24/7. You set it up once with recommended settings, leave it alone, and check in occasionally.',
+    '',
+    'After quote.',
+  ].join('\n');
+  const html = md.renderMarkdown(sample);
+  if (!/<blockquote>/.test(html) || !/<\/blockquote>/.test(html)) {
+    console.error('blockquote tags missing', html);
+    process.exit(35);
+  }
+  if (!html.includes('extra cash flow') || !html.includes('Synthetic Mining')) {
+    console.error('blockquote body lost', html);
+    process.exit(36);
+  }
+  // Blank `>` should yield two paragraphs inside one blockquote
+  const bq = html.match(/<blockquote>[\s\S]*?<\/blockquote>/)[0];
+  const pCount = (bq.match(/<p>/g) || []).length;
+  if (pCount < 2) {
+    console.error('expected multi-paragraph blockquote', bq);
+    process.exit(37);
+  }
+  if (/^>/.test(bq.replace(/<[^>]+>/g, '')) || bq.includes('&gt; You want')) {
+    console.error('raw > leaked into blockquote html', bq);
+    process.exit(38);
+  }
+  if (!html.includes('After quote')) {
+    console.error('text after blockquote lost', html);
+    process.exit(39);
   }
 }
 
