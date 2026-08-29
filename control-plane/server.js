@@ -220,8 +220,15 @@ function serveStatic(req, res) {
     ".css": "text/css",
     ".js": "application/javascript",
   };
+  // HTML entrypoints: no-store so cache-bust query on css/js is always seen.
+  // Assets: short no-cache revalidate (ETag-less stream; browsers revalidate).
+  const cacheControl =
+    ext === ".html"
+      ? "no-store"
+      : "no-cache, must-revalidate";
   res.writeHead(200, {
     "Content-Type": types[ext] || "application/octet-stream",
+    "Cache-Control": cacheControl,
   });
   fs.createReadStream(file).pipe(res);
   return true;

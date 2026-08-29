@@ -518,23 +518,29 @@ body.library-page {
   padding: 0 2px;
 }
 .library-preview-body blockquote,
-.message-body blockquote {
+.message-body blockquote,
+.message blockquote {
+  display: block;
   margin: 0.75em 0;
-  padding: 0.35em 0 0.35em 1em;
-  border-left: 4px solid #d1d5db;
-  color: #374151;
-  background: #f9fafb;
+  padding: 0.5em 0.85em 0.5em 1em;
+  border-left: 4px solid #94a3b8;
+  color: #1f2937;
+  background: #f1f5f9;
+  border-radius: 0 6px 6px 0;
 }
 .library-preview-body blockquote > :first-child,
-.message-body blockquote > :first-child {
+.message-body blockquote > :first-child,
+.message blockquote > :first-child {
   margin-top: 0;
 }
 .library-preview-body blockquote > :last-child,
-.message-body blockquote > :last-child {
+.message-body blockquote > :last-child,
+.message blockquote > :last-child {
   margin-bottom: 0;
 }
 .library-preview-body blockquote p,
-.message-body blockquote p {
+.message-body blockquote p,
+.message blockquote p {
   margin: 0.4em 0;
 }
 
