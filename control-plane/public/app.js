@@ -1113,6 +1113,33 @@ function ttsPlayStillActive(gen) {
   return gen === ttsPlayGen && !!ttsEnabled;
 }
 
+/**
+ * Pad trailing silence onto a decoded AudioBuffer so the last phoneme is not
+ * clipped when BufferSource.onended / output latency cuts the tail short.
+ * Does not change the WAV on disk — playback only.
+ */
+function padTtsAudioBuffer(ctx, decoded, padSec) {
+  const pad = Math.max(0, Number(padSec) || 0);
+  if (!decoded || !ctx || pad <= 0) return decoded;
+  const sampleRate = decoded.sampleRate || ctx.sampleRate || 24000;
+  const extra = Math.max(1, Math.floor(sampleRate * pad));
+  const channels = Math.max(1, decoded.numberOfChannels || 1);
+  const total = decoded.length + extra;
+  let out;
+  try {
+    out = ctx.createBuffer(channels, total, sampleRate);
+  } catch (_) {
+    return decoded;
+  }
+  for (let ch = 0; ch < channels; ch += 1) {
+    const src = decoded.getChannelData(ch);
+    const dst = out.getChannelData(ch);
+    dst.set(src, 0);
+    // remaining samples stay 0 (silence)
+  }
+  return out;
+}
+
 async function playTtsWavBuffer(arrayBuffer, gen) {
   if (!ttsPlayStillActive(gen)) return 'webaudio';
   const ctx = await ensureTtsAudioContext();
@@ -1136,11 +1163,17 @@ async function playTtsWavBuffer(arrayBuffer, gen) {
         if (ctx.state === 'suspended') await ctx.resume();
       } catch (_) { /* ignore */ }
       if (!ttsPlayStillActive(gen)) return 'webaudio';
+      // ~200ms tail pad: last word was getting clipped at BufferSource end on some
+      // Chromium builds even though the WAV itself still contained the phonemes.
+      const playBuffer = padTtsAudioBuffer(ctx, decoded, 0.2);
       const source = ctx.createBufferSource();
-      source.buffer = decoded;
+      source.buffer = playBuffer;
       source.connect(ctx.destination);
       ttsAudioSource = source;
-      logTtsDebug('server webaudio play', { seconds: decoded.duration });
+      logTtsDebug('server webaudio play', {
+        seconds: playBuffer.duration,
+        rawSeconds: decoded.duration,
+      });
       await new Promise((resolve, reject) => {
         let settled = false;
         let watch = null;
@@ -1333,12 +1366,20 @@ function scrubDenseSpeechTokens(text) {
   t = t.replace(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+){3,}\b/g, ' ');
   // Collapse leftover punctuation / connector noise after token drops
   t = t.replace(/[`*_#~<>[\](){}|\\/]/g, ' ');
-  // "Updated and scripts See agents." style leftovers after path wipe
+  // "Updated and scripts See agents." style leftovers after path wipe — only when
+  // the tail is hollow verbs/connectors/file-ish words (no real content after).
   t = t.replace(
     /\b(?:updated|changed|modified|edited|touched|fixed|added|removed|deleted|see|check|review)\b(?:\s+(?:and|or|with|via|from|to|in|on|at|of|for|the|a|an|also|files?|paths?|scripts?|docs?|commits?|agents?|repos?|branches?|main|master))*\s*[.:]?\s*$/gi,
     ' '
   );
-  t = t.replace(/\b(?:and|or|with|via|from|to|in|on|at|of|for|see|also)\s*(?=[,.;:!?]|$)/gi, ' ');
+  // Dangling connectors only when stacked or sentence-initial residue
+  // (" and or .", leading "to."). Do NOT strip a real final word like
+  // "…toggle on." / "…ship it to production." — that was cutting the last word.
+  t = t.replace(
+    /(?:^|\s)(?:and|or|with|via|from|to|in|on|at|of|for|see|also)(?:\s+(?:and|or|with|via|from|to|in|on|at|of|for|see|also))+\s*(?=[,.;:!?]|$)/gi,
+    ' '
+  );
+  t = t.replace(/^(?:and|or|with|via|from|to|in|on|at|of|for|see|also)\s*(?=[,.;:!?]|$)/gi, '');
   t = t.replace(/(?:^|\s)(?:and|or)\s+(?=and\b|or\b|[,.;:!?]|$)/gi, ' ');
   t = t.replace(/\s{2,}/g, ' ');
   t = t.replace(/\s+([,.;:!?])/g, '$1');
@@ -1683,7 +1724,10 @@ function speakViaBrowserTts(spokenText, gen) {
   } catch (_) { /* ignore */ }
 
   const utterances = chunks.map((chunk) => {
-    const u = new SpeechSynthesisUtterance(chunk);
+    // Chrome speechSynthesis often clips the final word/syllable. A trailing
+    // pause marker keeps the real last word fully inside the spoken span.
+    const padded = /[.!?…]\s*$/.test(chunk) ? `${chunk} ` : `${chunk}. `;
+    const u = new SpeechSynthesisUtterance(padded);
     u.rate = 1.0;
     u.pitch = 1.0;
     u.volume = 1.0;
