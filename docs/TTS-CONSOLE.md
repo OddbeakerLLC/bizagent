@@ -125,6 +125,18 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
 4. **Browser fallback only** on real transport/API failure (health down, synthesize 5xx, network).
 5. **Probe after session** (`boot` / toggle ON), not at script bind; sticky-false **re-probes after 15s**.
 
+## Last-word cutoff (2026-08-29)
+
+**Symptom:** operator heard every word of the spoken utterance except the final one.
+
+**Causes (client only — oddbeaker-tts WAV already contained the last word + ~500ms tail silence):**
+
+1. **`scrubDenseSpeechTokens`** stripped a lone trailing connector (`on` / `for` / `in` / …) before synthesize, so phrases like “Text to speech on.” became “Text to speech.”
+2. **Web Audio `BufferSource`** could still clip the final phoneme at `onended` on some Chromium builds; playback now pads ~200ms of silence after the decoded buffer.
+3. **Browser `speechSynthesis` fallback** pads a trailing pause so Chrome does not eat the last syllable.
+
+Summary/headline clipping is unchanged (still brief, not near-verbatim).
+
 ## Multi-reply reliability (browser fallback)
 
 Chrome `speechSynthesis` historically went silent after the first hub reply. Mitigations in `app.js` (fallback path only):
