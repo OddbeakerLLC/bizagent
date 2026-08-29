@@ -517,6 +517,26 @@ body.library-page {
   display: inline;
   padding: 0 2px;
 }
+.library-preview-body blockquote,
+.message-body blockquote {
+  margin: 0.75em 0;
+  padding: 0.35em 0 0.35em 1em;
+  border-left: 4px solid #d1d5db;
+  color: #374151;
+  background: #f9fafb;
+}
+.library-preview-body blockquote > :first-child,
+.message-body blockquote > :first-child {
+  margin-top: 0;
+}
+.library-preview-body blockquote > :last-child,
+.message-body blockquote > :last-child {
+  margin-bottom: 0;
+}
+.library-preview-body blockquote p,
+.message-body blockquote p {
+  margin: 0.4em 0;
+}
 
 .library-diagram {
   overflow: auto;

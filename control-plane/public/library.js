@@ -305,6 +305,22 @@ function renderMarkdown(text) {
       continue;
     }
 
+    // Blockquote: lines starting with `>` (optional space). Blank `>` lines
+    // separate paragraphs inside one <blockquote>. Nested `>>` via recursion.
+    if (/^>/.test(line)) {
+      flushParagraph();
+      flushList();
+      const bqInner = [];
+      while (i < lines.length && /^>/.test(lines[i])) {
+        const m = /^>\s?(.*)$/.exec(lines[i]);
+        bqInner.push(m ? m[1] : lines[i].replace(/^>/, ''));
+        i++;
+      }
+      const innerHtml = renderMarkdown(bqInner.join('\n'));
+      htmlParts.push(`<blockquote>${innerHtml}</blockquote>`);
+      continue;
+    }
+
     if (line.trim() === '') {
       flushParagraph();
       flushList();
