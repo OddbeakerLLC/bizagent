@@ -464,7 +464,7 @@ grep -q "dispatchedAt" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher dispatch markers are not time-limited"
 grep -q "dispatchRetrySecs" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not retry marked mail after a launch failure window"
-grep -q "Math.min(60" "$ROOT/control-plane/lib/dispatcher.js" \
+grep -qE "Math\.min\((6 \* 3600|21600)" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher can suppress failed launches for the full lock lease"
 grep -q "pendingUndispatchedMail" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not distinguish new mail from already-dispatched mail"
@@ -1591,11 +1591,11 @@ if (fs.existsSync(bodyPath)) {
   process.exit(35);
 }
 
-// --- write-message helper path: always routes with conversation_id ---
+// --- write-message helper path: funnels into reserved body when present ---
 const conv8 = createConversation(hub, 'WriteMsg');
 postLaunchAck(hub, conv8.id);
 const startedWm = new Date().toISOString();
-prepareReservedReplyBody(hub, conv8.id); // empty — write-message wins via outbox
+const wmReserved = prepareReservedReplyBody(hub, conv8.id); // empty — write-message funnels here
 const wm = writeOutboxMessage(hub, {
   from: 'hub',
   to: 'user',
@@ -1607,13 +1607,21 @@ if (!wm.file || !fs.existsSync(wm.file)) {
   console.error('writeOutboxMessage did not create file', wm);
   process.exit(36);
 }
-const wmRaw = fs.readFileSync(wm.file, 'utf8');
-if (!new RegExp(`conversation_id:\\s*${conv8.id}`).test(wmRaw)) {
-  console.error('write-message outbox missing conversation_id', wmRaw);
+if (wm.via !== 'reserved-body' || wm.file !== wmReserved) {
+  console.error('write-message should funnel into reserved body', wm, wmReserved);
+  process.exit(36);
+}
+const wmBody = fs.readFileSync(wm.file, 'utf8');
+if (!/write-message helper/.test(wmBody)) {
+  console.error('funneled reserved body missing content', wmBody);
   process.exit(39);
 }
-if (!/^to:\s*user\s*$/m.test(wmRaw) || !/^from:\s*hub\s*$/m.test(wmRaw)) {
-  console.error('write-message outbox bad headers', wmRaw);
+// No hub→user outbox file should exist (funnel avoided dual path)
+const outboxWm = fs.existsSync(path.join(hub, 'outbox'))
+  ? fs.readdirSync(path.join(hub, 'outbox')).filter((n) => n.endsWith('.md'))
+  : [];
+if (outboxWm.some((n) => /console-reply|write-message/i.test(n))) {
+  console.error('write-message should not also write outbox when reserved exists', outboxWm);
   process.exit(39);
 }
 const viaWm = ensureHubUserReply(hub, {
@@ -1622,8 +1630,8 @@ const viaWm = ensureHubUserReply(hub, {
   startedAt: startedWm,
   agentLog: emptyLog,
 });
-if (viaWm.action !== 'ok-existing') {
-  console.error('expected ok-existing after write-message', viaWm);
+if (viaWm.action !== 'reserved-body') {
+  console.error('expected reserved-body after funneled write-message', viaWm);
   process.exit(37);
 }
 const afterWm = getConversation(hub, conv8.id);
@@ -1631,7 +1639,7 @@ if (!afterWm.messages.some((m) => m.role === 'hub' && /write-message helper/.tes
   console.error('write-message body not relayed', afterWm.messages);
   process.exit(38);
 }
-// After relay, mail lives in user/inbox/archive with same conversation_id
+// After reserved-body finalize, mail lives in user/inbox/archive with conversation_id
 const archived = path.join(hub, 'user', 'inbox', 'archive');
 const archMail = fs.existsSync(archived)
   ? fs.readdirSync(archived).filter((n) => n.endsWith('.md'))
@@ -1642,6 +1650,132 @@ if (!archMail || !new RegExp(`conversation_id:\\s*${conv8.id}`).test(archMail)) 
   console.error('write-message archived mail missing conversation_id', archMail);
   process.exit(39);
 }
+
+// --- dual-path guard: write-message outbox already relayed → skip reserved body ---
+const convDual = createConversation(hub, 'DualPath');
+postLaunchAck(hub, convDual.id);
+const dualStarted = new Date().toISOString();
+// forceOutbox: simulate legacy dual write (outbox + reserved) without funnel
+writeOutboxMessage(hub, {
+  from: 'hub',
+  to: 'user',
+  subject: 'console reply',
+  body: 'First path via outbox only.',
+  conversationId: convDual.id,
+  forceOutbox: true,
+});
+const dualBody = prepareReservedReplyBody(hub, convDual.id);
+fs.writeFileSync(dualBody, 'Second path via reserved body — must not appear.\n');
+const dual = ensureHubUserReply(hub, {
+  conversationId: convDual.id,
+  logByteOffset: 0,
+  startedAt: dualStarted,
+  agentLog: emptyLog,
+  replyBodyFile: dualBody,
+});
+if (dual.action !== 'ok-existing') {
+  console.error('expected ok-existing when outbox already delivered', dual);
+  process.exit(70);
+}
+const dualMsgs = getConversation(hub, convDual.id).messages.filter((m) => m.role === 'hub');
+if (dualMsgs.length !== 1 || !/First path via outbox/.test(dualMsgs[0].content)) {
+  console.error('dual-path should keep only outbox reply', dualMsgs);
+  process.exit(71);
+}
+if (dualMsgs.some((m) => /Second path/.test(m.content))) {
+  console.error('reserved body must not append after outbox reply', dualMsgs);
+  process.exit(72);
+}
+if (fs.existsSync(dualBody)) {
+  console.error('reserved body should be cleared after dual-path skip');
+  process.exit(73);
+}
+
+// --- near-dupe reserved body after prior hub reply (re-fire) ---
+// Prior reply must be older than hubReplySince floor (startedAt - 2s) so the
+// reserved-body near-dupe path runs (not ok-existing from same-turn outbox).
+const convNd = createConversation(hub, 'NearDupeRes');
+appendMessage(hub, convNd.id, 'hub', 'Agent BA finished the TTS fix on public main.');
+{
+  const c = getConversation(hub, convNd.id);
+  const last = c.messages[c.messages.length - 1];
+  last.created_at = new Date(Date.now() - 30_000).toISOString();
+  fs.writeFileSync(
+    path.join(hub, '.bizagent', 'conversations', `${c.id}.json`),
+    `${JSON.stringify(c, null, 2)}\n`,
+  );
+}
+const ndStarted = new Date().toISOString();
+const ndBody = prepareReservedReplyBody(hub, convNd.id);
+fs.writeFileSync(ndBody, 'Agent BA finished the TTS fix on public main.\n');
+const nd = ensureHubUserReply(hub, {
+  conversationId: convNd.id,
+  logByteOffset: 0,
+  startedAt: ndStarted,
+  agentLog: emptyLog,
+  replyBodyFile: ndBody,
+});
+if (nd.action !== 'ok-existing' || !nd.skippedDuplicate) {
+  console.error('expected skip-near-duplicate for reserved body', nd);
+  process.exit(74);
+}
+const ndHub = getConversation(hub, convNd.id).messages.filter((m) => m.role === 'hub');
+if (ndHub.length !== 1) {
+  console.error('near-dupe reserved should not append second hub message', ndHub);
+  process.exit(75);
+}
+
+// --- dispatch hold: unarchived hub inbox mail stays marked (no re-fire) ---
+const {
+  pendingUndispatchedMail,
+  markMailDispatched,
+  clearDispatchState,
+  dispatchRetrySecs,
+} = require(path.join(root, 'control-plane/lib/dispatcher'));
+const holdInbox = path.join(hub, 'inbox');
+fs.mkdirSync(holdInbox, { recursive: true });
+const holdMail = path.join(holdInbox, '2026-07-24-operator-hold-dup.md');
+fs.writeFileSync(holdMail, `---
+from: operator
+to: hub
+date: 2026-07-24
+subject: hold
+conversation_id: ${convNd.id}
+---
+
+hold me
+`);
+const holdCfg = { lockLeaseSecs: 1800 };
+const holdRetry = dispatchRetrySecs(holdCfg);
+if (holdRetry < 60 || holdRetry > 6 * 3600) {
+  console.error('dispatchRetrySecs out of bounds', holdRetry);
+  process.exit(76);
+}
+markMailDispatched(hub, 'hub', [holdMail], holdRetry);
+const stillPending = pendingUndispatchedMail(hub, 'hub', holdRetry);
+if (stillPending.some((f) => path.basename(f) === path.basename(holdMail))) {
+  console.error('marked mail should not be pending again', stillPending);
+  process.exit(77);
+}
+// After archive (file gone), marker drops and new content can dispatch
+fs.unlinkSync(holdMail);
+clearDispatchState(hub, 'hub');
+fs.writeFileSync(holdMail, `---
+from: operator
+to: hub
+date: 2026-07-24
+subject: hold2
+conversation_id: ${convNd.id}
+---
+
+again
+`);
+const afterClear = pendingUndispatchedMail(hub, 'hub', holdRetry);
+if (!afterClear.some((f) => path.basename(f) === path.basename(holdMail))) {
+  console.error('fresh mail after clear should be pending', afterClear);
+  process.exit(78);
+}
+fs.unlinkSync(holdMail);
 
 // --- buildHubTurnPrompt injects reserved path for console mail ---
 // Clear leftover inbox so FIFO binds reserved path to this message (not older fixtures).

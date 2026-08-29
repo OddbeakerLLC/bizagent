@@ -399,6 +399,33 @@ function writeOutboxMessage(hub, opts = {}) {
     throw new Error('writeOutboxMessage: subject is required');
   }
 
+  // Funnel hub→user console replies through the reserved body when a turn has
+  // prepared one. Prevents dual delivery (write-message outbox AND reserved-body
+  // finalize) for the same conversation_id / turn.
+  if (from === 'hub' && to === 'user' && conversationId && !opts.forceOutbox) {
+    try {
+      const safety = require('./hub-turn-safety');
+      const reservedPath = safety.reservedReplyBodyPath(hub, conversationId);
+      if (reservedPath && fs.existsSync(reservedPath)) {
+        const cleaned = body.replace(/\s+$/, '');
+        fs.writeFileSync(reservedPath, cleaned ? `${cleaned}\n` : '');
+        logEvent(hub, {
+          event: 'write_message_funnel_reserved',
+          conversation_id: conversationId,
+          chars: cleaned.length,
+        });
+        return {
+          file: reservedPath,
+          basename: path.basename(reservedPath),
+          outbox: path.dirname(reservedPath),
+          via: 'reserved-body',
+        };
+      }
+    } catch (_err) {
+      /* fall through to normal outbox */
+    }
+  }
+
   const date = opts.date || new Date().toISOString().slice(0, 10);
   const header = [
     '---',

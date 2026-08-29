@@ -430,8 +430,15 @@ function sameFingerprint(left, right) {
   return left.file === right.file && left.size === right.size && left.mtimeMs === right.mtimeMs;
 }
 
+/**
+ * How long a dispatch marker suppresses re-launch while the inbox file still exists.
+ * Capped low (60s) caused duplicate hub turns: hub often finishes + leaves mail
+ * unarchived briefly, then the next tick re-dispatches the same file.
+ * Keep markers for the lock lease (default 30m), bounded 60s–6h.
+ * Failed turns clear markers explicitly so retry is not blocked.
+ */
 function dispatchRetrySecs(config) {
-  return Math.max(1, Math.min(60, Number(config.lockLeaseSecs || 60)));
+  return Math.max(60, Math.min(6 * 3600, Number(config.lockLeaseSecs || 1800)));
 }
 
 function activeDispatchMarker(item, fingerprint, now, retrySecs) {
@@ -454,6 +461,7 @@ function markMailDispatched(hub, slug, files, retrySecs = 0) {
   const handled = readDispatchState(hub, slug);
   const now = Math.floor(Date.now() / 1000);
   const mailDir = path.dirname(files[0] || '');
+  // Drop markers only when the inbox file is gone (archived) or past retry window.
   const next = handled.filter((item) => (
     fs.existsSync(path.join(mailDir, item.file)) && Number(item.dispatchedAt || 0) > now - retrySecs
   ));
@@ -462,6 +470,16 @@ function markMailDispatched(hub, slug, files, retrySecs = 0) {
     if (!next.some((item) => sameFingerprint(item, fingerprint))) next.push({ ...fingerprint, dispatchedAt: now });
   }
   fs.writeFileSync(target, JSON.stringify({ handled: next.slice(-200) }, null, 2));
+}
+
+/** Clear hub/agent dispatch markers so unarchived mail may launch again (e.g. hard-fail). */
+function clearDispatchState(hub, slug) {
+  const target = dispatchStateFile(hub, slug);
+  try {
+    if (fs.existsSync(target)) fs.unlinkSync(target);
+  } catch (_err) {
+    /* ignore */
+  }
 }
 
 function lockAgeSecs(lock) {
@@ -781,7 +799,21 @@ function launchHub(config) {
           conversation_id: conversationId || result.conversationId || '',
           error: result.error || undefined,
         });
+        // Hard-fail: allow the same unarchived inbox mail to re-dispatch.
+        if (!result.ok && (result.action === 'failed' || result.action === 'cli_config_error')) {
+          try { clearDispatchState(hub, 'hub'); } catch (_e) { /* ignore */ }
+        }
         // Daemon owns CLI lifecycle; drop CP lock when turn finishes.
+        try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_e) { /* ignore */ }
+        return;
+      }
+      // Daemon is mid-turn for another request — do NOT cold-spawn a second hub CLI
+      // (that double-delivered operator replies). Release lock; tick will retry.
+      if (result.error === 'busy') {
+        logEvent(hub, {
+          event: 'hub_warm_busy',
+          conversation_id: conversationId || '',
+        });
         try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_e) { /* ignore */ }
         return;
       }
@@ -1019,6 +1051,9 @@ function launchHubCold(config, ctx) {
       action,
       conversation_id: conversationId || '',
     });
+    if (action === 'failed' || (code !== 0 && code !== null && action !== 'reserved-body' && action !== 'ok-existing')) {
+      try { clearDispatchState(hub, 'hub'); } catch (_e) { /* ignore */ }
+    }
   });
 
   child.unref();
@@ -1113,6 +1148,7 @@ module.exports = {
   liveAgentCount,
   liveHubCount,
   liveRunCount,
+  clearDispatchState,
   markMailDispatched,
   notifyAgentExitFromLogs,
   pendingUndispatchedMail,

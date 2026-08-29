@@ -16,6 +16,7 @@ const {
   appendMessage,
   frontmatterValue,
   getConversation,
+  isNearDuplicateHubReply,
   LAUNCH_ACK_KIND,
   readUserInboxMessages,
   STATUS_ERROR_KIND,
@@ -327,6 +328,8 @@ function promoteBlobToOutbox(hub, conversationId, body, subject = 'recovered hub
       }
     } catch (_e) { /* ignore */ }
   }
+  // forceOutbox: reserved-body finalize must write real outbox mail, not re-funnel
+  // into the reserved file (writeOutboxMessage funnels hub→user when reserved exists).
   return writeOutboxMessage(hub, {
     from: 'hub',
     to: 'user',
@@ -334,6 +337,7 @@ function promoteBlobToOutbox(hub, conversationId, body, subject = 'recovered hub
     body,
     conversationId,
     userId,
+    forceOutbox: true,
   });
 }
 
@@ -494,12 +498,38 @@ function ensureHubUserReply(hub, turn) {
   routeOutboxes(hub);
   readUserInboxMessages(hub);
 
-  // Reserved body is authoritative for THIS turn. Check it before hubReplySince:
-  // back-to-back hub turns can land within the messageSince 2s floor, and the
-  // prior turn's hub reply must not discard a fresh reserved body (that left
-  // launch-acks stuck and Thinking Preview frozen with no real reply).
+  // If write-message (or a prior finalize) already delivered a hub reply for this
+  // turn, do not also promote the reserved body — dual-path turns used to land
+  // two operator-visible messages for one prompt.
+  if (hubReplySince(hub, conversationId, turn.startedAt)) {
+    clearPendingHubTurn(hub, turn);
+    clearReservedReplyBody(hub, conversationId);
+    // Always drop launch-acks on success — otherwise Thinking Preview stays open
+    // forever with no hub message to replace the ack.
+    supersedeLaunchAcks(hub, conversationId);
+    // Relay (here or prior EXIT hook) may have just written the hub message — push.
+    notifyConversationMutated(hub, conversationId);
+    return { action: 'ok-existing', conversationId, mutated: true };
+  }
+
+  // Reserved body is authoritative when no hub reply has landed yet this turn.
+  // Skip near-duplicates of a recent hub message (cross-turn paraphrase / re-fire).
   const reservedBody = readReservedReplyBody(hub, conversationId);
   if (reservedBody && reservedBody.length >= MIN_RESERVED_BODY_CHARS) {
+    const conv = getConversation(hub, conversationId);
+    if (conv && isNearDuplicateHubReply(conv, reservedBody)) {
+      clearPendingHubTurn(hub, turn);
+      clearReservedReplyBody(hub, conversationId);
+      supersedeLaunchAcks(hub, conversationId);
+      notifyConversationMutated(hub, conversationId);
+      logEvent(hub, {
+        event: 'hub_safety',
+        action: 'skip-near-duplicate',
+        conversation_id: conversationId,
+        chars: reservedBody.length,
+      });
+      return { action: 'ok-existing', conversationId, mutated: true, skippedDuplicate: true };
+    }
     const result = finalizeViaOutbox(
       hub,
       conversationId,
@@ -511,17 +541,6 @@ function ensureHubUserReply(hub, turn) {
     clearReservedReplyBody(hub, conversationId);
     // finalizeViaOutbox → appendMessage(role hub) already strips launch-acks.
     return result;
-  }
-
-  if (hubReplySince(hub, conversationId, turn.startedAt)) {
-    clearPendingHubTurn(hub, turn);
-    clearReservedReplyBody(hub, conversationId);
-    // Always drop launch-acks on success — otherwise Thinking Preview stays open
-    // forever with no hub message to replace the ack.
-    supersedeLaunchAcks(hub, conversationId);
-    // Relay (here or prior EXIT hook) may have just written the hub message — push.
-    notifyConversationMutated(hub, conversationId);
-    return { action: 'ok-existing', conversationId, mutated: true };
   }
   // Idempotent: shell EXIT + Node exit + tick drain may all fire.
   if (hubFailureSince(hub, conversationId, turn.startedAt)) {
@@ -564,6 +583,11 @@ function ensureHubUserReply(hub, turn) {
   );
   clearPendingHubTurn(hub, turn);
   clearReservedReplyBody(hub, conversationId);
+  // Allow the same unarchived inbox mail to re-dispatch after a hard fail.
+  try {
+    const { clearDispatchState } = require('./dispatcher');
+    clearDispatchState(hub, 'hub');
+  } catch (_err) { /* ignore */ }
   logEvent(hub, {
     event: 'hub_safety_fail',
     conversation_id: conversationId,
