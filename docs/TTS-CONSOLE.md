@@ -97,6 +97,7 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
   - Hub replies should put the big-picture summary in sentence 1; TTS honors that contract.
 - No usable first sentence → minimal fallback *“Reply ready — see the console.”* (never dumps full text, never a partial sentence). Toggle confirmation still uses `raw: true` (“Text to speech on.”).
 - Client helpers: `buildSpokenSummary` + `ensureSpokenSentence` (hub replies) + retained `buildSpokenText` / `cleanLineForSpeech` (lighter Jobe-style path kept for non-summary callers). `clipSpokenHeadline` removed.
+- **Dotted tokens (speak string only):** `pronounceForSpeech` after summary/build — numeric `3.14` / `v2.0` → “point”; no-space hostnames/`file.tar.gz` → “dot” (`beakerboard.net` → “beakerboard dot net”). Sentence-ending `. ` / abbreviations with space after (e.g. `Dr. Smith`) unchanged. `splitSpeechSentences` protects no-space dots so domains are not false sentence breaks. Optional: strip `https://` and path from leftover URLs. On-screen markdown unchanged.
 - Server path sends **preprocessed** text with `raw: true` so oddbeaker-tts does not double-process. (Upstream can still preprocess if `raw` is false.)
 - Jobe is unchanged; BizAgent first-sentence mode is console-only (`speakTtsText(..., { summary: true })`).
 
