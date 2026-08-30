@@ -659,7 +659,9 @@ function renderMarkdown(text) {
   const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
   const htmlParts = [];
   let paragraphBuffer = [];
-  let listBuffer = null;
+  // Nested lists: stack of { type: 'ul'|'ol', items: [{ text, children }] }
+  // children is null or a nested list node { type, items }.
+  let listStack = [];
 
   const flushParagraph = () => {
     if (paragraphBuffer.length) {
@@ -667,12 +669,94 @@ function renderMarkdown(text) {
       paragraphBuffer = [];
     }
   };
+
+  const renderListNode = (node) => {
+    const tag = node.type;
+    const itemsHtml = node.items.map((item) => {
+      const body = renderInline(item.text);
+      const nested = item.children ? renderListNode(item.children) : '';
+      return `<li>${body}${nested}</li>`;
+    }).join('');
+    return `<${tag}>${itemsHtml}</${tag}>`;
+  };
+
   const flushList = () => {
-    if (listBuffer) {
-      const tag = listBuffer.type;
-      htmlParts.push(`<${tag}>${listBuffer.items.map((item) => `<li>${renderInline(item)}</li>`).join('')}</${tag}>`);
-      listBuffer = null;
+    if (listStack.length) {
+      htmlParts.push(renderListNode(listStack[0]));
+      listStack = [];
     }
+  };
+
+  /** Parse a list item line. Indent = leading spaces/tabs (tab=4). Marker at col 0+indent. */
+  const parseListItem = (line) => {
+    let indent = 0;
+    let i = 0;
+    while (i < line.length) {
+      const ch = line[i];
+      if (ch === ' ') { indent += 1; i++; }
+      else if (ch === '\t') { indent += 4; i++; }
+      else break;
+    }
+    const rest = line.slice(i);
+    let m = /^[-*+]\s+(.*)$/.exec(rest);
+    if (m) return { indent, type: 'ul', text: m[1] };
+    m = /^\d+\.\s+(.*)$/.exec(rest);
+    if (m) return { indent, type: 'ol', text: m[1] };
+    return null;
+  };
+
+  /**
+   * Push item into nested list stack. indent units are spaces (2+ → nest).
+   * CommonMark-ish: each 2 spaces of indent ≈ one nest level relative to parent marker.
+   */
+  const pushListItem = (parsed) => {
+    const level = Math.floor(parsed.indent / 2);
+
+    // Pop deeper levels
+    while (listStack.length > level + 1) listStack.pop();
+
+    // Need a list at this level
+    if (listStack.length === 0) {
+      listStack.push({ type: parsed.type, items: [] });
+    } else if (listStack.length <= level) {
+      // Open nested lists under the last item of the current deepest list
+      while (listStack.length <= level) {
+        const parent = listStack[listStack.length - 1];
+        if (!parent.items.length) {
+          // No parent item to hang a nested list on — treat as same-level
+          break;
+        }
+        const lastItem = parent.items[parent.items.length - 1];
+        if (!lastItem.children || lastItem.children.type !== parsed.type) {
+          lastItem.children = { type: parsed.type, items: [] };
+        }
+        listStack.push(lastItem.children);
+      }
+      // If we still couldn't nest (no parent item), fall back to top-level sibling
+      if (listStack.length === 0) {
+        listStack.push({ type: parsed.type, items: [] });
+      }
+    }
+
+    const cur = listStack[listStack.length - 1];
+    // Type change at same level: close this list and start a sibling of the other type
+    // under the same parent (or new top-level).
+    if (cur.type !== parsed.type) {
+      if (listStack.length === 1) {
+        // Top-level type switch: flush previous list, start new
+        flushList();
+        listStack.push({ type: parsed.type, items: [] });
+      } else {
+        // Nested type switch: replace children on parent last item
+        listStack.pop();
+        const parent = listStack[listStack.length - 1];
+        const lastItem = parent.items[parent.items.length - 1];
+        lastItem.children = { type: parsed.type, items: [] };
+        listStack.push(lastItem.children);
+      }
+    }
+
+    listStack[listStack.length - 1].items.push({ text: parsed.text, children: null });
   };
 
   let i = 0;
@@ -738,26 +822,10 @@ function renderMarkdown(text) {
       continue;
     }
 
-    const ulMatch = /^[-*+]\s+(.*)/.exec(line);
-    if (ulMatch) {
+    const listItem = parseListItem(line);
+    if (listItem) {
       flushParagraph();
-      if (!listBuffer || listBuffer.type !== 'ul') {
-        flushList();
-        listBuffer = { type: 'ul', items: [] };
-      }
-      listBuffer.items.push(ulMatch[1]);
-      i++;
-      continue;
-    }
-
-    const olMatch = /^\d+\.\s+(.*)/.exec(line);
-    if (olMatch) {
-      flushParagraph();
-      if (!listBuffer || listBuffer.type !== 'ol') {
-        flushList();
-        listBuffer = { type: 'ol', items: [] };
-      }
-      listBuffer.items.push(olMatch[1]);
+      pushListItem(listItem);
       i++;
       continue;
     }
