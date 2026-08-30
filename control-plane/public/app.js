@@ -1087,13 +1087,61 @@ function scrubDenseSpeechTokens(text) {
 }
 
 /**
+ * Protect no-space dotted tokens (hostnames, decimals, versions) so sentence
+ * splitters do not treat bare "." as end-of-sentence. Inverse: restoreProtectedDots.
+ */
+function protectSpeechDots(text) {
+  return String(text || '').replace(
+    /(\d)\.(\d)|([A-Za-z0-9])\.([A-Za-z0-9])/g,
+    (_, d1, d2, a, b) => (d1 != null ? `${d1}\uE000${d2}` : `${a}\uE000${b}`)
+  );
+}
+
+function restoreProtectedDots(text) {
+  return String(text || '').replace(/\uE000/g, '.');
+}
+
+/**
+ * Speak-only pronunciation: numeric decimals → "point"; other no-space dotted
+ * tokens (hostnames, file.tar.gz, v2.x labels after decimals handled) → "dot".
+ * Sentence-ending ". " / ".\n" left alone. Optional light URL soften.
+ * On-screen markdown is never passed through this — TTS string only.
+ */
+function pronounceForSpeech(text) {
+  let t = String(text || '');
+  if (!t) return t;
+
+  // Soften raw URLs when they survived earlier scrub (optional / cheap).
+  t = t.replace(/\bhttps?:\/\/[^\s<>\]]+/gi, (url) => {
+    let u = url.replace(/^https?:\/\//i, '');
+    u = u.replace(/[/?#].*$/, ''); // host only
+    u = u.replace(/\/+/g, ' ');
+    return u.trim() || 'link';
+  });
+
+  // 1) digit.digit → point (repeat for 3.1.4-style version chains)
+  t = t.replace(/(\d)\.(\d)/g, '$1 point $2');
+  // Collapse accidental double spaces from chained replaces
+  t = t.replace(/\s{2,}/g, ' ');
+
+  // 2) remaining no-space letter/digit joins across "." → dot
+  //    (beakerboard.net, foo.bar.baz, file.tar.gz, api.v2 leftover labels)
+  t = t.replace(/([A-Za-z0-9])\.([A-Za-z0-9])/g, '$1 dot $2');
+
+  return t.replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
  * Split cleaned prose into sentence-ish chunks for summary selection.
+ * Protects dotted hostnames/decimals so "beakerboard.net" is one token.
  */
 function splitSpeechSentences(text) {
-  const src = String(text || '').replace(/\s+/g, ' ').trim();
+  const src = protectSpeechDots(String(text || '').replace(/\s+/g, ' ').trim());
   if (!src) return [];
   const parts = src.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
-  return parts.map((p) => p.trim()).filter((p) => p.length > 1);
+  return parts
+    .map((p) => restoreProtectedDots(p).trim())
+    .filter((p) => p.length > 1);
 }
 
 /**
@@ -1471,6 +1519,10 @@ function speakTtsText(text, opts) {
     }
   } else {
     spokenText = buildSpokenText(text);
+  }
+  // Pronounce domains/decimals for speech engines; skip raw confirmations.
+  if (spokenText && !(opts && opts.raw)) {
+    spokenText = pronounceForSpeech(spokenText);
   }
   if (!spokenText) return false;
 
