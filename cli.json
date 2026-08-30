@@ -80,7 +80,9 @@
       "google-gemma-4-31b-it",
       "zai-org-glm-5-2",
       "zai-org-glm-5-1",
-      "zai-org-glm-5"
+      "zai-org-glm-5",
+      "z-ai-glm-5-3-flash",
+      "z-ai-glm-5-3"
     ]
   },
   "ollama": {
