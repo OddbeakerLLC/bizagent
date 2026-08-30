@@ -1404,36 +1404,23 @@ function splitSpeechSentences(text) {
 }
 
 /**
- * Clip one sentence into a short spoken headline (word + char caps).
+ * Finish a spoken sentence with terminal punctuation when missing.
+ * Does not clip length — preserves the full grammatical sentence.
  */
-function clipSpokenHeadline(sentence, maxChars, maxWords) {
+function ensureSpokenSentence(sentence) {
   let s = String(sentence || '').replace(/\s+/g, ' ').trim();
   if (!s) return '';
   s = s.replace(/^\W+/, '').trim();
-  // Prefer first clause when the sentence is a long compound.
-  if (s.length > Math.max(48, Math.floor(maxChars * 0.9))) {
-    const clause = s.split(/\s*[—–:;]\s+|\s+--\s+/)[0].trim();
-    if (clause.length >= 18) s = clause;
-  }
-  const bare = s.replace(/[.!?]+$/g, '').trim();
-  const words = bare.split(/\s+/).filter(Boolean);
-  if (words.length > maxWords) {
-    s = words.slice(0, maxWords).join(' ').replace(/[,:;\-–—]+$/g, '') + '.';
-  } else {
-    s = /[.!?]$/.test(s) ? s : `${bare}.`;
-  }
-  if (s.length > maxChars) {
-    const cut = s.slice(0, maxChars - 1);
-    const sp = cut.lastIndexOf(' ');
-    s = (sp > 24 ? cut.slice(0, sp) : cut).trim().replace(/[,:;.\-–—]+$/g, '') + '.';
-  }
+  if (!s) return '';
+  if (!/[.!?]$/.test(s)) s = `${s.replace(/[,:;\-–—]+$/g, '').trim()}.`;
   return s.replace(/\s{2,}/g, ' ').trim();
 }
 
 /**
- * Brief spoken summary for hub→operator replies (headline / 1–3 short sentences).
- * Full markdown stays on screen; TTS only gets the big picture — never near-verbatim
- * short prose. Returns null when nothing useful remains (caller uses minimal fallback).
+ * First complete sentence of a hub reply for TTS.
+ * Full markdown stays on screen; speech is sentence 1 only (entire sentence),
+ * never a mid-sentence word/char clip or multi-sentence summary.
+ * Returns null when nothing usable remains (caller uses minimal fallback).
  */
 function buildSpokenSummary(text) {
   const blocks = String(text || '').split(/\n{2,}/);
@@ -1472,7 +1459,7 @@ function buildSpokenSummary(text) {
         const first = scrubDenseSpeechTokens(
           cleanLineForSpeech(listLines[0].replace(/^\s*(?:[-*]|\d+\.)\s+/, ''))
         );
-        if (first && first.length >= 12 && first.length <= 120) listHints.push(first);
+        if (first && first.length >= 12 && first.length <= 160) listHints.push(first);
       }
       // Also keep any non-list lead-in line in the same block (e.g. "Done when:")
       const lead = lines
@@ -1515,71 +1502,19 @@ function buildSpokenSummary(text) {
       return wordChars >= 8 && wordChars / Math.max(s.length, 1) > 0.5;
     });
 
-  // Short plain hub replies (typical 1–3 sentences, no tables/fences): speak a
-  // headline only — never the full wording. Long/structured replies keep a
-  // tighter multi-sentence cap below.
-  const structured = hadCode || hadTable || listHints.length > 0;
-  const shortPlain =
-    !structured &&
-    sentences.length > 0 &&
-    sentences.length <= 4 &&
-    combined.length <= 420;
-
   let result = '';
-
-  if (shortPlain) {
-    // Always headline-compress short plain replies so TTS is clearly not the body.
-    // Multi-sentence: first sentence (clipped) is enough. Single long sentence: hard clip
-    // or a topic cue — never speak the full wording.
-    const bodyLen = Math.max(combined.length, sentences.join(' ').length);
-    const multi = sentences.length >= 2;
-    let head = clipSpokenHeadline(sentences[0], multi ? 110 : 90, multi ? 14 : 10);
-    const nearFullBody = (s) => !!s && bodyLen > 48 && s.length >= bodyLen * 0.6;
-    if (nearFullBody(head) || (!multi && head && head.length > 72)) {
-      head = clipSpokenHeadline(sentences[0], 56, 8);
-    }
-    if (nearFullBody(head)) {
-      const topic = sentences[0]
-        .replace(/[.!?]+$/g, '')
-        .split(/\s+/)
-        .filter(Boolean)
-        .slice(0, 6)
-        .join(' ')
-        .replace(/[,:;\-–—]+$/g, '');
-      result = topic.length >= 10 ? `${topic}. Details on screen.` : '';
-    } else {
-      result = head;
-    }
-  } else {
-    const picked = [];
-    let total = 0;
-    const maxChars = 280;
-    // Prefer fewer sentences when the first already carries the point.
-    const firstLen = sentences[0] ? sentences[0].length : 0;
-    const maxSentences = firstLen >= 90 ? 2 : 3;
-    for (const s of sentences) {
-      if (picked.length >= maxSentences) break;
-      const next = /[.!?]$/.test(s) ? s : `${s}.`;
-      if (picked.length && total + next.length + 1 > maxChars) break;
-      if (!picked.length && next.length > maxChars) {
-        // Single long sentence: hard-cut at word boundary
-        picked.push(clipSpokenHeadline(next, maxChars, 40));
-        break;
-      }
-      picked.push(next);
-      total += next.length + 1;
-    }
-    result = picked.join(' ').replace(/\s{2,}/g, ' ').trim();
-    // Guard against "summary" that is still most of a long body.
-    if (result && combined.length > 320 && result.length > Math.min(maxChars, Math.floor(combined.length * 0.45))) {
-      result = clipSpokenHeadline(sentences[0] || result, 160, 22);
-    }
+  if (sentences.length) {
+    // Contract: speak the complete first sentence only — no word/char mid-cuts.
+    result = ensureSpokenSentence(sentences[0]);
   }
 
   // If prose was empty but structure existed, give a tiny structural cue.
   if (!result) {
     if (listHints.length) {
-      result = `Reply covers ${listHints[0]}. Details are on screen.`;
+      const cue = ensureSpokenSentence(listHints[0]);
+      result = cue
+        ? `Reply covers ${cue.replace(/[.!?]+$/g, '')}. Details are on screen.`
+        : '';
     } else if (hadCode || hadTable) {
       result = 'Reply ready — see the console.';
     }
@@ -1823,9 +1758,10 @@ function speakViaBrowserTts(spokenText, gen) {
  * @param {string} text raw or already-built spoken text
  * @param {{ raw?: boolean, summary?: boolean }} [opts]
  *   raw=true skips preprocess (confirmation phrases).
- *   summary=true (hub replies) speaks a brief big-picture summary only —
- *   never the full scrubbed body. On summary failure uses TTS_REPLY_FALLBACK
- *   (or silence if even that is empty) — never dumps the full reply.
+ *   summary=true (hub replies) speaks the complete first sentence only —
+ *   never a mid-sentence clip and never the full multi-sentence body.
+ *   On summary failure uses TTS_REPLY_FALLBACK (or silence if even that is
+ *   empty) — never dumps the full reply.
  * @returns {boolean} true if a speak attempt was started (may finish async)
  */
 function speakTtsText(text, opts) {

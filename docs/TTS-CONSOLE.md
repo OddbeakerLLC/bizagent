@@ -91,13 +91,14 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
 - Skips user messages, status/launch-ack/thinking, and empty bodies.
 - Initial conversation load and conversation switches **do not** read history aloud.
 - **Full hub reply always renders in the console UI** (markdown unchanged).
-- **TTS speaks a short summary only** — never the reply itself:
-  - **Short plain replies** (typical 1–3 sentences, no tables/fences): one **headline** (~≤14 words / ~120 chars), not the full wording.
-  - **Long / structured replies**: ≤~1–3 short sentences / ~280 chars after scrubbing paths, filenames, SHAs, fenced code, tables, and long lists.
-- Summary failure → minimal fallback *“Reply ready — see the console.”* (never dumps full text). Toggle confirmation still uses `raw: true` (“Text to speech on.”).
-- Client helpers: `buildSpokenSummary` + `clipSpokenHeadline` (hub replies) + retained `buildSpokenText` / `cleanLineForSpeech` (lighter Jobe-style path kept for non-summary callers).
+- **TTS speaks the complete first sentence only** — never a mid-sentence word/char clip, never a multi-sentence summary, never the full body:
+  - Light scrub of markdown/noise (fences, tables, paths, filenames, SHAs, backticks) **inside** that sentence is OK; the grammatical sentence stays whole.
+  - Sentence boundary = real `.` `!` `?` end (no em-dash / word-count / char-budget cuts for the spoken unit).
+  - Hub replies should put the big-picture summary in sentence 1; TTS honors that contract.
+- No usable first sentence → minimal fallback *“Reply ready — see the console.”* (never dumps full text, never a partial sentence). Toggle confirmation still uses `raw: true` (“Text to speech on.”).
+- Client helpers: `buildSpokenSummary` + `ensureSpokenSentence` (hub replies) + retained `buildSpokenText` / `cleanLineForSpeech` (lighter Jobe-style path kept for non-summary callers). `clipSpokenHeadline` removed.
 - Server path sends **preprocessed** text with `raw: true` so oddbeaker-tts does not double-process. (Upstream can still preprocess if `raw` is false.)
-- Jobe is unchanged; BizAgent summary mode is console-only (`speakTtsText(..., { summary: true })`).
+- Jobe is unchanged; BizAgent first-sentence mode is console-only (`speakTtsText(..., { summary: true })`).
 
 ## Interrupt behavior
 
@@ -135,7 +136,7 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
 2. **Web Audio `BufferSource`** could still clip the final phoneme at `onended` on some Chromium builds; playback now pads ~200ms of silence after the decoded buffer.
 3. **Browser `speechSynthesis` fallback** pads a trailing pause so Chrome does not eat the last syllable.
 
-Summary/headline clipping is unchanged (still brief, not near-verbatim).
+First-sentence selection is unchanged by the pad (still the complete sentence 1 only).
 
 ## Multi-reply reliability (browser fallback)
 
