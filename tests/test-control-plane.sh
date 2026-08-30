@@ -534,7 +534,7 @@ grep -q "refreshRuntimeConfig\|refreshRegistry" "$SERVER" \
   || fail "server does not refresh config without a restart"
 grep -q "refreshRegistry" "$ROOT/control-plane/lib/config.js" \
   || fail "config does not expose a registry refresh mechanism"
-grep -q "CODESPAN" "$ROOT/control-plane/public/app.js" \
+grep -q "CODESPAN" "$ROOT/control-plane/public/markdown.js" \
   || fail "UI codespan placeholder does not use a collision-safe marker"
 grep -q "agent-detail" "$SERVER" \
   || fail "server missing /api/agent-detail endpoint"
@@ -1997,7 +1997,8 @@ NODE
 const root = process.argv[2];
 const fs = require('fs');
 const vm = require('vm');
-const src = fs.readFileSync(`${root}/control-plane/public/app.js`, 'utf8');
+const src = fs.readFileSync(`${root}/control-plane/public/markdown.js`, 'utf8')
+  + '\n' + fs.readFileSync(`${root}/control-plane/public/app.js`, 'utf8');
 const noop = () => {};
 const el = () => ({
   addEventListener: noop,
@@ -2125,6 +2126,10 @@ if (!nestedOlUl.includes('<ol><li>first<ul><li>nested</li></ul></li><li>second</
 const nestEnds = sandbox.renderMarkdown('- a\n  - b\n\nAfter');
 if (!nestEnds.includes('<p>After</p>') || nestEnds.includes('After</li>')) {
   console.error('blank should end nested list:', nestEnds); process.exit(16);
+}
+const mixedKids = sandbox.renderMarkdown('- a\n  - b\n  1. c');
+if (!mixedKids.includes('<ul><li>a<ul><li>b</li></ul><ol><li>c</li></ol></li></ul>')) {
+  console.error('mixed nested kids broken:', mixedKids); process.exit(17);
 }
 NODE
   then

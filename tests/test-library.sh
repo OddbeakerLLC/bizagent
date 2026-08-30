@@ -20,7 +20,7 @@ if grep -E 'label\.includes\(q\)|product_name.*includes\(q\)' "$ROOT/control-pla
   fail "library filter still matches product/project labels (should be file name/path only)"
 fi
 grep -q 'library-acc-nested' "$ROOT/control-plane/public/styles.css" || fail "styles missing nested product accordion"
-grep -q 'blockquote' "$ROOT/control-plane/public/library.js" || fail "library.js missing blockquote render"
+grep -q 'blockquote' "$ROOT/control-plane/public/markdown.js" || fail "markdown.js missing blockquote render"
 grep -q 'library-preview-body blockquote' "$ROOT/control-plane/public/styles.css" || fail "styles missing blockquote CSS"
 grep -q 'library-diagram\|libraryEntryKind\|render=1\|render:' "$ROOT/control-plane/public/library.js" || fail "library page missing diagram preview path"
 grep -qE "docs/|company/|reports/" "$ROOT/control-plane/lib/hub-memory.js" || fail "hub prompt missing library hub-dir convention"
@@ -464,17 +464,14 @@ if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
 
 // Client markdown: multi-paragraph blockquotes → <blockquote>
 {
-  const pageJs = fs.readFileSync(path.join(process.argv[2], 'control-plane/public/library.js'), 'utf8');
-  const start = pageJs.indexOf('function escapeHtml');
-  const end = pageJs.indexOf('function showAuthGate');
-  if (start < 0 || end < 0 || end <= start) {
-    console.error('could not locate markdown helpers in library.js');
+  const mdJs = fs.readFileSync(path.join(process.argv[2], 'control-plane/public/markdown.js'), 'utf8');
+  if (!mdJs.includes('function renderMarkdown')) {
+    console.error('could not locate renderMarkdown in markdown.js');
     process.exit(34);
   }
   const md = {};
   // eslint-disable-next-line no-new-func
-  new Function('exports', pageJs.slice(start, end)
-    + '\nexports.renderMarkdown = renderMarkdown;')(md);
+  new Function('exports', mdJs + '\nexports.renderMarkdown = renderMarkdown;')(md);
   const sample = [
     '> You want extra cash flow — not a second job and not a crash course in trading.',
     '>',
@@ -506,10 +503,7 @@ if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
     console.error('text after blockquote lost', html);
     process.exit(39);
   }
-}
-
-// Nested lists in library markdown
-{
+  // Nested lists in library markdown (same shared renderer)
   const nested = md.renderMarkdown('- parent\n  - child\n- sibling');
   if (!/<ul><li>parent<ul><li>child<\/li><\/ul><\/li><li>sibling<\/li><\/ul>/.test(nested)) {
     console.error('library nested ul broken', nested);
@@ -519,6 +513,11 @@ if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
   if (!mixed.includes('<ol><li>a<ul><li>b</li></ul></li><li>c</li></ol>')) {
     console.error('library ol>ul nest broken', mixed);
     process.exit(41);
+  }
+  const mixedKids = md.renderMarkdown('- a\n  - b\n  1. c');
+  if (!mixedKids.includes('<ul><li>a<ul><li>b</li></ul><ol><li>c</li></ol></li></ul>')) {
+    console.error('library mixed nested kids broken', mixedKids);
+    process.exit(42);
   }
 }
 
