@@ -884,6 +884,29 @@ button {
 .message p:last-child, .message ul:last-child, .message ol:last-child, .message pre:last-child { margin-bottom: 0; }
 .message h1, .message h2, .message h3, .message h4, .message h5, .message h6 { margin: 0 0 6px; line-height: 1.25; }
 .message ul, .message ol { padding-left: 20px; }
+
+/* Nested markdown lists (console + library) */
+.message-body ul, .message-body ol,
+.message ul, .message ol,
+.library-preview-body ul, .library-preview-body ol {
+  margin: 0 0 8px;
+  padding-left: 1.35em;
+}
+.message-body ul ul, .message-body ul ol, .message-body ol ul, .message-body ol ol,
+.message ul ul, .message ul ol, .message ol ul, .message ol ol,
+.library-preview-body ul ul, .library-preview-body ul ol,
+.library-preview-body ol ul, .library-preview-body ol ol {
+  margin: 4px 0 4px;
+  padding-left: 1.35em;
+}
+.message-body li, .message li, .library-preview-body li {
+  margin: 0.15em 0;
+}
+.message-body li > ul, .message-body li > ol,
+.message li > ul, .message li > ol,
+.library-preview-body li > ul, .library-preview-body li > ol {
+  margin-bottom: 0;
+}
 .message pre {
   background: #0f172a;
   color: #e2e8f0;

@@ -508,6 +508,20 @@ if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
   }
 }
 
+// Nested lists in library markdown
+{
+  const nested = md.renderMarkdown('- parent\n  - child\n- sibling');
+  if (!/<ul><li>parent<ul><li>child<\/li><\/ul><\/li><li>sibling<\/li><\/ul>/.test(nested)) {
+    console.error('library nested ul broken', nested);
+    process.exit(40);
+  }
+  const mixed = md.renderMarkdown('1. a\n   - b\n2. c');
+  if (!mixed.includes('<ol><li>a<ul><li>b</li></ul></li><li>c</li></ol>')) {
+    console.error('library ol>ul nest broken', mixed);
+    process.exit(41);
+  }
+}
+
 fs.rmSync(hub, { recursive: true, force: true });
 console.log('ok');
 NODE

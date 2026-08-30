@@ -2108,6 +2108,24 @@ if (stillCode.includes('<table>') || stillCode.includes('<img ')) {
 if (!stillCode.includes('<code>![x](https://example.com/a.png)</code>')) {
   console.error('inline image syntax inside code span broken:', stillCode); process.exit(12);
 }
+
+// Nested lists (ul/ol, mixed, blank ends list).
+const nestedUl = sandbox.renderMarkdown('- parent\n  - child\n  - child2\n- sibling');
+if (!/<ul><li>parent<ul><li>child<\/li><li>child2<\/li><\/ul><\/li><li>sibling<\/li><\/ul>/.test(nestedUl)) {
+  console.error('nested ul not rendered:', nestedUl); process.exit(13);
+}
+const nestedMixed = sandbox.renderMarkdown('- a\n  1. one\n  2. two\n- b');
+if (!nestedMixed.includes('<ul><li>a<ol><li>one</li><li>two</li></ol></li><li>b</li></ul>')) {
+  console.error('ul>ol nest broken:', nestedMixed); process.exit(14);
+}
+const nestedOlUl = sandbox.renderMarkdown('1. first\n   - nested\n2. second');
+if (!nestedOlUl.includes('<ol><li>first<ul><li>nested</li></ul></li><li>second</li></ol>')) {
+  console.error('ol>ul nest broken:', nestedOlUl); process.exit(15);
+}
+const nestEnds = sandbox.renderMarkdown('- a\n  - b\n\nAfter');
+if (!nestEnds.includes('<p>After</p>') || nestEnds.includes('After</li>')) {
+  console.error('blank should end nested list:', nestEnds); process.exit(16);
+}
 NODE
   then
     fail "renderMarkdown regression: numbers in chat messages render as literal 'undefined'"
