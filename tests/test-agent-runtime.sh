@@ -15,6 +15,12 @@ fi
 
 (cd "$ROOT/agent-runtime" && npm test) || fail "agent-runtime unit tests failed"
 
+# MCP client module present
+[ -f "$ROOT/agent-runtime/src/mcp-client.js" ] || fail "mcp-client.js missing"
+[ -f "$ROOT/agent-runtime/test/mcp-client.test.js" ] || fail "mcp-client.test.js missing"
+grep -q 'settings.mcp' "$ROOT/docs/ARCHITECTURE.md" || fail "ARCHITECTURE missing MCP note"
+grep -q '"mcp"' "$ROOT/registry.example.json" || fail "registry.example.json missing mcp"
+
 out="$("$ROOT/scripts/bizagent-agent" --list-providers)" || fail "--list-providers failed"
 echo "$out" | grep -q '^grok' || fail "providers list missing grok"
 echo "$out" | grep -q '^chatgpt' || fail "providers list missing chatgpt"

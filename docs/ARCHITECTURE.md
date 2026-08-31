@@ -165,6 +165,32 @@ LLM selection is **registry + `cli.json`** (single runtime):
   which LLM endpoint and model to use. `cliName` is a legacy alias for `provider`.
 - UI agent rail shows `provider >> model` (not a CLI binary name).
 
+### MCP client (in-turn tools)
+
+Optional **Model Context Protocol client** in `agent-runtime` (stdio transport
+v1). Same tool set for hub PTL and every product agent — no per-agent
+allowlists in v1.
+
+- **Config:** `registry.json` → `settings.mcp`
+  - `enabled` (bool, **default false** — omit or false = unchanged behavior)
+  - `servers[]`: `name`, `transport` (`stdio` only in v1), `command`, `args`,
+    optional `env` (values are **env-var name refs**, not secrets in git),
+    optional `cwd`
+  - Additive extension points (unused in v1, safe to ignore): `allowlists`,
+    `policy`, `audit`, future remote transports
+- **Runtime:** on each agent launch, connect configured servers, `tools/list`,
+  map each tool into the OpenAI-style function-call loop next to built-ins as
+  `mcp__<server>__<tool>`, forward `tools/call`, tear down on process exit.
+  Control plane sets `BIZAGENT_HUB` so the runtime finds the hub registry from
+  any cwd (hub runtime-cwd or product repo).
+- **Safety:** per-server soft-fail (log + skip); connect/call timeouts so a hung
+  server cannot wedge a turn; logs tool **names** only (not argument payloads).
+- **Not the agent bus.** MCP is in-turn capability only. Multi-agent work still
+  uses filesystem mail + hub mediation. Do not invent agent-to-agent MCP.
+- **Free vs enterprise:** OSS = runtime + BYO servers. Enterprise later can add
+  vault, org policy, curated connectors, and audit on the same config shape
+  without rewriting the client.
+
 ## Messaging
 
 Plain markdown files moved between directories — no database, no broker. Each

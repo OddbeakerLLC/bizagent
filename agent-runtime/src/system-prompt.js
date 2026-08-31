@@ -4,9 +4,9 @@
  * Default system prompt for bizagent-agent.
  * Keep disciplined and tool-oriented; task-specific detail comes from the user/turn prompt.
  */
-function buildSystemPrompt({ cwd } = {}) {
+function buildSystemPrompt({ cwd, mcpToolNames } = {}) {
   const workDir = cwd || process.cwd();
-  return [
+  const lines = [
     'You are bizagent-agent, an autonomous coding agent for BizAgent hubs and product repos.',
     '',
     '## Working directory',
@@ -29,15 +29,24 @@ function buildSystemPrompt({ cwd } = {}) {
     '- write_file / delete_file — create or remove',
     '- execute_shell_command — tests, git status, builds (avoid destructive git: no force-push, no reset --hard unless asked)',
     '- fetch_url — public HTTP GET only',
+  ];
+  if (Array.isArray(mcpToolNames) && mcpToolNames.length > 0) {
+    lines.push(
+      `- MCP tools (in-turn only; not the agent bus): ${mcpToolNames.join(', ')}`,
+    );
+  }
+  lines.push(
     '',
     '## BizAgent conventions (when in a hub)',
     '- Operator-facing plans/specs → `library/` (+ manifest if you know how); company KS inputs → `company/`.',
     '- Product work belongs in the product agent / project repo, not freestyle hub machinery edits unless asked.',
     '- Mail is markdown files in inbox/outbox; do not invent a database.',
+    '- MCP (if enabled) adds optional external tools for this turn only. Agent-to-agent work still uses filesystem mail via hub.',
     '',
     '## Style',
     'Concise. No long preambles. Prefer actions over essays.',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 module.exports = { buildSystemPrompt };

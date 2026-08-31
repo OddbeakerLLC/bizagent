@@ -32,6 +32,20 @@
       "seats_max": 25,
       "enterprise_api_min": 1
     },
+    "mcp": {
+      "_comment": "MCP client (in-turn tools only; not the agent bus). Free/open: runtime + BYO stdio servers. Default enabled=false → behavior unchanged. env values are env-var *refs* (names), not secrets. Future additive keys (allowlists, policy, audit, remote transports) layer on without breaking v1.",
+      "enabled": false,
+      "servers": [
+        {
+          "name": "example",
+          "transport": "stdio",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+          "env": {},
+          "cwd": ""
+        }
+      ]
+    },
     "hub_agent": {
       "_comment": "Hub PTL launch settings. provider is an LLM key in cli.json (grok, openai, venice, openrouter…). Runtime is always bizagent-agent. cliName is a legacy alias for provider.",
       "prompt": "You are the hub PTL agent. Read inbox/*.md for incoming messages, process each one, then archive it. After processing all messages, send a single PushNotification with status=proactive summarizing what arrived and what you did.",

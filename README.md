@@ -358,6 +358,36 @@ Multiple BizAgent hubs can run on one machine. Set
 
 `poll_seconds` (1–30) controls how often the control plane wakes. Separate hub/agent slot pools keep operator turns responsive even under heavy fan-out. Archive pruning removes old `*/archive/` mail automatically on the nightly (or on demand).
 
+### MCP client (optional BYO tools)
+
+Agents can call **Model Context Protocol** tools in-turn (stdio servers). This is
+**not** the multi-agent bus — mail + hub mediation stay how agents talk.
+
+Default off (`settings.mcp.enabled` false or omitted). Enable and add a server:
+
+```json
+"settings": {
+  "mcp": {
+    "enabled": true,
+    "servers": [
+      {
+        "name": "files",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/you/allow"],
+        "env": { "SOME_TOKEN": "MY_TOKEN_ENV_VAR" }
+      }
+    ]
+  }
+}
+```
+
+`env` values are **names of env vars** (usually from `.bizagent/env`), not secret
+literals. Same servers are available to hub PTL and every product agent. Failed
+servers soft-fail; built-in tools still run. Free/open = runtime + BYO servers;
+enterprise later can layer vault/policy/audit on the same config. Details:
+`docs/ARCHITECTURE.md` (MCP client).
+
 ### Upgrading the hub framework
 
 Live hubs are **ops clones** (private remote, local `registry.json` / agents / mail).
