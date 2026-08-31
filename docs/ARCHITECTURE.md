@@ -167,29 +167,69 @@ LLM selection is **registry + `cli.json`** (single runtime):
 
 ### MCP client (in-turn tools)
 
-Optional **Model Context Protocol client** in `agent-runtime` (stdio transport
-v1). Same tool set for hub PTL and every product agent — no per-agent
-allowlists in v1.
+Optional **Model Context Protocol client** in `agent-runtime`. Same tool set
+for hub PTL and every product agent — no per-agent allowlists in this slice.
 
 - **Config:** `registry.json` → `settings.mcp`
   - `enabled` (bool, **default false** — omit or false = unchanged behavior)
-  - `servers[]`: `name`, `transport` (`stdio` only in v1), `command`, `args`,
-    optional `env` (values are **env-var name refs**, not secrets in git),
-    optional `cwd`
-  - Additive extension points (unused in v1, safe to ignore): `allowlists`,
-    `policy`, `audit`, future remote transports
+  - `servers[]` fields:
+    - `name` (required)
+    - `transport`: `stdio` | `http` (Streamable HTTP; alias `streamable-http`)
+      | `sse` (legacy HTTP+SSE from protocol 2024-11-05)
+    - **stdio:** `command`, `args`, optional `env` (values are **env-var name
+      refs**, not secrets in git), optional `cwd`
+    - **http / sse:** `url` (required), optional `headers` whose values are
+      **env-var name refs** (e.g. `"Authorization": "MCP_REMOTE_TOKEN"` →
+      resolve `process.env.MCP_REMOTE_TOKEN`; put the full header value there,
+      including any `Bearer ` prefix)
+  - Additive extension points (safe to ignore): `allowlists`, `policy`, `audit`
 - **Runtime:** on each agent launch, connect configured servers, `tools/list`,
   map each tool into the OpenAI-style function-call loop next to built-ins as
   `mcp__<server>__<tool>`, forward `tools/call`, tear down on process exit.
   Control plane sets `BIZAGENT_HUB` so the runtime finds the hub registry from
   any cwd (hub runtime-cwd or product repo).
+- **Remote transports:** prefer Streamable HTTP (`transport: http`) — POST
+  JSON-RPC to the MCP endpoint; accept `application/json` or SSE response
+  bodies; honor `Mcp-Session-Id` when the server issues one. Legacy `sse`
+  opens a GET SSE stream, reads the `endpoint` event, and POSTs messages
+  there. TLS certificate verification is **on** by default
+  (`BIZAGENT_MCP_TLS_INSECURE=1` only if you must disable it).
 - **Safety:** per-server soft-fail (log + skip); connect/call timeouts so a hung
-  server cannot wedge a turn; logs tool **names** only (not argument payloads).
+  server cannot wedge a turn; logs tool **names** only (not argument payloads
+  or secret header values).
 - **Not the agent bus.** MCP is in-turn capability only. Multi-agent work still
   uses filesystem mail + hub mediation. Do not invent agent-to-agent MCP.
-- **Free vs enterprise:** OSS = runtime + BYO servers. Enterprise later can add
-  vault, org policy, curated connectors, and audit on the same config shape
-  without rewriting the client.
+- **Free vs enterprise:** OSS = runtime + BYO servers (local stdio or remote
+  URL). Enterprise later can add vault, org policy, curated connectors, and
+  audit on the same config shape without rewriting the client.
+
+#### Enable a remote MCP server (operator snippet)
+
+```json
+"mcp": {
+  "enabled": true,
+  "servers": [
+    {
+      "name": "remote_tools",
+      "transport": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "MCP_REMOTE_TOKEN"
+      }
+    }
+  ]
+}
+```
+
+In `~/.bizagent/env` (or the process environment):
+
+```bash
+MCP_REMOTE_TOKEN="Bearer sk-your-token"
+```
+
+Stdio example remains valid alongside remote entries in the same `servers[]`
+list. Missing/unreachable remotes soft-fail; other servers and built-in tools
+still run.
 
 ## Messaging
 

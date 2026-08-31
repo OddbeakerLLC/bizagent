@@ -33,16 +33,25 @@
       "enterprise_api_min": 1
     },
     "mcp": {
-      "_comment": "MCP client (in-turn tools only; not the agent bus). Free/open: runtime + BYO stdio servers. Default enabled=false → behavior unchanged. env values are env-var *refs* (names), not secrets. Future additive keys (allowlists, policy, audit, remote transports) layer on without breaking v1.",
+      "_comment": "MCP client (in-turn tools only; not the agent bus). Free/open: runtime + BYO servers. Default enabled=false → behavior unchanged. transport: stdio | http (Streamable HTTP) | sse (legacy). env/headers values are env-var *refs* (names), not secrets in git. Additive keys (allowlists, policy, audit) layer on later.",
       "enabled": false,
       "servers": [
         {
-          "name": "example",
+          "name": "example_stdio",
           "transport": "stdio",
           "command": "npx",
           "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
           "env": {},
           "cwd": ""
+        },
+        {
+          "name": "example_remote",
+          "transport": "http",
+          "url": "https://mcp.example.com/mcp",
+          "headers": {
+            "Authorization": "MCP_REMOTE_TOKEN"
+          },
+          "_headers_comment": "Header values are env-var *names*. Set MCP_REMOTE_TOKEN='Bearer …' in ~/.bizagent/env (full header value, including Bearer prefix)."
         }
       ]
     },

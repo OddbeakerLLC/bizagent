@@ -1,22 +1,29 @@
 'use strict';
 
 /**
- * MCP client (stdio transport, v1).
+ * MCP client (stdio + remote HTTP transports).
  *
  * Free/open base: runtime + BYO servers from registry settings.mcp.
  * Soft-fails per server so missing/hung MCP never blocks built-in tools.
  *
- * Extension points (additive, unused in v1):
+ * Transports:
+ *   stdio              — local subprocess (newline-delimited JSON-RPC)
+ *   http | streamable-http — MCP Streamable HTTP (POST JSON or SSE response)
+ *   sse                — legacy HTTP+SSE (2024-11-05): GET SSE + POST messages
+ *
+ * Extension points (additive):
  *   settings.mcp.allowlists / policy / audit — enterprise layering later
- *   settings.mcp.servers[].transport — only "stdio" in v1 (sse/http later)
  *
  * MCP is in-turn capability only. Filesystem mail remains the agent bus.
  */
 
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
+const https = require('https');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
+const { URL } = require('url');
 
 const DEFAULT_PROTOCOL = '2024-11-05';
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
@@ -90,6 +97,27 @@ function resolveServerEnv(envRefs) {
   return out;
 }
 
+/**
+ * headers map: header name → env-var *ref* (name), not secret literal.
+ * { "Authorization": "MCP_REMOTE_TOKEN" } with process.env.MCP_REMOTE_TOKEN
+ * set to "Bearer sk-…" → Authorization: Bearer sk-…
+ * Never logs resolved values.
+ */
+function resolveHeaderRefs(headerRefs) {
+  const out = {};
+  if (!headerRefs || typeof headerRefs !== 'object') return out;
+  for (const [headerName, ref] of Object.entries(headerRefs)) {
+    if (!headerName || typeof ref !== 'string' || !ref.trim()) continue;
+    const val = process.env[ref.trim()];
+    if (val === undefined || val === '') {
+      logWarn(`header ref ${headerName}←${ref} is unset; omitting`);
+      continue;
+    }
+    out[headerName] = val;
+  }
+  return out;
+}
+
 function sanitizeServerName(name) {
   const s = String(name || 'server')
     .trim()
@@ -114,6 +142,152 @@ function parseMcpToolName(full) {
   }
   if (m) return { server: m[1], tool: m[2] };
   return null;
+}
+
+function normalizeTransport(raw) {
+  const t = String(raw || 'stdio').toLowerCase().trim();
+  if (t === 'streamable-http' || t === 'streamable_http' || t === 'http') return 'http';
+  if (t === 'sse' || t === 'http+sse' || t === 'http-sse') return 'sse';
+  if (t === 'stdio') return 'stdio';
+  return t;
+}
+
+function tlsRejectUnauthorized() {
+  // TLS verify on by default. Only disable when explicitly set.
+  const v = process.env.BIZAGENT_MCP_TLS_INSECURE;
+  if (v === '1' || v === 'true' || v === 'yes') return false;
+  return true;
+}
+
+/**
+ * Low-level HTTP(S) request. Never logs header values.
+ * @returns {Promise<{ status: number, headers: object, body: Buffer }>}
+ */
+function httpRequest(urlStr, { method, headers, body, timeoutMs, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(urlStr);
+    } catch (err) {
+      reject(new Error(`invalid URL: ${urlStr}`));
+      return;
+    }
+    const isHttps = parsed.protocol === 'https:';
+    const lib = isHttps ? https : http;
+    const opts = {
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: `${parsed.pathname}${parsed.search}`,
+      method: method || 'GET',
+      headers: headers || {},
+      rejectUnauthorized: tlsRejectUnauthorized(),
+    };
+    const req = lib.request(opts, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode || 0,
+          headers: res.headers || {},
+          body: Buffer.concat(chunks),
+        });
+      });
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    const t = timeoutMs || DEFAULT_CALL_TIMEOUT_MS;
+    req.setTimeout(t, () => {
+      req.destroy(new Error(`HTTP ${method || 'GET'} timeout after ${t}ms`));
+    });
+    if (signal) {
+      if (signal.aborted) {
+        req.destroy(new Error('aborted'));
+        return;
+      }
+      const onAbort = () => req.destroy(new Error('aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+      req.on('close', () => signal.removeEventListener('abort', onAbort));
+    }
+    if (body != null) {
+      req.write(body);
+    }
+    req.end();
+  });
+}
+
+/**
+ * Parse SSE text into events: { event, data, id }[].
+ * Concatenates multi-line data fields with \n per SSE spec.
+ */
+function parseSseEvents(text) {
+  const events = [];
+  const blocks = String(text || '').split(/\r?\n\r?\n/);
+  for (const block of blocks) {
+    if (!block.trim()) continue;
+    let event = 'message';
+    let id = null;
+    const dataLines = [];
+    for (const rawLine of block.split(/\r?\n/)) {
+      const line = rawLine;
+      if (!line || line.startsWith(':')) continue;
+      if (line.startsWith('event:')) {
+        event = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).replace(/^ /, ''));
+      } else if (line.startsWith('id:')) {
+        id = line.slice(3).trim();
+      }
+    }
+    if (dataLines.length === 0) continue;
+    events.push({ event, data: dataLines.join('\n'), id });
+  }
+  return events;
+}
+
+/**
+ * Extract JSON-RPC response matching `id` from a Streamable HTTP body
+ * (application/json or text/event-stream).
+ */
+function extractJsonRpcResult(bodyBuf, contentType, expectId) {
+  const ct = String(contentType || '').toLowerCase();
+  const text = bodyBuf.toString('utf8');
+  if (ct.includes('text/event-stream')) {
+    const events = parseSseEvents(text);
+    for (const ev of events) {
+      let msg;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch (_e) {
+        continue;
+      }
+      if (Array.isArray(msg)) {
+        for (const m of msg) {
+          if (m && m.id === expectId && (m.result !== undefined || m.error !== undefined)) {
+            return m;
+          }
+        }
+      } else if (msg && msg.id === expectId && (msg.result !== undefined || msg.error !== undefined)) {
+        return msg;
+      }
+    }
+    throw new Error('SSE stream ended without matching JSON-RPC response');
+  }
+  // application/json (or unspecified)
+  let msg;
+  try {
+    msg = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`invalid JSON response: ${err.message}`);
+  }
+  if (Array.isArray(msg)) {
+    const hit = msg.find(
+      (m) => m && m.id === expectId && (m.result !== undefined || m.error !== undefined),
+    );
+    if (!hit) throw new Error('batch response missing matching id');
+    return hit;
+  }
+  return msg;
 }
 
 class StdioJsonRpc extends EventEmitter {
@@ -310,6 +484,365 @@ class StdioJsonRpc extends EventEmitter {
   }
 }
 
+/**
+ * Streamable HTTP transport (MCP 2025-03-26+).
+ * Each JSON-RPC request/notification is a POST to the MCP endpoint.
+ * Responses may be application/json or text/event-stream.
+ * Captures Mcp-Session-Id when the server issues one.
+ */
+class HttpJsonRpc extends EventEmitter {
+  constructor({ url, headers, name, connectTimeoutMs }) {
+    super();
+    this.name = name;
+    this.url = url;
+    this.headers = headers || {};
+    this.connectTimeoutMs = connectTimeoutMs || DEFAULT_CONNECT_TIMEOUT_MS;
+    this._nextId = 1;
+    this._closed = false;
+    this._sessionId = null;
+    this._started = false;
+  }
+
+  async start() {
+    if (this._started) return;
+    // Connectivity is proven on first initialize request; nothing to open.
+    this._started = true;
+  }
+
+  _baseHeaders(extra) {
+    const h = {
+      Accept: 'application/json, text/event-stream',
+      'Content-Type': 'application/json',
+      ...this.headers,
+      ...extra,
+    };
+    if (this._sessionId) {
+      h['Mcp-Session-Id'] = this._sessionId;
+    }
+    return h;
+  }
+
+  async request(method, params, timeoutMs) {
+    if (this._closed) {
+      return Promise.reject(new Error(`MCP server "${this.name}" is not connected`));
+    }
+    const id = this._nextId++;
+    const payload = {
+      jsonrpc: '2.0',
+      id,
+      method,
+      params: params === undefined ? {} : params,
+    };
+    const t = timeoutMs || DEFAULT_CALL_TIMEOUT_MS;
+    const res = await httpRequest(this.url, {
+      method: 'POST',
+      headers: this._baseHeaders(),
+      body: JSON.stringify(payload),
+      timeoutMs: t,
+    });
+    const sid = res.headers['mcp-session-id'];
+    if (sid) this._sessionId = Array.isArray(sid) ? sid[0] : sid;
+
+    if (res.status === 404 && this._sessionId) {
+      // Session expired — clear and surface so caller can soft-fail/reconnect later
+      this._sessionId = null;
+      throw new Error(`MCP session expired (HTTP 404) on ${method}`);
+    }
+    if (res.status < 200 || res.status >= 300) {
+      const snippet = res.body.toString('utf8').slice(0, 200);
+      throw new Error(`MCP HTTP ${res.status} on ${method}: ${snippet}`);
+    }
+
+    const msg = extractJsonRpcResult(res.body, res.headers['content-type'], id);
+    if (msg.error) {
+      const e = new Error(msg.error.message || JSON.stringify(msg.error));
+      e.code = msg.error.code;
+      e.data = msg.error.data;
+      throw e;
+    }
+    return msg.result;
+  }
+
+  async notify(method, params) {
+    if (this._closed) return;
+    const payload = {
+      jsonrpc: '2.0',
+      method,
+      params: params === undefined ? {} : params,
+    };
+    try {
+      const res = await httpRequest(this.url, {
+        method: 'POST',
+        headers: this._baseHeaders(),
+        body: JSON.stringify(payload),
+        timeoutMs: this.connectTimeoutMs,
+      });
+      // 202 Accepted is normal for notifications; also tolerate 2xx JSON
+      if (res.status === 202) return;
+      if (res.status < 200 || res.status >= 300) {
+        logWarn(`${this.name}: notify ${method} HTTP ${res.status}`);
+      }
+    } catch (err) {
+      logWarn(`${this.name}: notify ${method} failed: ${err.message || err}`);
+    }
+  }
+
+  async close() {
+    if (this._closed) return;
+    this._closed = true;
+    if (this._sessionId) {
+      try {
+        await httpRequest(this.url, {
+          method: 'DELETE',
+          headers: this._baseHeaders({ Accept: 'application/json' }),
+          timeoutMs: 5000,
+        });
+      } catch (_e) {
+        /* ignore — server may not support session DELETE */
+      }
+      this._sessionId = null;
+    }
+    this.emit('close', {});
+  }
+}
+
+/**
+ * Legacy HTTP+SSE transport (MCP 2024-11-05).
+ * GET opens SSE; first `endpoint` event gives the POST URL for messages.
+ * Server replies arrive as SSE `message` events.
+ */
+class SseJsonRpc extends EventEmitter {
+  constructor({ url, headers, name, connectTimeoutMs }) {
+    super();
+    this.name = name;
+    this.url = url;
+    this.headers = headers || {};
+    this.connectTimeoutMs = connectTimeoutMs || DEFAULT_CONNECT_TIMEOUT_MS;
+    this._nextId = 1;
+    this._pending = new Map();
+    this._closed = false;
+    this._messageUrl = null;
+    this._req = null;
+    this._res = null;
+    this._buf = '';
+  }
+
+  start() {
+    if (this._messageUrl) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      };
+      const ok = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+
+      let parsed;
+      try {
+        parsed = new URL(this.url);
+      } catch (err) {
+        fail(new Error(`invalid URL: ${this.url}`));
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        fail(new Error(`SSE connect timeout after ${this.connectTimeoutMs}ms`));
+        this.close().catch(() => {});
+      }, this.connectTimeoutMs);
+
+      const isHttps = parsed.protocol === 'https:';
+      const lib = isHttps ? https : http;
+      const opts = {
+        protocol: parsed.protocol,
+        hostname: parsed.hostname,
+        port: parsed.port || (isHttps ? 443 : 80),
+        path: `${parsed.pathname}${parsed.search}`,
+        method: 'GET',
+        headers: {
+          Accept: 'text/event-stream',
+          ...this.headers,
+        },
+        rejectUnauthorized: tlsRejectUnauthorized(),
+      };
+
+      const req = lib.request(opts, (res) => {
+        this._res = res;
+        if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+          fail(new Error(`SSE GET HTTP ${res.statusCode}`));
+          res.resume();
+          return;
+        }
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => this._onSseData(chunk, ok, fail));
+        res.on('end', () => {
+          this._closed = true;
+          const err = new Error(`MCP SSE server "${this.name}" stream ended`);
+          for (const [, p] of this._pending) {
+            clearTimeout(p.timer);
+            p.reject(err);
+          }
+          this._pending.clear();
+          this.emit('close', {});
+          if (!settled) fail(err);
+        });
+        res.on('error', (err) => {
+          if (!settled) fail(err);
+        });
+      });
+      this._req = req;
+      req.on('error', (err) => fail(err));
+      req.setTimeout(this.connectTimeoutMs, () => {
+        /* connect timer above handles overall; idle is fine after start */
+      });
+      req.end();
+    });
+  }
+
+  _onSseData(chunk, onReady, onFail) {
+    this._buf += chunk;
+    let sep;
+    while ((sep = this._buf.search(/\r?\n\r?\n/)) !== -1) {
+      const block = this._buf.slice(0, sep);
+      const match = this._buf.slice(sep).match(/^\r?\n\r?\n/);
+      this._buf = this._buf.slice(sep + (match ? match[0].length : 2));
+      if (!block.trim()) continue;
+      const events = parseSseEvents(`${block}\n\n`);
+      for (const ev of events) {
+        if (ev.event === 'endpoint') {
+          try {
+            this._messageUrl = new URL(ev.data.trim(), this.url).toString();
+            if (onReady) onReady();
+          } catch (err) {
+            if (onFail) onFail(err);
+          }
+          continue;
+        }
+        // message (default) or explicit message event
+        let msg;
+        try {
+          msg = JSON.parse(ev.data);
+        } catch (_e) {
+          logWarn(`${this.name}: non-JSON SSE data ignored`);
+          continue;
+        }
+        this._handleMessage(msg);
+      }
+    }
+  }
+
+  _handleMessage(msg) {
+    if (msg && msg.id != null && (msg.result !== undefined || msg.error !== undefined)) {
+      const pending = this._pending.get(msg.id);
+      if (!pending) return;
+      this._pending.delete(msg.id);
+      clearTimeout(pending.timer);
+      if (msg.error) {
+        const e = new Error(msg.error.message || JSON.stringify(msg.error));
+        e.code = msg.error.code;
+        e.data = msg.error.data;
+        pending.reject(e);
+      } else {
+        pending.resolve(msg.result);
+      }
+    }
+  }
+
+  request(method, params, timeoutMs) {
+    if (this._closed || !this._messageUrl) {
+      return Promise.reject(new Error(`MCP server "${this.name}" is not connected`));
+    }
+    const id = this._nextId++;
+    const payload = {
+      jsonrpc: '2.0',
+      id,
+      method,
+      params: params === undefined ? {} : params,
+    };
+    const t = timeoutMs || DEFAULT_CALL_TIMEOUT_MS;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._pending.delete(id);
+        reject(new Error(`MCP ${method} timeout after ${t}ms (server=${this.name})`));
+      }, t);
+      this._pending.set(id, { resolve, reject, timer });
+      httpRequest(this._messageUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...this.headers,
+        },
+        body: JSON.stringify(payload),
+        timeoutMs: t,
+      })
+        .then((res) => {
+          if (res.status < 200 || res.status >= 300) {
+            clearTimeout(timer);
+            this._pending.delete(id);
+            reject(new Error(`MCP SSE POST HTTP ${res.status} on ${method}`));
+          }
+          // Result arrives via SSE message event
+        })
+        .catch((err) => {
+          clearTimeout(timer);
+          this._pending.delete(id);
+          reject(err);
+        });
+    });
+  }
+
+  notify(method, params) {
+    if (this._closed || !this._messageUrl) return;
+    const payload = {
+      jsonrpc: '2.0',
+      method,
+      params: params === undefined ? {} : params,
+    };
+    httpRequest(this._messageUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        ...this.headers,
+      },
+      body: JSON.stringify(payload),
+      timeoutMs: this.connectTimeoutMs,
+    }).catch((err) => {
+      logWarn(`${this.name}: notify ${method} failed: ${err.message || err}`);
+    });
+  }
+
+  async close() {
+    this._closed = true;
+    for (const [, p] of this._pending) {
+      clearTimeout(p.timer);
+      p.reject(new Error(`MCP server "${this.name}" closed`));
+    }
+    this._pending.clear();
+    try {
+      if (this._req) this._req.destroy();
+    } catch (_e) {
+      /* ignore */
+    }
+    try {
+      if (this._res) this._res.destroy();
+    } catch (_e) {
+      /* ignore */
+    }
+    this._req = null;
+    this._res = null;
+    this._messageUrl = null;
+    this.emit('close', {});
+  }
+}
+
 class McpSession {
   constructor() {
     this.servers = new Map(); // name → { rpc, tools: Map(toolName → def) }
@@ -362,19 +895,7 @@ class McpSession {
       logWarn(`duplicate server name "${name}"; skipping`);
       return;
     }
-    const transport = (raw.transport || 'stdio').toLowerCase();
-    if (transport !== 'stdio') {
-      logWarn(`server "${name}": transport "${transport}" not supported in v1 (stdio only); skip`);
-      return;
-    }
-    const command = raw.command && String(raw.command).trim();
-    if (!command) {
-      logWarn(`server "${name}": missing command; skip`);
-      return;
-    }
-    const args = Array.isArray(raw.args) ? raw.args.map(String) : [];
-    const cwd = raw.cwd ? path.resolve(this.hubRoot, raw.cwd) : undefined;
-    const env = resolveServerEnv(raw.env);
+    const transport = normalizeTransport(raw.transport || 'stdio');
     const connectTimeoutMs =
       Number(options.connectTimeoutMs) ||
       Number(process.env.BIZAGENT_MCP_CONNECT_TIMEOUT_MS) ||
@@ -384,16 +905,53 @@ class McpSession {
       Number(process.env.BIZAGENT_MCP_LIST_TIMEOUT_MS) ||
       DEFAULT_LIST_TIMEOUT_MS;
 
-    const rpc = new StdioJsonRpc({
-      name,
-      command,
-      args,
-      env,
-      cwd,
-      connectTimeoutMs,
-    });
-
+    let rpc;
     try {
+      if (transport === 'stdio') {
+        const command = raw.command && String(raw.command).trim();
+        if (!command) {
+          logWarn(`server "${name}": missing command; skip`);
+          return;
+        }
+        const args = Array.isArray(raw.args) ? raw.args.map(String) : [];
+        const cwd = raw.cwd ? path.resolve(this.hubRoot, raw.cwd) : undefined;
+        const env = resolveServerEnv(raw.env);
+        rpc = new StdioJsonRpc({
+          name,
+          command,
+          args,
+          env,
+          cwd,
+          connectTimeoutMs,
+        });
+      } else if (transport === 'http' || transport === 'sse') {
+        const url = raw.url && String(raw.url).trim();
+        if (!url) {
+          logWarn(`server "${name}": missing url for transport ${transport}; skip`);
+          return;
+        }
+        let parsed;
+        try {
+          parsed = new URL(url);
+        } catch (_e) {
+          logWarn(`server "${name}": invalid url; skip`);
+          return;
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          logWarn(`server "${name}": url must be http(s); skip`);
+          return;
+        }
+        const headers = resolveHeaderRefs(raw.headers);
+        if (transport === 'http') {
+          rpc = new HttpJsonRpc({ name, url, headers, connectTimeoutMs });
+        } else {
+          rpc = new SseJsonRpc({ name, url, headers, connectTimeoutMs });
+        }
+      } else {
+        logWarn(`server "${name}": transport "${raw.transport}" not supported; skip`);
+        return;
+      }
+
       await rpc.start();
       await rpc.request(
         'initialize',
@@ -404,7 +962,8 @@ class McpSession {
         },
         connectTimeoutMs,
       );
-      rpc.notify('notifications/initialized', {});
+      // notify may be sync (stdio) or async (http)
+      await Promise.resolve(rpc.notify('notifications/initialized', {}));
       const listed = await rpc.request('tools/list', {}, listTimeoutMs);
       const tools = Array.isArray(listed && listed.tools) ? listed.tools : [];
       const toolMap = new Map();
@@ -426,18 +985,20 @@ class McpSession {
           },
         });
       }
-      this.servers.set(name, { rpc, tools: toolMap, raw });
+      this.servers.set(name, { rpc, tools: toolMap, raw, transport });
       logInfo(
-        `server "${name}" connected (${tools.length} tool(s): ${tools
+        `server "${name}" connected via ${transport} (${tools.length} tool(s): ${tools
           .map((t) => t.name)
           .join(', ') || 'none'})`,
       );
     } catch (err) {
       logWarn(`server "${name}" soft-fail: ${err.message || err}`);
-      try {
-        await rpc.close();
-      } catch (_e) {
-        /* ignore */
+      if (rpc) {
+        try {
+          await rpc.close();
+        } catch (_e) {
+          /* ignore */
+        }
       }
     }
   }
@@ -564,11 +1125,15 @@ async function stopMcp() {
 module.exports = {
   McpSession,
   StdioJsonRpc,
+  HttpJsonRpc,
+  SseJsonRpc,
   loadMcpConfig,
   resolveHubRoot,
   resolveServerEnv,
+  resolveHeaderRefs,
   mcpToolName,
   parseMcpToolName,
+  normalizeTransport,
   startMcpFromHub,
   getMcpSession,
   stopMcp,
