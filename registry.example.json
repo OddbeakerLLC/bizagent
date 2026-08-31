@@ -33,17 +33,9 @@
       "enterprise_api_min": 1
     },
     "mcp": {
-      "_comment": "MCP client (in-turn tools only; not the agent bus). Free/open: runtime + BYO servers. Default enabled=false → behavior unchanged. transport: stdio | http (Streamable HTTP) | sse (legacy). env/headers values are env-var *refs* (names), not secrets in git. Additive keys (allowlists, policy, audit) layer on later.",
+      "_comment": "MCP client (in-turn tools only; not the agent bus). Default enabled=false → behavior unchanged. Remote: transport http (Streamable HTTP) or sse (legacy); url required; headers values are env-var *refs* (names), not secrets in git. Additive keys (allowlists, policy, audit) layer on later.",
       "enabled": false,
       "servers": [
-        {
-          "name": "example_stdio",
-          "transport": "stdio",
-          "command": "npx",
-          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-          "env": {},
-          "cwd": ""
-        },
         {
           "name": "example_remote",
           "transport": "http",
