@@ -2,40 +2,8 @@
 
 OpenAI-compatible tool-calling agent runtime for BizAgent.
 
-Local tools (list/glob/grep/read/edit/shell/fetch) + multi-provider HTTP backend
-+ optional **MCP client** (remote servers from hub `registry.json` `settings.mcp`,
-Streamable HTTP or legacy SSE). MCP tools appear as `mcp__<server>__<tool>`
-beside built-ins; missing/hung servers soft-fail. Remote `headers` values are
-env-var **refs** (not secrets in git). TLS verify on by default. MCP ≠ agent bus
-(mail still mediates agents).
+Local tools (list/glob/grep/read/edit/shell/fetch) + multi-provider HTTP backend.
 Defaults: temperature `0.2`, up to `100` tool iterations (`BIZAGENT_AGENT_MAX_ITERATIONS`).
-Hub launches set `BIZAGENT_HUB` so MCP config resolves from any cwd.
-
-### MCP remote example
-
-```json
-"settings": {
-  "mcp": {
-    "enabled": true,
-    "servers": [
-      {
-        "name": "remote_tools",
-        "transport": "http",
-        "url": "https://mcp.example.com/mcp",
-        "headers": { "Authorization": "MCP_REMOTE_TOKEN" }
-      }
-    ]
-  }
-}
-```
-
-```bash
-# ~/.bizagent/env — full header value via env ref name above
-MCP_REMOTE_TOKEN="Bearer sk-your-token"
-```
-
-Prefer `transport: "http"` (Streamable HTTP). Use `"sse"` only for legacy
-HTTP+SSE endpoints.
 
 ## Providers
 
