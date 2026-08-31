@@ -20,6 +20,11 @@ fi
 [ -f "$ROOT/agent-runtime/test/mcp-client.test.js" ] || fail "mcp-client.test.js missing"
 grep -q 'settings.mcp' "$ROOT/docs/ARCHITECTURE.md" || fail "ARCHITECTURE missing MCP note"
 grep -q '"mcp"' "$ROOT/registry.example.json" || fail "registry.example.json missing mcp"
+# MCP paste-in onboarding helper
+[ -f "$ROOT/scripts/mcp-onboard.js" ] || fail "scripts/mcp-onboard.js missing"
+[ -f "$ROOT/docs/MCP-ONBOARD.md" ] || fail "docs/MCP-ONBOARD.md missing"
+grep -q 'mcp-onboard' "$ROOT/docs/ARCHITECTURE.md" || fail "ARCHITECTURE missing mcp-onboard note"
+(cd "$ROOT" && node --test scripts/mcp-onboard.test.js) || fail "mcp-onboard unit tests failed"
 
 out="$("$ROOT/scripts/bizagent-agent" --list-providers)" || fail "--list-providers failed"
 echo "$out" | grep -q '^grok' || fail "providers list missing grok"

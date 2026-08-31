@@ -33,7 +33,7 @@
       "enterprise_api_min": 1
     },
     "mcp": {
-      "_comment": "MCP client (in-turn tools only; not the agent bus). Default enabled=false → behavior unchanged. Remote: transport http (Streamable HTTP) or sse (legacy); url required; headers values are env-var *refs* (names), not secrets in git. Additive keys (allowlists, policy, audit) layer on later.",
+      "_comment": "MCP client (in-turn tools only; not the agent bus). Default enabled=false. Prefer paste-in via scripts/mcp-onboard.js (docs/MCP-ONBOARD.md) — operators should not hand-edit this block or .bizagent/env. Remote: transport http|sse; headers values are env-var *refs*, not secret literals. Additive keys (allowlists, policy, audit) layer on later.",
       "enabled": false,
       "servers": [
         {
@@ -41,9 +41,9 @@
           "transport": "http",
           "url": "https://mcp.example.com/mcp",
           "headers": {
-            "Authorization": "MCP_REMOTE_TOKEN"
+            "Authorization": "MCP_EXAMPLE_REMOTE_TOKEN"
           },
-          "_headers_comment": "Header values are env-var *names*. Set MCP_REMOTE_TOKEN='Bearer …' in ~/.bizagent/env (full header value, including Bearer prefix)."
+          "_headers_comment": "Header values are env-var *names* written by mcp-onboard into hub/.bizagent/env (full header value, including Bearer prefix)."
         }
       ]
     },
