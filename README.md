@@ -233,36 +233,6 @@ your `registry.json`).
 
 ---
 
-## Bring your own LLM — including local models
-
-BizAgent uses one runtime (**bizagent-agent**) and an OpenAI-compatible HTTP API
-per provider. Configure providers in `cli.json` (`baseURL`, `keyEnv`, `models`);
-pick **provider + model** per hub/product in the UI or `registry.json`
-(`settings.hub_agent.provider` / `model`).
-
-Create an API key in the provider’s console, then put it in `.bizagent/env`
-under the env name below (installer can prompt for this).
-
-| Provider key | Label | Key env (`.bizagent/env`) | Get API key |
-|--------------|--------|---------------------------|-------------|
-| `grok` | Grok (xAI) | `XAI_API_KEY` | [console.x.ai](https://console.x.ai/) |
-| `chatgpt` | ChatGPT | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) |
-| `claude` | Claude | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
-| `gemini` | Gemini | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com/apikey) |
-| `venice` | Venice | `VENICE_API_KEY` | [venice.ai](https://venice.ai/settings/api) |
-| `ollama` | Ollama (local) | optional | local — [ollama.com](https://ollama.com/); no cloud key |
-
-```sh
-# Local models via Ollama's OpenAI-compatible endpoint
-# cli.json already has an ollama provider; set hub_agent.provider to "ollama"
-ollama serve   # default http://127.0.0.1:11434/v1
-```
-
-Nightly/weekly cron call `scripts/run-agent.sh`, which launches the same runtime
-with keys from `.bizagent/env`.
-
----
-
 ## Control plane
 
 `scripts/bizagent-control-plane.js serve` runs a local Node.js server. It:
@@ -357,40 +327,6 @@ Multiple BizAgent hubs can run on one machine. Set
 ```
 
 `poll_seconds` (1–30) controls how often the control plane wakes. Separate hub/agent slot pools keep operator turns responsive even under heavy fan-out. Archive pruning removes old `*/archive/` mail automatically on the nightly (or on demand).
-
-### MCP client (optional remote tools)
-
-Agents can call **Model Context Protocol** tools in-turn from a remote MCP
-server URL. This is **not** the multi-agent bus — mail + hub mediation stay how
-agents talk.
-
-Default off (`settings.mcp.enabled` false or omitted). Enable a remote server:
-
-```json
-"settings": {
-  "mcp": {
-    "enabled": true,
-    "servers": [
-      {
-        "name": "remote_tools",
-        "transport": "http",
-        "url": "https://mcp.example.com/mcp",
-        "headers": { "Authorization": "MCP_REMOTE_TOKEN" }
-      }
-    ]
-  }
-}
-```
-
-```bash
-# ~/.bizagent/env — header values are env-var *names* in registry, not secrets in git
-MCP_REMOTE_TOKEN="Bearer sk-your-token"
-```
-
-`transport: "http"` is Streamable HTTP (preferred). Use `"sse"` only for legacy
-HTTP+SSE endpoints. Failed/unreachable servers soft-fail; built-in tools still
-run. Same configured servers are available to hub PTL and every product agent.
-Details: `docs/ARCHITECTURE.md` (MCP client).
 
 ### Upgrading the hub framework
 
