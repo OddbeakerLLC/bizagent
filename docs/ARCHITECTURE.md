@@ -205,7 +205,22 @@ for hub PTL and every product agent — no per-agent allowlists in this slice.
 - **Maintainer note:** stdio transport remains implemented for tests and
   internal use; do not advertise it in public README / install marketing.
 
-#### Enable a remote MCP server (operator snippet)
+#### Enable a remote MCP server (paste-in — preferred)
+
+Operators paste vendor MCP connection info into hub chat. The hub runs
+`scripts/mcp-onboard.js` (see **`docs/MCP-ONBOARD.md`** for the full operator
+contract). That helper:
+
+- parses common paste shapes (Cursor `mcpServers`, flat JSON, URL + Bearer text)
+- writes secrets only to `hub/.bizagent/env` (env-var refs in registry, never literals)
+- sets `settings.mcp.enabled` and upserts `servers[]` (idempotent by name/URL)
+- verifies with `tools/list` when reachable; soft-fails if not
+- needs **no** control-plane restart — next agent turn re-reads registry + env
+
+Hub confirms `connected: <name> → N tools` or asks 1–2 clarifying questions.
+**Never** tell the operator to hand-edit `registry.json` or `.bizagent/env`.
+
+Maintainer shape (written by the helper, not by the operator):
 
 ```json
 "mcp": {
@@ -216,22 +231,16 @@ for hub PTL and every product agent — no per-agent allowlists in this slice.
       "transport": "http",
       "url": "https://mcp.example.com/mcp",
       "headers": {
-        "Authorization": "MCP_REMOTE_TOKEN"
+        "Authorization": "MCP_REMOTE_TOOLS_TOKEN"
       }
     }
   ]
 }
 ```
 
-In `~/.bizagent/env` (or the process environment):
-
-```bash
-MCP_REMOTE_TOKEN="Bearer sk-your-token"
-```
-
-Stdio example remains valid alongside remote entries in the same `servers[]`
-list. Missing/unreachable remotes soft-fail; other servers and built-in tools
-still run.
+Stdio remains implemented for tests/internal use only; do not advertise it in
+public README. Missing/unreachable remotes soft-fail; other servers and built-in
+tools still run.
 
 ## Messaging
 
