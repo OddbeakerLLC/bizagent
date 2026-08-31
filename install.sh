@@ -1191,8 +1191,12 @@ settings["auto_update"] = auto_update.strip().lower() in ("1", "true", "yes", "o
 hub_agent = settings.setdefault("hub_agent", {})
 hub_agent["provider"] = provider
 hub_agent["cliName"] = provider  # legacy alias
-if provider == "grok" and not hub_agent.get("model"):
-    hub_agent["model"] = "grok-4.5"
+if provider == "grok":
+    hub_agent.setdefault("model", "grok-4.5")
+elif str(hub_agent.get("model", "")).startswith("grok"):
+    # example ships grok-4.5 — drop the stale grok model so the runtime
+    # uses the selected provider's default
+    del hub_agent["model"]
 json.dump(d, open(dest, "w"), indent=2)
 open(dest, "a").write("\n")
 PY
@@ -1223,8 +1227,13 @@ if current:
 else:
     hub_agent["provider"] = provider
     hub_agent["cliName"] = provider
-    if provider == "grok" and not hub_agent.get("model"):
-        hub_agent["model"] = "grok-4.5"
+final_provider = hub_agent.get("provider") or provider
+if final_provider == "grok":
+    hub_agent.setdefault("model", "grok-4.5")
+elif str(hub_agent.get("model", "")).startswith("grok"):
+    # stale grok model (e.g. from a previous install) — drop it so the
+    # runtime uses the selected provider's default
+    del hub_agent["model"]
 json.dump(d, open(path, "w"), indent=2)
 open(path, "a").write("\n")
 print(settings.get("auto_update"))
