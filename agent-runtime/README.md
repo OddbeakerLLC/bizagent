@@ -2,8 +2,12 @@
 
 OpenAI-compatible tool-calling agent runtime for BizAgent.
 
-Local tools (list/glob/grep/read/edit/shell/fetch) + multi-provider HTTP backend.
-Defaults: temperature `0.2`, up to `50` tool iterations (`BIZAGENT_AGENT_MAX_ITERATIONS`).
+Local tools (list/glob/grep/read/edit/shell/fetch) + multi-provider HTTP backend
++ optional **MCP client** (stdio BYO servers from hub `registry.json`
+`settings.mcp`). MCP tools appear as `mcp__<server>__<tool>` beside built-ins;
+missing/hung servers soft-fail. MCP ≠ agent bus (mail still mediates agents).
+Defaults: temperature `0.2`, up to `100` tool iterations (`BIZAGENT_AGENT_MAX_ITERATIONS`).
+Hub launches set `BIZAGENT_HUB` so MCP config resolves from any cwd.
 
 ## Providers
 

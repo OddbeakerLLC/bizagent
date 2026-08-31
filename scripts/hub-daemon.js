@@ -199,7 +199,7 @@ function runTurn() {
       via: 'warm_daemon',
     });
 
-    const childEnv = { ...process.env };
+    const childEnv = { ...process.env, BIZAGENT_HUB: HUB };
     const script = [
       'set +e',
       `HUB=${JSON.stringify(HUB)}`,
