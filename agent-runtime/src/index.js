@@ -17,7 +17,7 @@ const { program } = require('commander');
 const fs = require('fs').promises;
 const path = require('path');
 const readline = require('readline');
-const { createClient, chatCompletion } = require('./client');
+const { createClient, chatCompletion, sanitizeMessages } = require('./client');
 const { resolveProvider, listProviders } = require('./providers');
 const { TOOLS, DESTRUCTIVE_TOOLS, executeToolCall } = require('./tools');
 const { buildSystemPrompt } = require('./system-prompt');
@@ -346,7 +346,7 @@ if (require.main === module) {
           });
           const final = await client.chat.completions.create({
             model: resolved.model,
-            messages,
+            messages: sanitizeMessages(messages),
             temperature: 0.2,
           });
           const text =
