@@ -199,9 +199,11 @@ for hub PTL and every product agent — no per-agent allowlists in this slice.
   or secret header values).
 - **Not the agent bus.** MCP is in-turn capability only. Multi-agent work still
   uses filesystem mail + hub mediation. Do not invent agent-to-agent MCP.
-- **Free vs enterprise:** OSS = runtime + BYO servers (local stdio or remote
-  URL). Enterprise later can add vault, org policy, curated connectors, and
-  audit on the same config shape without rewriting the client.
+- **Free vs enterprise:** OSS = runtime + configured remote servers. Enterprise
+  later can add vault, org policy, curated connectors, and audit on the same
+  config shape without rewriting the client.
+- **Maintainer note:** stdio transport remains implemented for tests and
+  internal use; do not advertise it in public README / install marketing.
 
 #### Enable a remote MCP server (operator snippet)
 
