@@ -1191,12 +1191,30 @@ settings["auto_update"] = auto_update.strip().lower() in ("1", "true", "yes", "o
 hub_agent = settings.setdefault("hub_agent", {})
 hub_agent["provider"] = provider
 hub_agent["cliName"] = provider  # legacy alias
+# Provider first-model defaults (must match cli.json.example / PROVIDER_CATALOG).
+PROVIDER_DEFAULT_MODEL = {
+    "grok": "grok-4.5",
+    "chatgpt": "gpt-4o",
+    "openai": "gpt-4o",
+    "claude": "claude-sonnet-4-6",
+    "gemini": "gemini-2.5-flash",
+    "venice": "llama-3.3-70b",
+    "ollama": "llama3.2",
+    "openrouter": "anthropic/claude-sonnet-4",
+}
+default_model = PROVIDER_DEFAULT_MODEL.get(provider, "")
 if provider == "grok":
     hub_agent.setdefault("model", "grok-4.5")
 elif str(hub_agent.get("model", "")).startswith("grok"):
     # example ships grok-4.5 — drop the stale grok model so the runtime
     # uses the selected provider's default
     del hub_agent["model"]
+if default_model and not str(hub_agent.get("model") or "").strip():
+    hub_agent["model"] = default_model
+# Product agents need an explicit default too (no silent runtime fallback).
+models = settings.setdefault("models", {})
+if default_model and not str(models.get("agent_default") or "").strip():
+    models["agent_default"] = default_model
 json.dump(d, open(dest, "w"), indent=2)
 open(dest, "a").write("\n")
 PY
@@ -1228,12 +1246,29 @@ else:
     hub_agent["provider"] = provider
     hub_agent["cliName"] = provider
 final_provider = hub_agent.get("provider") or provider
+PROVIDER_DEFAULT_MODEL = {
+    "grok": "grok-4.5",
+    "chatgpt": "gpt-4o",
+    "openai": "gpt-4o",
+    "claude": "claude-sonnet-4-6",
+    "gemini": "gemini-2.5-flash",
+    "venice": "llama-3.3-70b",
+    "ollama": "llama3.2",
+    "openrouter": "anthropic/claude-sonnet-4",
+}
+default_model = PROVIDER_DEFAULT_MODEL.get(final_provider, "")
 if final_provider == "grok":
     hub_agent.setdefault("model", "grok-4.5")
 elif str(hub_agent.get("model", "")).startswith("grok"):
     # stale grok model (e.g. from a previous install) — drop it so the
     # runtime uses the selected provider's default
     del hub_agent["model"]
+if default_model and not str(hub_agent.get("model") or "").strip():
+    hub_agent["model"] = default_model
+# Only seed agent_default when missing/empty — never clobber operator choice.
+models = settings.setdefault("models", {})
+if default_model and not str(models.get("agent_default") or "").strip():
+    models["agent_default"] = default_model
 json.dump(d, open(path, "w"), indent=2)
 open(path, "a").write("\n")
 print(settings.get("auto_update"))

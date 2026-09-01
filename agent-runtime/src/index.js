@@ -161,12 +161,18 @@ if (require.main === module) {
       process.exit(1);
     });
   } else {
-    const resolved = resolveProvider({
-      provider: opts.provider,
-      baseURL: opts.baseUrl,
-      apiKey: opts.apiKey,
-      model: opts.model,
-    });
+    let resolved;
+    try {
+      resolved = resolveProvider({
+        provider: opts.provider,
+        baseURL: opts.baseUrl,
+        apiKey: opts.apiKey,
+        model: opts.model,
+      });
+    } catch (err) {
+      console.error(`Error: ${err.message || err}`);
+      process.exit(1);
+    }
 
     if (!resolved.apiKey) {
       console.error(

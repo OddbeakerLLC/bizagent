@@ -112,11 +112,18 @@ function resolveProvider(opts = {}) {
     apiKey = base.fallbackKey || "local";
   }
 
-  const model =
-    opts.model ||
-    process.env.BIZAGENT_AGENT_MODEL ||
-    base.defaultModel ||
-    "gpt-4o";
+  const model = String(
+    opts.model || process.env.BIZAGENT_AGENT_MODEL || "",
+  ).trim();
+  if (!model) {
+    // Fail-clear: never silently fall back to a hardcoded provider default
+    // (e.g. Venice llama-3.3-70b) while the hub UI shows a different model.
+    throw new Error(
+      "Model is required: pass --model / -m, or set BIZAGENT_AGENT_MODEL. " +
+        "Hub operators: set settings.models.agent_default or a per-product " +
+        "model in registry.json (hub: settings.hub_agent.model).",
+    );
+  }
 
   return {
     provider: providerName,
