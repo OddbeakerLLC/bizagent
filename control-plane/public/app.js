@@ -211,7 +211,8 @@ async function showAgentConfigModal(agent) {
     agentName: agent.agentName || agent.slug,
     provider,
     cliName: provider,
-    model: agent.model || '',
+    // Roster may show "(unset)" when no product/default model is configured.
+    model: agent.model && agent.model !== '(unset)' ? agent.model : '',
   };
   const modal = document.getElementById('configModal');
   const title = document.getElementById('modalTitle');
@@ -421,7 +422,7 @@ function renderAgents(agents) {
     const cliLine = document.createElement('button');
     cliLine.type = 'button';
     cliLine.className = 'agent-cli-line';
-    const modelName = agent.model || '—';
+    const modelName = agent.model || '(unset)';
     cliLine.textContent = modelName;
     cliLine.title = 'Change LLM and model';
     cliLine.addEventListener('click', (e) => {

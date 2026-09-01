@@ -55,8 +55,8 @@
       "model": "grok-4.5"
     },
     "models": {
-      "_comment": "Default model for product agent launches. Per-product model field overrides this.",
-      "agent_default": ""
+      "_comment": "Default model for product agent launches. Per-product model field overrides this. Required when products omit model — empty means launch fails (no silent runtime fallback).",
+      "agent_default": "grok-4.5"
     },
     "tuning": {
       "_comment": "Operational tunables. archive.retention_days default 15.",

@@ -70,7 +70,19 @@ if (!threw) {
   process.exit(3);
 }
 
-const fixed = getCliSettings(process.argv[2], catalog, hubConfig, '', '');
+// Empty model → throw (no silent omit of --model)
+threw = false;
+try {
+  getCliSettings(process.argv[2], catalog, hubConfig, '', '');
+} catch (e) {
+  threw = /Model is empty/i.test(e.message);
+}
+if (!threw) {
+  console.error('expected throw when model empty');
+  process.exit(12);
+}
+
+const fixed = getCliSettings(process.argv[2], catalog, hubConfig, '', 'grok-4.5');
 if (fixed.cli !== 'scripts/bizagent-agent') {
   console.error('expected bizagent-agent executable', fixed);
   process.exit(4);
@@ -82,6 +94,10 @@ if (fixed.promptFlag !== '-f') {
 if (!/--provider grok/.test(fixed.extraArgs || '')) {
   console.error('expected --provider grok', fixed);
   process.exit(6);
+}
+if (!/--model grok-4.5/.test(fixed.extraArgs || '')) {
+  console.error('expected --model grok-4.5', fixed);
+  process.exit(13);
 }
 
 const chatgpt = getCliSettings(process.argv[2], catalog, hubConfig, 'chatgpt', 'gpt-4o');

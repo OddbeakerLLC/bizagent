@@ -454,9 +454,13 @@ function currentState(config, session) {
     ...agentsFromRegistry(config.registry, config.hub),
   ]).map((agent) => {
     const isHub = agent.slug === "hub";
-    // Display effective launch values (empty product fields inherit hub/default).
+    // Display effective launch values. Products inherit agent_default only —
+    // never hub model (that is not what product launches use). When neither
+    // product model nor agent_default is set, show "(unset)" so the roster
+    // never claims a model that will not actually run.
     const provider = agent.provider || agent.cliName || hubCli || "";
-    const model = agent.model || (isHub ? hubModel : agentDefault || hubModel) || "";
+    let model = agent.model || (isHub ? hubModel : agentDefault) || "";
+    if (!model && !isHub) model = "(unset)";
     return {
       ...agent,
       provider,

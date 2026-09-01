@@ -294,12 +294,18 @@ function getCliSettings(hub, cliJson, cliFileSettings, providerName = "", modelO
     parts.push(`--base-url ${baseURL}`);
   }
 
-  if (modelOverride) {
-    if (!/^[A-Za-z0-9._:/-]+$/.test(modelOverride)) {
-      throw new Error(`Invalid model name: ${modelOverride}`);
-    }
-    parts.push(`--model ${modelOverride}`);
+  const model = String(modelOverride || "").trim();
+  if (!model) {
+    throw new Error(
+      "Model is empty — set settings.models.agent_default or a per-product " +
+        "model in registry.json (hub: settings.hub_agent.model). " +
+        "Refusing to launch without an explicit --model.",
+    );
   }
+  if (!/^[A-Za-z0-9._:/-]+$/.test(model)) {
+    throw new Error(`Invalid model name: ${model}`);
+  }
+  parts.push(`--model ${model}`);
 
   const extraArgs = parts.join(" ").replace(/\s{2,}/g, " ").trim();
 
