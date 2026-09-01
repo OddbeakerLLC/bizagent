@@ -139,6 +139,7 @@ const { logEvent, logHubTurn, logError, appendLog } = require("./lib/log");
 const {
   clearThinking,
   getThinking,
+  readThinking,
 } = require("./lib/thinking");
 const { renderPlantUml } = require("./lib/plantuml");
 
@@ -827,22 +828,38 @@ async function handleApi(config, req, res) {
     const body = await parseBody(req);
     const convId = (body.conversationId || "").trim();
     const thinking = convId ? getThinking(config.hub, convId) : null;
-    if (thinking && thinking.slug) {
-      try { stopAgentTurn(config.hub, thinking.slug); } catch (_err) { /* ignore */ }
+    // Prefer thinking.slug; if the thinking entry is missing/stale, still stop
+    // whatever is actually running (hub first, else any active product agent
+    // bound to this conversation is handled via agent light — Escape targets hub).
+    let slug = thinking && thinking.slug ? thinking.slug : "";
+    if (!slug) {
+      if (isAgentActive(config.hub, "hub", config.lockLeaseSecs)) slug = "hub";
+    }
+    let killed = false;
+    if (slug) {
+      try {
+        killed = !!(await stopAgentTurn(config.hub, slug));
+      } catch (_err) {
+        killed = false;
+      }
+    }
+    if (convId) {
       clearThinking(config.hub, convId);
       try {
         appendMessage(
           config.hub,
           convId,
           "status",
-          "Stopped by operator (Escape).",
+          slug
+            ? `Stopped by operator (Escape${slug !== "hub" ? `: ${slug}` : ""}).`
+            : "Stopped by operator (Escape) — no in-flight turn found.",
           { kind: STATUS_ERROR_KIND },
         );
       } catch (_err) { /* ignore */ }
-      didChangeState();
       try { pushConv(config, convId); } catch (_err) { /* ignore */ }
     }
-    return send(res, 200, { ok: true });
+    didChangeState();
+    return send(res, 200, { ok: true, killed, slug: slug || null });
   }
 
 
@@ -853,29 +870,37 @@ async function handleApi(config, req, res) {
     if (!slug) return send(res, 400, { error: "missing agent slug" });
     let killed = false;
     try {
-      killed = !!stopAgentTurn(config.hub, slug);
+      killed = !!(await stopAgentTurn(config.hub, slug));
     } catch (_err) {
       killed = false;
     }
-    // Best-effort: clear thinking entry if this slug owns the active stream.
+    // Status line: prefer active conversation; also clear any thinking entry for this slug.
     try {
       const active = readJson(activeConversationFile(config.hub), null);
-      const convId = active && active.id;
+      let convId = active && active.id;
+      // If thinking is recorded under a different conv for this slug, clear it too.
+      try {
+        const all = readThinking(config.hub);
+        for (const [cid, entry] of Object.entries(all || {})) {
+          if (entry && entry.slug === slug) {
+            clearThinking(config.hub, cid);
+            if (!convId) convId = cid;
+          }
+        }
+      } catch (_err) { /* ignore */ }
       if (convId) {
         const thinking = getThinking(config.hub, convId);
-        if (thinking && thinking.slug === slug) {
-          clearThinking(config.hub, convId);
-          try {
-            appendMessage(
-              config.hub,
-              convId,
-              "status",
-              `Stopped by operator (agent light: ${slug}).`,
-              { kind: STATUS_ERROR_KIND },
-            );
-          } catch (_err) { /* ignore */ }
-          try { pushConv(config, convId); } catch (_err) { /* ignore */ }
-        }
+        if (thinking && thinking.slug === slug) clearThinking(config.hub, convId);
+        try {
+          appendMessage(
+            config.hub,
+            convId,
+            "status",
+            `Stopped by operator (agent light: ${slug}).`,
+            { kind: STATUS_ERROR_KIND },
+          );
+        } catch (_err) { /* ignore */ }
+        try { pushConv(config, convId); } catch (_err) { /* ignore */ }
       }
     } catch (_err) { /* ignore */ }
     didChangeState();

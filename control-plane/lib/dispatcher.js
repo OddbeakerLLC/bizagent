@@ -47,13 +47,13 @@ function hubDaemonSock(hub) {
 }
 
 /**
- * Ask the warm hub-daemon to process pending hub mail.
- * Resolves { ok, via:'warm', ... } or { ok:false, error } on connect/timeout/busy.
+ * Low-level NDJSON request to the warm hub-daemon socket.
+ * Resolves parsed response or { ok:false, error }.
  */
-function requestWarmHubTurn(hub, opts = {}) {
+function requestHubDaemon(hub, payload, opts = {}) {
   const sockPath = hubDaemonSock(hub);
   const connectMs = Math.max(100, Number(opts.connectTimeoutMs || 500));
-  const turnMs = Math.max(5000, Number(opts.turnTimeoutMs || 600000));
+  const turnMs = Math.max(1000, Number(opts.turnTimeoutMs || 5000));
   return new Promise((resolve) => {
     if (!fs.existsSync(sockPath)) {
       resolve({ ok: false, error: 'no_socket' });
@@ -74,11 +74,7 @@ function requestWarmHubTurn(hub, opts = {}) {
     socket.setEncoding('utf8');
     socket.on('connect', () => {
       clearTimeout(connectTimer);
-      const req = {
-        type: 'turn',
-        requestId: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-      };
-      socket.write(`${JSON.stringify(req)}\n`);
+      socket.write(`${JSON.stringify(payload)}\n`);
     });
     socket.on('data', (chunk) => {
       buf += chunk;
@@ -87,12 +83,7 @@ function requestWarmHubTurn(hub, opts = {}) {
       const line = buf.slice(0, nl).trim();
       clearTimeout(turnTimer);
       try {
-        const msg = JSON.parse(line);
-        done({
-          ...msg,
-          via: 'warm',
-          ok: !!msg.ok || msg.action === 'reserved-body' || msg.action === 'ok-existing',
-        });
+        done(JSON.parse(line));
       } catch (err) {
         done({ ok: false, error: `bad_response:${err.message}` });
       }
@@ -103,6 +94,53 @@ function requestWarmHubTurn(hub, opts = {}) {
       done({ ok: false, error: err.message || 'socket_error' });
     });
   });
+}
+
+/**
+ * Ask the warm hub-daemon to process pending hub mail.
+ * Resolves { ok, via:'warm', ... } or { ok:false, error } on connect/timeout/busy.
+ */
+function requestWarmHubTurn(hub, opts = {}) {
+  const connectMs = Math.max(100, Number(opts.connectTimeoutMs || 500));
+  const turnMs = Math.max(5000, Number(opts.turnTimeoutMs || 600000));
+  return requestHubDaemon(
+    hub,
+    {
+      type: 'turn',
+      requestId: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    },
+    { connectTimeoutMs: connectMs, turnTimeoutMs: turnMs },
+  ).then((msg) => {
+    if (msg.error && !msg.type && msg.ok === false) {
+      return { ...msg, via: undefined };
+    }
+    return {
+      ...msg,
+      via: 'warm',
+      ok: !!msg.ok || msg.action === 'reserved-body' || msg.action === 'ok-existing',
+    };
+  });
+}
+
+/**
+ * Ask the warm hub-daemon to abort its in-flight CLI turn (if any).
+ * Does not shut down the daemon process.
+ */
+function requestWarmHubCancel(hub, opts = {}) {
+  const connectMs = Math.max(100, Number(opts.connectTimeoutMs || 500));
+  const turnMs = Math.max(500, Number(opts.turnTimeoutMs || 3000));
+  return requestHubDaemon(
+    hub,
+    {
+      type: 'cancel',
+      requestId: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    },
+    { connectTimeoutMs: connectMs, turnTimeoutMs: turnMs },
+  ).then((msg) => ({
+    ...msg,
+    via: 'warm',
+    ok: !!msg.ok,
+  }));
 }
 
 function nowIso() {
@@ -365,6 +403,18 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
  * do not always deliver Node 'exit' to the long-lived control plane).
  */
 function notifyAgentExitFromLogs(hub, slug, exitCode) {
+  // Operator hard-stop: suppress failure chatter + hard-fail re-dispatch.
+  if (wasOperatorStopped(hub, slug)) {
+    try {
+      logEvent(hub, {
+        event: 'operator_stop_exit',
+        slug,
+        exit_code: exitCode,
+        t: nowIso(),
+      });
+    } catch (_err) { /* ignore */ }
+    return;
+  }
   const stderrTail = readStderrTail(
     path.join(hub, 'logs', `dispatch-${slug}.stderr`),
   );
@@ -553,31 +603,169 @@ function isAgentActive(hub, slug, leaseSecs) {
 }
 
 /**
- * Hard-stop an in-flight turn (operator pressed Escape in the web UI).
- * Kills the detached process group (bash wrapper + CLI child) and drops the
- * lock so the dispatcher can re-dispatch. Returns true if a live pid was found.
+ * Never SIGKILL the control-plane or hub-daemon themselves.
+ * Warm hub locks often still hold the CP pid (tryLock writes process.pid before
+ * the daemon owns the turn); killing that group would take down the whole hub.
  */
-function stopAgentTurn(hub, slug) {
-  const lock = lockDir(hub, slug);
+function isProtectedStopPid(hub, pid) {
+  const n = Number(pid);
+  if (!Number.isFinite(n) || n <= 0) return true;
+  if (n === process.pid) return true;
+  try {
+    const daemonPid = fs.readFileSync(path.join(hub, '.bizagent', 'hub-daemon.pid'), 'utf8').trim();
+    if (daemonPid && Number(daemonPid) === n) return true;
+  } catch (_err) { /* no daemon pid file */ }
+  return false;
+}
+
+/**
+ * Kill a detached bash+CLI process group from a lock pid file.
+ * Returns true if a kill signal was sent.
+ */
+function killLockProcessGroup(hub, lock) {
   let pid = '';
   try {
     pid = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim();
   } catch (_err) {
     pid = '';
   }
+  if (!pid || !/^[0-9]+$/.test(pid)) return false;
+  if (isProtectedStopPid(hub, pid)) return false;
+  const n = Number(pid);
   let killed = false;
-  if (pid && /^[0-9]+$/.test(pid)) {
-    const n = Number(pid);
-    try {
-      // Negative pid targets the whole process group (spawn used detached:true).
-      process.kill(-n, 'SIGKILL');
-      killed = true;
-    } catch (_err) {
-      try { process.kill(n, 'SIGKILL'); killed = true; } catch (_err2) { /* gone */ }
-    }
+  try {
+    // Negative pid targets the whole process group (spawn used detached:true).
+    process.kill(-n, 'SIGKILL');
+    killed = true;
+  } catch (_err) {
+    try { process.kill(n, 'SIGKILL'); killed = true; } catch (_err2) { /* gone */ }
   }
+  return killed;
+}
+
+function operatorStopStampPath(hub, slug) {
+  return path.join(appDir(hub), 'operator-stop', `${slug}.json`);
+}
+
+/**
+ * Stamp an operator stop so cold-path exit hooks do not clearDispatchState
+ * (hard-fail retry) and re-fire the same mail within seconds.
+ */
+function markOperatorStop(hub, slug) {
+  try {
+    const target = operatorStopStampPath(hub, slug);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(
+      target,
+      `${JSON.stringify({ slug, at: Math.floor(Date.now() / 1000), t: nowIso() })}\n`,
+      'utf8',
+    );
+  } catch (_err) { /* best-effort */ }
+}
+
+/**
+ * True when an operator stop landed recently (default 2 minutes).
+ * Consumed by hub cold exit / hard-fail paths that would otherwise clear markers.
+ */
+function wasOperatorStopped(hub, slug, withinSecs = 120) {
+  try {
+    const raw = fs.readFileSync(operatorStopStampPath(hub, slug), 'utf8');
+    const data = JSON.parse(raw);
+    const at = Number(data.at || 0);
+    if (!at) return false;
+    return Math.floor(Date.now() / 1000) - at < withinSecs;
+  } catch (_err) {
+    return false;
+  }
+}
+
+/**
+ * Keep dispatch markers after an intentional operator stop so the same
+ * unarchived inbox mail is not re-launched on the next poll tick.
+ * Operator stop ≠ hard-fail retry (which still calls clearDispatchState).
+ * Markers expire with the normal lock-lease window once mail is archived
+ * or the operator resends a new file.
+ */
+function suppressRedispatchAfterStop(hub, slug) {
+  markOperatorStop(hub, slug);
+  try {
+    const files = pendingMail(hub, slug);
+    if (!files.length) return;
+    markMailDispatched(hub, slug, files, dispatchRetrySecs({ lockLeaseSecs: 1800 }));
+  } catch (_err) { /* best-effort */ }
+  try {
+    logEvent(hub, {
+      event: 'operator_stop_hold_dispatch',
+      slug,
+      t: nowIso(),
+    });
+  } catch (_err) { /* ignore */ }
+}
+
+/** clearDispatchState unless this slug was just operator-stopped. */
+function clearDispatchStateUnlessOperatorStop(hub, slug) {
+  if (wasOperatorStopped(hub, slug)) {
+    try {
+      logEvent(hub, {
+        event: 'dispatch_clear_skipped_operator_stop',
+        slug,
+        t: nowIso(),
+      });
+    } catch (_err) { /* ignore */ }
+    return false;
+  }
+  clearDispatchState(hub, slug);
+  return true;
+}
+
+/**
+ * Hard-stop an in-flight turn (operator Escape or running status light).
+ * - Product agents / cold hub: SIGKILL detached process group from lock pid.
+ * - Warm hub: cancel the daemon's in-flight CLI (do not kill CP or daemon).
+ * Always drops the lock and holds dispatch markers so mail is not re-fired.
+ * Async: await from API handlers. Returns true if a live process was targeted
+ * or warm cancel reported an in-flight kill.
+ */
+async function stopAgentTurn(hub, slug) {
+  const lock = lockDir(hub, slug);
+  let killed = false;
+
+  if (slug === 'hub') {
+    // Warm path: lock pid is often the CP itself — never kill that.
+    // Ask the daemon to abort its current CLI child instead.
+    try {
+      const result = await requestWarmHubCancel(hub, {
+        connectTimeoutMs: 500,
+        turnTimeoutMs: 3000,
+      });
+      if (result && result.ok && result.cancelled) killed = true;
+      else if (result && result.ok && result.busy === false) {
+        /* daemon idle — fall through to cold lock kill if any */
+      } else if (result && result.cancelled) {
+        killed = true;
+      }
+    } catch (_err) { /* fall through to cold lock kill */ }
+  }
+
+  // Cold spawn (product agents, or hub cold fallback): kill lock process group.
+  // Skip if pid is protected (CP / daemon).
+  if (killLockProcessGroup(hub, lock)) killed = true;
+
   // SIGKILL cannot be trapped, so the shell EXIT trap won't clean the lock.
-  fs.rmSync(lock, { recursive: true, force: true });
+  try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_err) { /* ignore */ }
+
+  // Hold markers so the same inbox mail is not immediately re-dispatched.
+  suppressRedispatchAfterStop(hub, slug);
+
+  try {
+    logEvent(hub, {
+      event: 'operator_stop',
+      slug,
+      killed: !!killed,
+      t: nowIso(),
+    });
+  } catch (_err) { /* ignore */ }
+
   return killed;
 }
 
@@ -698,7 +886,7 @@ function launchAgent(config, slug, model = '', cliName = '') {
   });
 
   child.on('exit', (code) => {
-    if (code !== 0 && code !== null) {
+    if (code !== 0 && code !== null && !wasOperatorStopped(hub, slug)) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, slug, code, stderrTail, null);
     }
@@ -801,8 +989,14 @@ function launchHub(config) {
           error: result.error || undefined,
         });
         // Hard-fail: allow the same unarchived inbox mail to re-dispatch.
-        if (!result.ok && (result.action === 'failed' || result.action === 'cli_config_error')) {
-          try { clearDispatchState(hub, 'hub'); } catch (_e) { /* ignore */ }
+        // Skip after operator stop (markers must keep holding the mail).
+        if (
+          !result.ok
+          && !result.operator_stop
+          && result.action !== 'operator_stop'
+          && (result.action === 'failed' || result.action === 'cli_config_error')
+        ) {
+          try { clearDispatchStateUnlessOperatorStop(hub, 'hub'); } catch (_e) { /* ignore */ }
         }
         // Daemon owns CLI lifecycle; drop CP lock when turn finishes.
         try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_e) { /* ignore */ }
@@ -1017,13 +1211,14 @@ function launchHubCold(config, ctx) {
   });
 
   child.on('exit', (code) => {
-    if (code !== 0 && code !== null) {
+    const opStop = wasOperatorStopped(hub, 'hub');
+    if (code !== 0 && code !== null && !opStop) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, 'hub', code, stderrTail, conversationId);
     }
     // Backup if shell EXIT hook did not clear the pending turn (tick also drains).
-    let action = '';
-    if (conversationId) {
+    let action = opStop ? 'operator_stop' : '';
+    if (!opStop && conversationId) {
       const stillPending = readPendingHubTurns(hub).some(
         (t) => t.conversationId === conversationId && t.startedAt === startedAt,
       );
@@ -1053,8 +1248,12 @@ function launchHubCold(config, ctx) {
       action,
       conversation_id: conversationId || '',
     });
-    if (action === 'failed' || (code !== 0 && code !== null && action !== 'reserved-body' && action !== 'ok-existing')) {
-      try { clearDispatchState(hub, 'hub'); } catch (_e) { /* ignore */ }
+    if (
+      action !== 'operator_stop'
+      && (action === 'failed'
+        || (code !== 0 && code !== null && action !== 'reserved-body' && action !== 'ok-existing'))
+    ) {
+      try { clearDispatchStateUnlessOperatorStop(hub, 'hub'); } catch (_e) { /* ignore */ }
     }
   });
 
@@ -1151,14 +1350,21 @@ module.exports = {
   liveHubCount,
   liveRunCount,
   clearDispatchState,
+  clearDispatchStateUnlessOperatorStop,
+  isProtectedStopPid,
   markMailDispatched,
+  markOperatorStop,
   notifyAgentExitFromLogs,
   pendingUndispatchedMail,
   preferWarmDaemon,
   promptFileFor,
   readStderrTail,
   recordAgentError,
+  requestHubDaemon,
+  requestWarmHubCancel,
   requestWarmHubTurn,
   stopAgentTurn,
+  suppressRedispatchAfterStop,
   tryLock,
+  wasOperatorStopped,
 };

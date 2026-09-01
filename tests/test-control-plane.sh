@@ -335,6 +335,23 @@ grep -q "async function stopAgent" "$ROOT/control-plane/public/app.js" \
   || fail "UI missing stopAgent helper"
 grep -q "status-light.running" "$ROOT/control-plane/public/styles.css" \
   || fail "UI missing running status-light style"
+# Operator stop must hold dispatch markers (no instant re-fire) + warm cancel.
+grep -q "suppressRedispatchAfterStop" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing suppressRedispatchAfterStop after operator stop"
+grep -q "requestWarmHubCancel" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing warm hub cancel client"
+grep -q "isProtectedStopPid" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing protected-pid guard (must not kill CP)"
+grep -q "clearDispatchStateUnlessOperatorStop" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing operator-stop-aware clearDispatchState"
+grep -qE "type: ['\"]cancel['\"]|\"type\": \"cancel\"" "$ROOT/scripts/hub-daemon.js" \
+  || fail "hub-daemon missing cancel protocol"
+grep -q "cancelInFlightTurn" "$ROOT/scripts/hub-daemon.js" \
+  || fail "hub-daemon missing cancelInFlightTurn"
+grep -q 'msg.type === .cancel.' "$ROOT/scripts/hub-daemon.js" \
+  || fail "hub-daemon missing cancel message handler"
+grep -q 'await stopAgentTurn' "$ROOT/control-plane/server.js" \
+  || fail "server stop routes must await async stopAgentTurn"
 # 4. Preview: built pages surface as clickable links opening in a new tab (no iframe).
 grep -q 'target="_blank"' "$ROOT/control-plane/public/app.js" \
   || fail "UI does not open preview links in a new tab"
@@ -1756,6 +1773,36 @@ const stillPending = pendingUndispatchedMail(hub, 'hub', holdRetry);
 if (stillPending.some((f) => path.basename(f) === path.basename(holdMail))) {
   console.error('marked mail should not be pending again', stillPending);
   process.exit(77);
+}
+// Operator stop must re-hold markers and skip clearDispatchState (≠ hard-fail).
+const {
+  suppressRedispatchAfterStop,
+  clearDispatchStateUnlessOperatorStop,
+  wasOperatorStopped,
+  isProtectedStopPid,
+} = require(path.join(root, 'control-plane/lib/dispatcher'));
+// Re-open as "still in inbox after kill" and ensure suppress holds it.
+suppressRedispatchAfterStop(hub, 'hub');
+if (!wasOperatorStopped(hub, 'hub')) {
+  console.error('expected operator-stop stamp after suppressRedispatchAfterStop');
+  process.exit(79);
+}
+const afterStop = pendingUndispatchedMail(hub, 'hub', holdRetry);
+if (afterStop.some((f) => path.basename(f) === path.basename(holdMail))) {
+  console.error('operator stop must not leave mail pending for re-dispatch', afterStop);
+  process.exit(80);
+}
+const cleared = clearDispatchStateUnlessOperatorStop(hub, 'hub');
+if (cleared !== false) {
+  console.error('clearDispatchStateUnlessOperatorStop should no-op after operator stop', cleared);
+  process.exit(81);
+}
+// Protected pid guard: never treat CP pid as killable.
+if (typeof isProtectedStopPid === 'function') {
+  if (!isProtectedStopPid(hub, process.pid)) {
+    console.error('isProtectedStopPid must protect process.pid');
+    process.exit(82);
+  }
 }
 // After archive (file gone), marker drops and new content can dispatch
 fs.unlinkSync(holdMail);

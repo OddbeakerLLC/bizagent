@@ -387,12 +387,17 @@ function renderAgents(agents) {
 
     const light = document.createElement('span');
     light.className = `status-light ${agent.hasMail ? 'on' : ''} ${agent.active ? 'running' : ''}`;
-    light.title = agent.active ? 'Stop agent (running)' : (agent.hasMail ? 'Inbox has mail' : 'Inbox empty');
+    light.title = agent.active
+      ? `Stop ${agent.agentName || agent.slug} (running)`
+      : (agent.hasMail ? 'Inbox has mail' : 'Inbox empty');
     light.addEventListener('click', (e) => {
       e.stopPropagation();
+      // Always prefer hard-stop for the clicked slug when the server says it is
+      // active. Fallback: Escape-equivalent stopThinking only when this row is
+      // idle but a hub thinking stream is open (legacy path).
       if (agent.active) {
         stopAgent(agent.slug);
-      } else if (thinkingActive()) {
+      } else if (agent.slug === 'hub' && thinkingActive()) {
         stopThinking();
       }
     });
@@ -1882,26 +1887,34 @@ function syncThinking() {
 /** Hard-stop the in-flight turn (operator pressed Escape). */
 async function stopThinking() {
   const convId = thinkingConv || currentConversation;
-  if (!convId) return;
   closeThinkingStream();
   try {
     await api('/api/thinking/stop', {
       method: 'POST',
-      body: JSON.stringify({ conversationId: convId }),
+      body: JSON.stringify({ conversationId: convId || '' }),
     });
   } catch (_err) { /* best-effort */ }
   // Soft reload: keep TTS priming/in-flight speech rules intact.
   if (currentConversation) await softReloadConversation(currentConversation);
+  try { await refreshStatus(); } catch (_err) { /* ignore */ }
 }
 
 async function stopAgent(slug) {
   try {
+    // Hub light: same stop path as Escape so warm-daemon cancel is used.
+    if (slug === 'hub') {
+      await stopThinking();
+      return;
+    }
     await api(`/api/agent/${encodeURIComponent(slug)}/stop`, {
       method: 'POST',
       body: JSON.stringify({}),
     });
-    // Refresh agent state after a short delay
-    setTimeout(() => refreshStatus(), 500);
+    // Soft reload so the status line appears without waiting for the next poll.
+    if (currentConversation) {
+      try { await softReloadConversation(currentConversation); } catch (_err) { /* ignore */ }
+    }
+    try { await refreshStatus(); } catch (_err) { /* ignore */ }
   } catch (err) {
     console.error('Failed to stop agent', err);
   }
