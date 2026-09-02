@@ -1176,12 +1176,53 @@ function ensureSpokenSentence(sentence) {
 }
 
 /**
- * First complete sentence of a hub reply for TTS.
- * Full markdown stays on screen; speech is sentence 1 only (entire sentence),
- * never a mid-sentence word/char clip or multi-sentence summary.
- * Returns null when nothing usable remains (caller uses minimal fallback).
+ * Extract a leading labeled TLDR block from a hub reply (speak path only).
+ * Accepts **TLDR:** / TLDR: / **TL;DR:** / TL;DR: (case-insensitive) at the
+ * start of the reply. Captures up to two complete sentences from that block
+ * only; strips the label word so it is not spoken. Returns null when absent.
+ */
+function extractLabeledTldr(text) {
+  const raw = String(text || '').replace(/^\uFEFF/, '').trimStart();
+  if (!raw) return null;
+  // Leading label only (liberal markdown bold / TL;DR variants).
+  const m = raw.match(
+    /^(?:\*\*\s*)?(?:TL\s*;\s*DR|TLDR)(?:\s*\*\*)?\s*:\s*/i
+  );
+  if (!m) return null;
+  let rest = raw.slice(m[0].length);
+  // TLDR body ends at first blank line (then full answer), else end of text.
+  const blank = rest.search(/\n\s*\n/);
+  if (blank >= 0) rest = rest.slice(0, blank);
+  // Soften markdown on the TLDR span only; keep pronounce/scrub for later.
+  let body = cleanLineForSpeech(rest.replace(/\n+/g, ' ')).replace(/\s+/g, ' ').trim();
+  // Drop any residual label token if bold/spacing left it behind.
+  body = body.replace(/^(?:TL\s*;\s*DR|TLDR)\s*:\s*/i, '').trim();
+  if (!body) return null;
+
+  const sentences = splitSpeechSentences(body)
+    .map((s) => scrubDenseSpeechTokens(s))
+    .map((s) => s.replace(/^\W+/, '').trim())
+    .filter((s) => s && s.length > 1)
+    .slice(0, 2)
+    .map((s) => ensureSpokenSentence(s))
+    .filter(Boolean);
+  if (!sentences.length) return null;
+  let result = sentences.join(' ').replace(/\.{2,}/g, '.').replace(/\s{2,}/g, ' ').trim();
+  if (!result) return null;
+  return result;
+}
+
+/**
+ * Hub-reply TTS summary: prefer a leading labeled two-sentence TLDR when
+ * present; otherwise the complete first sentence after light scrub (never a
+ * mid-sentence clip or full multi-sentence body dump).
+ * Full markdown stays on screen. Returns null when nothing usable remains
+ * (caller uses minimal fallback — short acks may stay silent/fallback).
  */
 function buildSpokenSummary(text) {
+  const tldr = extractLabeledTldr(text);
+  if (tldr) return tldr;
+
   const blocks = String(text || '').split(/\n{2,}/);
   const proseChunks = [];
   let inCodeBlock = false;
@@ -1517,10 +1558,11 @@ function speakViaBrowserTts(spokenText, gen) {
  * @param {string} text raw or already-built spoken text
  * @param {{ raw?: boolean, summary?: boolean }} [opts]
  *   raw=true skips preprocess (confirmation phrases).
- *   summary=true (hub replies) speaks the complete first sentence only —
- *   never a mid-sentence clip and never the full multi-sentence body.
- *   On summary failure uses TTS_REPLY_FALLBACK (or silence if even that is
- *   empty) — never dumps the full reply.
+ *   summary=true (hub replies) speaks a leading labeled TLDR (up to two
+ *   complete sentences, label not spoken) when present; otherwise the
+ *   complete first sentence only — never a mid-sentence clip and never the
+ *   full multi-sentence body. On summary failure uses TTS_REPLY_FALLBACK
+ *   (or silence if even that is empty) — never dumps the full reply.
  * @returns {boolean} true if a speak attempt was started (may finish async)
  */
 function speakTtsText(text, opts) {
@@ -1616,7 +1658,8 @@ function speakTtsText(text, opts) {
 }
 
 function speakHubReply(text) {
-  // Hub replies: full markdown stays in the console UI; TTS gets a short summary only.
+  // Hub replies: full markdown stays in the console UI; TTS gets labeled TLDR
+  // (≤2 sentences) when present, else first-sentence summary only.
   logTtsDebug('speakHubReply', { chars: String(text || '').length, mode: 'summary' });
   speakTtsText(text, { summary: true });
 }
