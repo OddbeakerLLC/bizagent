@@ -1049,8 +1049,14 @@ function cleanLineForSpeech(line) {
  */
 function scrubDenseSpeechTokens(text) {
   let t = String(text || '');
-  // Absolute / home / relative multi-segment paths (with or without trailing slash)
-  t = t.replace(/(?:~|\/|\.{1,2}\/)(?:[\w.-]+\/)*[\w.-]+\/?/g, ' ');
+  // Speak-only: keep approx tildes as words before path/punct wipes
+  // (otherwise "~280" is eaten as a home-path or stripped to bare "280").
+  t = t.replace(/(\d+(?:,\d{3})*(?:\.\d+)?)\s*~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, '$1 to $2');
+  t = t.replace(/~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, 'about $1');
+  t = t.replace(/\babout\s+about\b/gi, 'about');
+  // Absolute / home / relative multi-segment paths (with or without trailing slash).
+  // Home paths require "/" after ~ or ~user so bare "~280" is not treated as a path.
+  t = t.replace(/(?:(?:~[\w.-]*)\/|\/|\.{1,2}\/)(?:[\w.-]+\/)*[\w.-]+\/?/g, ' ');
   t = t.replace(/\b(?:[\w.-]+\/){1,}[\w.-]*\/?/g, ' ');
   t = t.replace(/\b[A-Za-z]:\\[^\s]+/g, ' ');
   // Bare filenames with common extensions
@@ -1124,6 +1130,12 @@ function pronounceForSpeech(text) {
     u = u.replace(/\/+/g, ' ');
     return u.trim() || 'link';
   });
+
+  // Tilde approximations (speak-only): "~280" → "about 280"; "10~20" → "10 to 20".
+  // Also applied earlier in scrubDenseSpeechTokens so path/punct wipes cannot drop them.
+  t = t.replace(/(\d+(?:,\d{3})*(?:\.\d+)?)\s*~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, '$1 to $2');
+  t = t.replace(/~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, 'about $1');
+  t = t.replace(/\babout\s+about\b/gi, 'about');
 
   // 1) digit.digit → point (repeat for 3.1.4-style version chains)
   t = t.replace(/(\d)\.(\d)/g, '$1 point $2');
