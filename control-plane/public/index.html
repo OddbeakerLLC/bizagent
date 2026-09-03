@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>BizAgent</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=20260903-chat-time">
 </head>
 <body>
   <main class="app-shell">
-    <aside class="agent-rail" aria-label="Agents">
-      <div class="rail-title">Agents</div>
+    <aside class="agent-rail" aria-label="Products">
+      <div class="rail-title">Products</div>
       <div id="agents"></div>
     </aside>
     <section class="chat-shell" id="chatShell">
@@ -23,6 +23,7 @@
         <div class="auth-controls">
           <button id="libraryBtn" type="button" class="btn-secondary" hidden title="Browse plans, specs, and other docs written for you">Library</button>
           <button id="companyFilesBtn" type="button" class="btn-secondary" hidden title="Upload files to company/ for the Knowledge Stack">Company</button>
+          <button id="ttsToggle" type="button" class="btn-secondary tts-toggle" hidden title="Text-to-speech for hub replies (off)" aria-pressed="false">TTS</button>
           <button id="editDisplayName" type="button" class="btn-secondary" hidden title="Change your display name">Name</button>
           <span id="authStatus" class="auth-status">Checking session...</span>
           <button id="logout" type="button" hidden>Logout</button>
@@ -61,37 +62,6 @@
       </form>
     </section>
 
-    <section class="library-shell" id="libraryShell" hidden>
-      <header class="topbar library-topbar">
-        <div class="library-topbar-left">
-          <button id="libraryBackBtn" type="button" class="btn-secondary" title="Back to chat">← Chat</button>
-          <h2 class="library-page-title">Library</h2>
-        </div>
-        <div class="auth-controls">
-          <button id="libraryRefresh" type="button" class="btn-secondary">Refresh</button>
-          <button id="libraryDownloadBtn" type="button" class="btn-secondary" disabled title="Download selected document">Download</button>
-        </div>
-      </header>
-      <div class="library-page-body">
-        <p class="company-help library-help">
-          Plans, specs, and other markdown written for you on the hub.
-          Agents and the hub save deliverables under <code>library/</code>.
-        </p>
-        <div class="library-layout">
-          <div class="library-sidebar">
-            <input id="libraryFilter" type="search" class="library-filter" placeholder="Filter by title…" autocomplete="off">
-            <ul id="libraryList" class="company-file-list library-list"></ul>
-          </div>
-          <div class="library-preview">
-            <div id="libraryPreviewTitle" class="library-preview-title">Select a document</div>
-            <div id="libraryPreviewBody" class="library-preview-body message-body">
-              <p class="company-file-empty">Nothing selected.</p>
-            </div>
-          </div>
-        </div>
-        <p id="libraryStatus" class="modal-status auth-status" hidden></p>
-      </div>
-    </section>
   </main>
 
   <div id="configModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="modalTitle">
@@ -152,6 +122,8 @@
     </div>
   </div>
 
-  <script src="/app.js"></script>
+  <script src="/enterprise/enterprise-panel.js" onerror="/* enterprise optional */"></script>
+  <script src="/markdown.js?v=20260830-tts-dot-point"></script>
+  <script src="/app.js?v=20260903-tts-two-sent"></script>
 </body>
 </html>

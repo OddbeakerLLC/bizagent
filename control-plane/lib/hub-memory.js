@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { appDir, ensureDir } = require('./config');
 const { logEvent, logLatency } = require('./log');
+const { applyHubSessionPath, applyHubTurnContext, isActiveEnterprise, getActiveEnterpriseHooks } = require('./enterprise-plugin');
 
 const MAX_RECENT_TURNS = 12;
 const MAX_SUMMARY_BULLETS = 16;
@@ -23,7 +24,21 @@ function hubTurnsDir(hub) {
   return path.join(hubPromptDir(hub), 'turns');
 }
 
-function hubSessionFile(hub) {
+function hubSessionFile(hub, sessionOrUserId) {
+  if (isActiveEnterprise()) {
+    try {
+      const p = applyHubSessionPath(hub, sessionOrUserId || null);
+      if (p) return p;
+    } catch (_err) {
+      /* fall through */
+    }
+    // Default enterprise naming when hook absent but we have a user id
+    const uid =
+      typeof sessionOrUserId === 'string'
+        ? sessionOrUserId
+        : sessionOrUserId && (sessionOrUserId.user_id || sessionOrUserId.userId);
+    if (uid) return path.join(appDir(hub), `hub-session-${uid}.md`);
+  }
   return path.join(appDir(hub), 'hub-session.md');
 }
 
@@ -39,6 +54,26 @@ function extractAgentSections(agentText) {
 }
 
 /**
+ * Classify registry for first-run vs operating.
+ * Installer writes empty org + products=[] — that is MINIMAL, not BUILT.
+ * @returns {'missing'|'minimal'|'configured'}
+ */
+function classifyRegistryState(hub) {
+  const regPath = path.join(hub, 'registry.json');
+  try {
+    if (!fs.existsSync(regPath)) return 'missing';
+    const r = JSON.parse(fs.readFileSync(regPath, 'utf8'));
+    const org = String((r && r.org) || '').trim();
+    const products = Array.isArray(r && r.products) ? r.products : [];
+    const hasProducts = products.some((p) => p && (p.slug || p.name));
+    if (org || hasProducts) return 'configured';
+    return 'minimal';
+  } catch (_err) {
+    return 'missing';
+  }
+}
+
+/**
  * Slim always-on hub runtime prompt (Phase 1).
  * Fat detail (Knowledge Stack, journal schemas, Claude hook, nightly) is
  * on-demand via paths — open only when the turn needs it.
@@ -48,6 +83,32 @@ function extractAgentSections(agentText) {
 function deriveHubRuntimePrompt(hub) {
   const sessionRel = path.relative(hub, hubSessionFile(hub));
   const hubAbs = path.resolve(hub);
+  const regState = classifyRegistryState(hub);
+  const systemStateBlock = (() => {
+    if (regState === 'configured') {
+      return [
+        `- Hub root (absolute): \`${hubAbs}\``,
+        '- Registry state: **BUILT / configured** (org and/or products present).',
+        '- **Never** run full setup/interview (§1) or rebuild the hub unless the operator explicitly asks to reconfigure.',
+        '- On installer first-run seed for a configured hub: short welcome + “what do you want to work on?” only.',
+        '- Do **not** re-read root `AGENT.md` for §0 detect-built. Operational rules are in this prompt; open `AGENT.md` only when a turn needs setup/ops detail the operator requested.',
+      ];
+    }
+    if (regState === 'minimal') {
+      return [
+        `- Hub root (absolute): \`${hubAbs}\``,
+        '- Registry state: **MINIMAL install seed** (`registry.json` exists but org empty and products=[]). This is **first-run**, not BUILT.',
+        '- On `install-first-run` / Welcome seed: continue the console conversation; keep replies short (TTS). One question at a time per AGENT.md §1.',
+        '- Approved beats: org → repos (or none) → product groupings/slugs → agent names → peer messaging (default no) → nightly 23:00 → KS → archive days 30 → autonomy maintenance-only → private hub remote → LLM (skip if set) → CP login (skip if auth exists) → summary/next steps.',
+        '- Zero-repo is OK: write minimal registry + scaffolding; add products later. Hub-and-spoke stays; no peer-chat protocol work.',
+        '- Skip installer-already-set provider/key/CP auth/detach. After §1 answers, do §2 generate. Open `AGENT.md` §1–§2 for the full checklist.',
+      ];
+    }
+    return [
+      `- Hub root (absolute): \`${hubAbs}\``,
+      '- Registry state: **missing** — treat as UNBUILT. Follow AGENT.md §1 then §2.',
+    ];
+  })();
   return [
     '# BizAgent Hub Runtime Prompt',
     '',
@@ -58,7 +119,7 @@ function deriveHubRuntimePrompt(hub) {
     '',
     'You are the **Products Team Lead** (PTL). You report to the operator (CEO).',
     'Hub-and-spoke: this repo is the hub; each product has one agent owning one or more project repos.',
-    '`registry.json` is the source of truth. Use each product\'s `agent_name` when speaking to the operator;',
+    '`registry.json` is source of truth; use product `agent_name` with operator; status → product sitemap;',
     'use slugs only in message file headers (`from:`, `to:`).',
     '',
     '## What is a "product"?',
@@ -66,70 +127,65 @@ function deriveHubRuntimePrompt(hub) {
     'If it matches gather → build → distribute, it can be a BizAgent product (not only software).',
     'BizAgent is a product-development OS — not search, not only a coding assistant. Details: `AGENT.md` / architecture.',
     '',
-    '## System state (always true on runtime launches)',
+    '## System state',
     '',
-    `- Hub root (absolute): \`${hubAbs}\``,
-    '- The system is **BUILT**. `registry.json` exists. **Never** run setup/interview or §0 "detect state".',
-    '- Do **not** re-read root `AGENT.md` for setup. Operational rules are in this prompt.',
+    ...systemStateBlock,
     '',
     '## Non-negotiable limits',
     '',
-    '1. You **NEVER** write code, edit project files, update sitemaps, or write journal entries for any product.',
-    '2. You **NEVER** do work that belongs to a product agent — even if small or faster yourself.',
+    '1. You **NEVER** write code, edit project files, update sitemaps, or write journal entries for any product — **except** during authorized first-run §2 generate (registry, agent dirs, onboard scripts) when registry is minimal/UNBUILT.',
+    '2. You **NEVER** do work that belongs to a product agent — even if small or faster yourself (after the hub is configured).',
     '3. Operator task → identify owning agent by **agent_name** → message their inbox (`to:` slug) → wait for reply → report back.',
-    '4. Do **not** start product implementation. If you already touched a product repo or `agents/<slug>/` for product work: stop, undo, delegate.',
+    '4. Do **not** start product implementation. If you already touched a product repo or `agents/<slug>/` for product work outside first-run generate: stop, undo, delegate.',
     '5. **Hub machinery is user-gated.** By default do **not** edit `control-plane/`, the web UI, dispatch/auth, `templates/`, hub `scripts/` behavior, `cli.json`, or registry schema/shape.',
-    '   Soft ops without a special ask: route/archive mail, hub journal tags, KS capture, read registry, delegate.',
+    '   Soft ops without a special ask: route/archive mail, hub journal tags, KS capture, playbook file/index updates, read registry, delegate.',
+    '   First-run §2 may write `registry.json`, agent mailboxes, and run onboard/auth-init as specified in AGENT.md.',
     '6. **Hub code changes only when the operator explicitly requests** a hub/control-plane/UI/ops-code change. Then: minimal scoped diff, no speculative refactors, no drive-by cleanups.',
-    '7. If hub machinery is wrecked: tell the operator to run `scripts/factory-reset.sh repair` from a shell (keeps registry/agents). Do not improvise a half-reset.',
+    '7. If hub machinery is wrecked: tell the operator to run `scripts/factory-reset.sh repair` (or `scripts/upgrade.sh`) from a shell (keeps registry/agents). Do not improvise a half-reset.',
+    '8. **Framework updates:** operator can ask anytime to check/apply updates via `scripts/upgrade.sh` (dry-run first if unsure). Nightly auto-upgrade only when `registry.json` → `settings.auto_update` is true (default false).',
+    '9. **Playbooks/consult (hub-mediated only):** store `knowledge-stack/playbooks/` + `INDEX.md` (schema README; design `docs/PLAYBOOKS-AND-CONSULT.md`). On `consult:…`: grep cards → answer or query ≤2 agents → one synthesis; promote proven wins; ~24h TTL. File `playbook candidate`s only if proven/non-secret/one-problem. Never fleet-broadcast.',
     '',
     '## Brevity',
     '',
     'Replies to the operator default to **two sentences or less**. Longer only when the work requires it.',
+    '**Two-sentence summary (operator lock):** Every **substantive / long** operator reply must open with a visible **two-sentence summary of the full answer**, then a blank line, then the body when more is needed.',
+    'A leading `**TLDR:**` / `TLDR:` / `**TL;DR:**` / `TL;DR:` label is **optional** — include it or not; the first two lead sentences are the spoken summary either way.',
+    'Console TTS speaks those two summary sentences (labeled block if present, else first two complete lead sentences). Do **not** open long replies with a single non-summary sentence.',
+    'Skip the two-sentence summary only for pure one-liners, yes/no, or short “on it / waiting” acks — never invent a fake summary for those.',
     'Messages to product agents: only what the recipient needs to act — no preamble, recap, or signoff.',
     'Prefer one task per agent mail; include goal, constraints, and done-when so a cold product agent can act.',
     '',
     '## Channel rules (non-negotiable)',
     '',
     '- **Stdout is debug only.** Nothing you print is shown to the operator.',
-    '- **Operator-visible text** must go through the reserved body file:\n  `RESERVED_REPLY_BODY` path is pre-created by the CP; hub writes markdown body only.',
-    '- **Never** hand-write files under `outbox/` for operator replies (free-form outbox is **banned** for `to: user`).',
-    '- Product-agent mail (to a slug) uses the write-message helper.',
-    '- When an agent→hub message arrives, write **at most one** short user-visible summary. Never emit duplicate "X is done" notices.',
+    '- **Operator-visible text:** write markdown body only to `RESERVED_REPLY_BODY` (CP-pre-created). Free-form `outbox/` for `to: user` is banned.',
+    '- **One operator-visible reply per turn** — never both reserved body and `write-message --to user`.',
+    '- Product-agent mail uses write-message. Agent→hub: **at most one** short user-visible summary (no duplicate "done" notices).',
     '',
     '## This-turn order (outbox-first)',
     '',
-    '1. **Answer first** via the mandatory write path (see Message delivery). Success = that write returns OK / the reserved body file is non-empty.',
-    '2. **Then housekeep:** archive handled `inbox/*.md` into `inbox/archive/` immediately after acting on each. For agent→hub completion mail, write **at most one** summary to the operator even if the hub turn is re-launched before you archive; the inbox file name + body is the key. If a summary was already produced for this exact mail, just archive it.',
-    '3. Session memory is **CP-owned** (see Runtime Memory). Do not rewrite or compress it.',
-    '4. Only then: optional journal `[Maintenance]` / `[Company]` bullets if warranted.',
+    '1. **Answer first** via reserved body (or write-message fallback). Success = reserved body non-empty.',
+    '2. **Then housekeep:** archive handled `inbox/*.md` immediately. Agent→hub: one summary per mail id even if re-launched; if already summarized, just archive.',
+    '3. Session memory is **CP-owned** — do not rewrite. Optional journal only after.',
     '',
     '## Message delivery (mandatory write path)',
     '',
-    '### Operator / console reply (`to: user`)',
+    '### Operator reply (`to: user`) — exactly one path',
     '',
-    'When this turn has a `conversation_id`, prefer **one** of:',
+    '1. **Reserved body** when turn gives `RESERVED_REPLY_BODY`: body-only markdown there. CP routes. Do **not** also write-message --to user.',
+    '2. Else `scripts/write-message.sh --to user --from hub --subject "…" --conversation-id "<id>" --body "…"` (funnels into reserved body if present).',
     '',
-    '1. **Reserved body file** (preferred when the turn prompt gives `RESERVED_REPLY_BODY`): write **only the markdown body** (no YAML frontmatter) to that absolute path with your file tool. The control plane wraps frontmatter and routes it.',
-    '2. **write-message helper:**',
-    '   ```bash',
-    '   scripts/write-message.sh --to user --from hub --subject "short subject" \\',
-    '     --conversation-id "<id from this turn>" --body "Your reply here."',
-    '   ```',
-    '',
-    'Do **not** hand-write files under `outbox/`. Do **not** invent a `conversation_id`.',
+    'Never hand-write `outbox/` or invent `conversation_id`.',
     '',
     '### Product-agent mail',
     '',
-    '```bash',
-    'scripts/write-message.sh --to <slug> --from hub --subject "short subject" --body "..."',
-    '```',
+    '`scripts/write-message.sh --to <slug> --from hub --subject "…" --body "…"`',
     '',
-    '**Interim messages** only for unbounded delays (dispatch, URL fetch): brief write-message first, full reply second, same `conversation_id`. Skip interims for quick synthesis.',
+    'Interims only for unbounded delays (brief then full, same `conversation_id`).',
     '',
     '### Deferred wake',
     '',
-    '`scripts/defer.sh --to <slug|hub> --in 15m --body "…"` → inbox `kind: defer-wake`.',
+    '`scripts/defer.sh --to <slug|hub> --in 15m --body "…"` → `kind: defer-wake`.',
     '',
     '## Runtime Memory (CP-owned)',
     '',
@@ -139,10 +195,11 @@ function deriveHubRuntimePrompt(hub) {
     '',
     '## On-demand references (open only if this turn needs them)',
     '',
-    '- Full setup/ops manual: `AGENT.md` (never for §0 detect-built on a live hub)',
+    '- Full setup/ops manual: `AGENT.md` (first-run §1–§2 when registry minimal; never §0 “exists ⇒ built” on install seed)',
     '- Knowledge Stack / weekly refresh: `WEEKLY.md`, `company/`, `knowledge-stack/`',
-    '- **Library** (operator-facing plans/specs/reports): write under `library/` and keep `library/manifest.json` in sync — the operator browses these in the UI without hub FS access. Prefer `library/YYYY-MM-DD-<slug>.md` plus a manifest entry (id, title, path, source).',
+    '- **Library** (UI browse): hub `docs/`, `company/`, `reports/` (+ registry project repos). No `library/manifest.json`. Docs: `docs/YYYY-MM-DD-<slug>.md`. Diagrams: `docs/diagrams/<name>.puml` (+ rendered `.svg`).',
     '- Nightly housekeeping: `NIGHTLY.md`',
+    '- Framework upgrade: `scripts/upgrade.sh` (dry-run / apply; preserves ops data)',
     '- Factory reset (SHTF): `scripts/factory-reset.sh`',
     '- Product agent mailboxes: `agents/<slug>/inbox`, `agents/<slug>/outbox`',
     '- Architecture: `docs/ARCHITECTURE.md`',
@@ -276,7 +333,24 @@ function buildHubTurnPrompt(hub) {
   ensureHubRuntimePrompt(hub);
   ensureDir(hubTurnsDir(hub));
   const hubAbs = path.resolve(hub);
-  const sessionPath = hubSessionFile(hub);
+  // Resolve acting user from pending console mail (enterprise isolation).
+  let actingUserId = null;
+  if (isActiveEnterprise()) {
+    const hooks = getActiveEnterpriseHooks();
+    if (typeof hooks.resolveActingUserId === 'function') {
+      try { actingUserId = hooks.resolveActingUserId(hub, {}) || null; } catch (_e) { /* ignore */ }
+    }
+    if (!actingUserId) {
+      for (const file of listPendingInboxFiles(hub)) {
+        try {
+          const body = fs.readFileSync(file, 'utf8');
+          const m = body.match(/^user_id:\s*(.+?)\s*$/m);
+          if (m) { actingUserId = m[1].trim(); break; }
+        } catch (_e) { /* ignore */ }
+      }
+    }
+  }
+  const sessionPath = hubSessionFile(hub, actingUserId);
   const sessionRel = path.relative(hub, sessionPath);
   let sessionBody = '';
   try {
@@ -335,26 +409,42 @@ function buildHubTurnPrompt(hub) {
     '### Operator reply delivery (MANDATORY)',
     '',
     'Stdout is **not** shown to the operator. Free-form `outbox/` files are **banned**.',
+    '**One reply only** — never write both the reserved body and `write-message --to user`.',
     '',
     `**conversation_id:** \`${convId}\``,
     '',
-    '**Reserved body file:** write **only the final markdown body** (no YAML) to:',
+    '**Reserved body file (preferred):** write **only the final markdown body** (no YAML) to:',
     '',
     '```text',
     reservedBodyAbs,
     '```',
     '',
-    'Use your file write/edit tool. Overwrite the file with the complete operator-visible reply. The control plane adds frontmatter and routes it.',
+    'Use your file write/edit tool. Overwrite the file with the complete operator-visible reply. The control plane adds frontmatter and routes it. **Stop after this write** — do not also call write-message for the operator.',
     '',
-    '**Alternative — write-message helper (if file write fails):**',
+    '**Fallback only — write-message helper (if file write fails):**',
     '',
     '```bash',
-    `scripts/write-message.sh --to user --from hub --subject "console reply" --conversation-id "${convId}" --body "Your reply here."`,
+    actingUserId
+      ? `scripts/write-message.sh --to user --from hub --subject "console reply" --conversation-id "${convId}" --user-id "${actingUserId}" --body "Your reply here."`
+      : `scripts/write-message.sh --to user --from hub --subject "console reply" --conversation-id "${convId}" --body "Your reply here."`,
     '```',
     '',
-    'Success = reserved body file non-empty **or** write-message wrote hub→user outbox with this conversation_id.',
+    'write-message funnels into the reserved body when it exists (still one delivery).',
     '',
-  ].join('\n');
+    actingUserId
+      ? `When writing hub→user mail, always set user_id: ${actingUserId} and conversation_id: ${convId}.`
+      : 'Success = reserved body file non-empty (or write-message funneled into it).',
+    actingUserId
+      ? 'Success = reserved body file non-empty (or write-message funneled into it) with this conversation_id and user_id.'
+      : '',
+    '',
+  ].filter((line) => line !== undefined).join('\n');
+
+  const enterpriseCtx = applyHubTurnContext(hub, {
+    conversationId: convId,
+    user_id: actingUserId,
+    pendingCount: pending.length,
+  });
 
   const content = [
     '# Hub turn prompt (ephemeral)',
@@ -365,10 +455,12 @@ function buildHubTurnPrompt(hub) {
     '',
     deriveHubRuntimePrompt(hub).trim(),
     '',
+    enterpriseCtx ? '## Enterprise seat context\n\n' + enterpriseCtx.trim() + '\n' : '',
     '## This turn',
     '',
     `- Hub absolute path: \`${hubAbs}\``,
     `- conversation_id: \`${convId}\``,
+    actingUserId ? `- Acting user_id: \`${actingUserId}\`` : '',
     `- RESERVED_REPLY_BODY: \`${reservedBodyAbs}\``,
     `- Session file (read-only, already compacted by CP): \`${sessionRel}\``,
     `- Pending inbox files: ${pending.length}`,
@@ -378,7 +470,8 @@ function buildHubTurnPrompt(hub) {
     '1. Read **Pending mail** and **Session excerpt** below (already inlined — avoid tool-reads unless needed).',
     '2. Deliver operator-visible text via reserved body file or `scripts/write-message.sh` (never free-form outbox; never stdout-only).',
     '3. Archive each handled inbox message to `inbox/archive/`.',
-    '4. Do not implement product work; do not edit hub machinery unless the operator explicitly asked; do not run setup; do not rewrite session memory.',
+    '4. Do not implement product work; do not edit hub machinery unless the operator explicitly asked; do not rewrite session memory.',
+    '5. Setup/interview only when registry is **minimal/UNBUILT** or pending mail is first-run seed — never full §1 rebuild on a configured hub.',
     '',
     '## Pending mail',
     '',
@@ -556,9 +649,13 @@ function renderHubSession(conversation, hub) {
   ].join('\n');
 }
 
-function resetHubSession(hub, conversation) {
+function resetHubSession(hub, conversation, sessionOrUserId) {
   ensureDir(appDir(hub));
-  const file = hubSessionFile(hub);
+  const uid =
+    sessionOrUserId ||
+    (conversation && conversation.user_id) ||
+    null;
+  const file = hubSessionFile(hub, uid);
   const conv = {
     name: (conversation && conversation.name) || 'Conversation',
     created_at: (conversation && conversation.created_at) || new Date().toISOString(),
@@ -569,9 +666,13 @@ function resetHubSession(hub, conversation) {
   return file;
 }
 
-function compactHubSession(hub, conversation) {
+function compactHubSession(hub, conversation, sessionOrUserId) {
   ensureDir(appDir(hub));
-  const file = hubSessionFile(hub);
+  const uid =
+    sessionOrUserId ||
+    (conversation && conversation.user_id) ||
+    null;
+  const file = hubSessionFile(hub, uid);
   fs.writeFileSync(file, renderHubSession(conversation || {}, hub));
   return file;
 }
@@ -579,6 +680,7 @@ function compactHubSession(hub, conversation) {
 module.exports = {
   buildAgentTurnPrompt,
   buildHubTurnPrompt,
+  classifyRegistryState,
   compactHubSession,
   deriveHubRuntimePrompt,
   ensureHubRuntimeCwd,

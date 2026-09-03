@@ -14,15 +14,14 @@ let ws = null;
 let wsReady = false;
 let subscribedAgents = false;
 let subscribedConv = null; // conv id we are currently subscribed to over WS
-/** SPA route: 'chat' | 'library' */
-let currentRoute = 'chat';
-/** Library list cache + selection */
-let libraryEntriesCache = [];
-let librarySelectedId = '';
 /** Pending composer attachments (File objects before upload). */
 let pendingAttachFiles = [];
 /** Last agents snapshot for recipient dropdown. */
 let lastAgentsList = [];
+/** Live thinking log: streams an in-flight turn's output in place of the launch-ack. */
+let thinkingSource = null;
+let thinkingConv = null;
+let thinkingAck = null; // identity (created_at) of the launch-ack currently streamed
 
 // UI polling gate for push test. Polling for /api/state and conversation history is OFF by default.
 // WS subscribe/push is the preferred and only driver when this flag is off (default).
@@ -67,10 +66,12 @@ function setAuthenticated(isAuthenticated, message) {
   if (companyBtn) companyBtn.hidden = !isAuthenticated;
   const libraryBtn = document.getElementById('libraryBtn');
   if (libraryBtn) libraryBtn.hidden = !isAuthenticated;
+  const ttsBtn = document.getElementById('ttsToggle');
+  if (ttsBtn) ttsBtn.hidden = !isAuthenticated;
   if (!isAuthenticated) {
     document.getElementById('namePanel').hidden = true;
     hideCompanyModal();
-    if (currentRoute === 'library') navigateRoute('chat');
+    stopTtsSpeech({ hard: true });
   }
   setAuthStatus(message || (isAuthenticated ? 'Signed in' : 'Login required'), isAuthenticated ? 'ok' : 'warn');
 }
@@ -91,6 +92,24 @@ function messageAuthorLabel(msg) {
   if (msg.role === 'user') return displayName || 'You';
   if (msg.role === 'status') return '';
   return 'Hub';
+}
+
+/** Time-only stamp for chat bubbles (no date). Empty if created_at missing/invalid. */
+function messageTimeLabel(msg) {
+  const raw = msg && msg.created_at;
+  if (!raw) return '';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return '';
+  try {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  } catch (_) {
+    // Fallback HH:MM local
+    const h = d.getHours();
+    const m = String(d.getMinutes()).padStart(2, '0');
+    const h12 = h % 12 || 12;
+    const ampm = h < 12 ? 'AM' : 'PM';
+    return `${h12}:${m} ${ampm}`;
+  }
 }
 
 function setSetupMode(isSetup) {
@@ -210,7 +229,8 @@ async function showAgentConfigModal(agent) {
     agentName: agent.agentName || agent.slug,
     provider,
     cliName: provider,
-    model: agent.model || '',
+    // Roster may show "(unset)" when no product/default model is configured.
+    model: agent.model && agent.model !== '(unset)' ? agent.model : '',
   };
   const modal = document.getElementById('configModal');
   const title = document.getElementById('modalTitle');
@@ -385,31 +405,43 @@ function renderAgents(agents) {
     row.tabIndex = 0;
 
     const light = document.createElement('span');
-    light.className = `status-light ${agent.hasMail ? 'on' : ''}`;
-    light.title = agent.hasMail ? 'Inbox has mail' : 'Inbox empty';
+    light.className = `status-light ${agent.hasMail ? 'on' : ''} ${agent.active ? 'running' : ''}`;
+    light.title = agent.active
+      ? `Stop ${agent.agentName || agent.slug} (running)`
+      : (agent.hasMail ? 'Inbox has mail' : 'Inbox empty');
+    light.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // Always prefer hard-stop for the clicked slug when the server says it is
+      // active. Fallback: Escape-equivalent stopThinking only when this row is
+      // idle but a hub thinking stream is open (legacy path).
+      if (agent.active) {
+        stopAgent(agent.slug);
+      } else if (agent.slug === 'hub' && thinkingActive()) {
+        stopThinking();
+      }
+    });
 
     const labels = document.createElement('div');
     labels.className = 'agent-labels';
 
+    // Line 1 (top, large): product name.
+    const product = document.createElement('span');
+    product.className = 'agent-product';
+    product.textContent = agent.name || agent.agentName || agent.slug;
+    labels.appendChild(product);
+
+    // Line 2 (middle): agent name.
     const name = document.createElement('span');
     name.className = 'agent-name';
     name.textContent = agent.active ? `${agent.agentName} running` : agent.agentName;
     labels.appendChild(name);
 
-    if (agent.name && agent.name !== agent.agentName) {
-      const product = document.createElement('span');
-      product.className = 'agent-product';
-      product.textContent = agent.name;
-      labels.appendChild(product);
-    }
-
-    // LLM provider >> model (click opens config; does not toggle expand)
+    // Line 3 (beneath, small): model (click opens config; does not toggle expand).
     const cliLine = document.createElement('button');
     cliLine.type = 'button';
     cliLine.className = 'agent-cli-line';
-    const providerName = agent.provider || agent.cliName || '—';
-    const modelName = agent.model || '—';
-    cliLine.textContent = `${providerName} >> ${modelName}`;
+    const modelName = agent.model || '(unset)';
+    cliLine.textContent = modelName;
     cliLine.title = 'Change LLM and model';
     cliLine.addEventListener('click', (e) => {
       e.preventDefault();
@@ -480,163 +512,6 @@ function renderAgents(agents) {
   });
 }
 
-function escapeHtml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function isSafeHref(url) {
-  return /^(https?:|mailto:|\/|#)/i.test(url);
-}
-
-function isSafeImageSrc(url) {
-  return /^(https?:|\/)/i.test(url);
-}
-
-function parseTableCells(line) {
-  let t = line.trim();
-  if (t.startsWith('|')) t = t.slice(1);
-  if (t.endsWith('|')) t = t.slice(0, -1);
-  return t.split('|').map((cell) => cell.trim());
-}
-
-function isTableSeparator(line) {
-  const cells = parseTableCells(line);
-  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
-}
-
-function isTableRow(line) {
-  const t = line.trim();
-  return t.includes('|') && !/^```/.test(t);
-}
-
-function renderInline(text) {
-  const codeSpans = [];
-  let s = text.replace(/`([^`]+)`/g, (_, code) => {
-    codeSpans.push(escapeHtml(code));
-    return `\x00CODESPAN:${codeSpans.length - 1}\x00`;
-  });
-  s = escapeHtml(s);
-  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
-  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  s = s.replace(/_([^_]+)_/g, '<em>$1</em>');
-  // Images before links so ![alt](url) is not partially treated as a link.
-  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (match, alt, url) => (
-    isSafeImageSrc(url)
-      ? `<img src="${url}" alt="${alt}" loading="lazy">`
-      : match
-  ));
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, url) => (
-    isSafeHref(url)
-      ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
-      : match
-  ));
-  s = s.replace(/\x00CODESPAN:(\d+)\x00/g, (_, i) => `<code>${codeSpans[Number(i)]}</code>`);
-  return s;
-}
-
-function renderMarkdown(text) {
-  const lines = text.replace(/\r\n/g, '\n').split('\n');
-  const htmlParts = [];
-  let paragraphBuffer = [];
-  let listBuffer = null;
-
-  const flushParagraph = () => {
-    if (paragraphBuffer.length) {
-      htmlParts.push(`<p>${paragraphBuffer.map(renderInline).join('<br>')}</p>`);
-      paragraphBuffer = [];
-    }
-  };
-  const flushList = () => {
-    if (listBuffer) {
-      const tag = listBuffer.type;
-      htmlParts.push(`<${tag}>${listBuffer.items.map((item) => `<li>${renderInline(item)}</li>`).join('')}</${tag}>`);
-      listBuffer = null;
-    }
-  };
-
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-
-    if (/^```/.test(line)) {
-      flushParagraph();
-      flushList();
-      const codeLines = [];
-      i++;
-      while (i < lines.length && !/^```/.test(lines[i])) {
-        codeLines.push(lines[i]);
-        i++;
-      }
-      i++;
-      htmlParts.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
-      continue;
-    }
-
-    // GFM table: header row + separator row, then zero or more body rows.
-    if (i + 1 < lines.length && isTableRow(line) && isTableSeparator(lines[i + 1])) {
-      flushParagraph();
-      flushList();
-      const headers = parseTableCells(line);
-      i += 2;
-      const bodyRows = [];
-      while (i < lines.length && isTableRow(lines[i]) && !isTableSeparator(lines[i]) && lines[i].trim() !== '') {
-        bodyRows.push(parseTableCells(lines[i]));
-        i++;
-      }
-      const thead = `<thead><tr>${headers.map((h) => `<th>${renderInline(h)}</th>`).join('')}</tr></thead>`;
-      const tbody = bodyRows.length
-        ? `<tbody>${bodyRows.map((row) => `<tr>${row.map((c) => `<td>${renderInline(c)}</td>`).join('')}</tr>`).join('')}</tbody>`
-        : '';
-      htmlParts.push(`<table>${thead}${tbody}</table>`);
-      continue;
-    }
-
-    const headerMatch = /^(#{1,6})\s+(.*)/.exec(line);
-    if (headerMatch) {
-      flushParagraph();
-      flushList();
-      const level = headerMatch[1].length;
-      htmlParts.push(`<h${level}>${renderInline(headerMatch[2])}</h${level}>`);
-      i++;
-      continue;
-    }
-
-    const ulMatch = /^[-*]\s+(.*)/.exec(line);
-    const olMatch = /^\d+\.\s+(.*)/.exec(line);
-    if (ulMatch || olMatch) {
-      flushParagraph();
-      const type = ulMatch ? 'ul' : 'ol';
-      const itemText = ulMatch ? ulMatch[1] : olMatch[1];
-      if (!listBuffer || listBuffer.type !== type) {
-        flushList();
-        listBuffer = { type, items: [] };
-      }
-      listBuffer.items.push(itemText);
-      i++;
-      continue;
-    }
-
-    if (line.trim() === '') {
-      flushParagraph();
-      flushList();
-      i++;
-      continue;
-    }
-
-    flushList();
-    paragraphBuffer.push(line);
-    i++;
-  }
-  flushParagraph();
-  flushList();
-  return htmlParts.join('');
-}
-
 function messageClassName(msg) {
   if (msg.role === 'user') return 'message user';
   if (msg.role === 'status') {
@@ -646,6 +521,1333 @@ function messageClassName(msg) {
   return 'message system';
 }
 
+// --- Console TTS (oddbeaker-tts HTTP preferred; browser speechSynthesis fallback) ---
+// Patterns adapted from Jobe PWA buildSpokenText / cleanLineForSpeech.
+// Server proxy: POST /api/tts/synthesize → local oddbeaker-tts :9201 (Kokoro).
+//
+// Chrome speechSynthesis pitfalls this module hardens against:
+// - Utterances must be retained (GC mid-speak → silence after reply #1).
+// - cancel() often leaves synth.paused=true; resume() before every speak.
+// - Long idle / multi-utterance sessions need a resume keepalive.
+// - speak() right after cancel() can no-op; microtask + retry once.
+const TTS_STORAGE_KEY = 'bizagent.tts.enabled';
+const TTS_DEBUG = (() => {
+  try { return __storage.getItem('bizagent.tts.debug') === '1'; } catch (_) { return false; }
+})();
+let ttsEnabled = false;
+/** After first paint of a conversation, only *new* hub replies are spoken. */
+let ttsPrimed = false;
+let lastSpokenHubKey = '';
+/** One-shot console warn for speak failures (autoplay / missing voices). */
+let ttsSpeakErrorLogged = false;
+/** UI state when neither server nor browser TTS is usable. */
+let ttsUnavailableReason = '';
+/** Cached oddbeaker-tts availability (null = not probed yet). */
+let ttsServerAvailable = null;
+/** ms timestamp of last successful/failed probe (for sticky-false recovery). */
+let ttsServerProbedAt = 0;
+/** Re-check oddbeaker-tts after this long when last result was unavailable. */
+const TTS_REPROBE_MS = 15000;
+/** Generation token so late async audio is dropped after stop/new speak. */
+let ttsPlayGen = 0;
+/** Active HTMLAudioElement for server WAV playback (if any). */
+let ttsAudioEl = null;
+/** Object URL for the active server WAV (revoked on stop/end). */
+let ttsObjectUrl = null;
+/** Web Audio graph for Kokoro WAV (unlocked under toggle-ON gesture). */
+let ttsAudioCtx = null;
+let ttsAudioSource = null;
+/**
+ * MUST retain current utterance(s) — Chrome GC's unreferenced SpeechSynthesisUtterance
+ * and speech dies after the first async hub reply.
+ */
+let ttsCurrentUtterance = null;
+let ttsUtteranceQueue = [];
+/** Interval that resumes a stuck paused+speaking synth (Chrome ~15s bug). */
+let ttsKeepAliveTimer = null;
+/** True after toggle-ON gesture unlocked HTMLAudio / synth this tab session. */
+let ttsGestureUnlocked = false;
+
+function hubMessageKey(msg) {
+  if (!msg || msg.role !== 'hub') return '';
+  return `${msg.created_at || ''}|${String(msg.content || '').length}|${String(msg.content || '').slice(0, 80)}`;
+}
+
+function getSpeechSynthesis() {
+  if (typeof window === 'undefined') return null;
+  return window.speechSynthesis || null;
+}
+
+function getTtsVoices() {
+  const synth = getSpeechSynthesis();
+  if (!synth) return [];
+  try {
+    return synth.getVoices() || [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function ttsSynthSnapshot() {
+  const synth = getSpeechSynthesis();
+  if (!synth) return { synth: false };
+  let pending = 0;
+  let speaking = false;
+  let paused = false;
+  try {
+    speaking = !!synth.speaking;
+    paused = !!synth.paused;
+    pending = typeof synth.pending === 'boolean' ? (synth.pending ? 1 : 0) : 0;
+  } catch (_) { /* ignore */ }
+  return {
+    synth: true,
+    enabled: ttsEnabled,
+    speaking,
+    paused,
+    pending,
+    voices: getTtsVoices().length,
+    server: ttsServerAvailable,
+    gen: ttsPlayGen,
+    gesture: ttsGestureUnlocked,
+  };
+}
+
+function logTtsDebug(label, extra) {
+  if (!TTS_DEBUG) return;
+  try {
+    console.info('[bizagent TTS]', label, ttsSynthSnapshot(), extra || '');
+  } catch (_) { /* ignore */ }
+}
+
+function stopTtsKeepAlive() {
+  if (ttsKeepAliveTimer) {
+    try { clearInterval(ttsKeepAliveTimer); } catch (_) { /* ignore */ }
+    ttsKeepAliveTimer = null;
+  }
+}
+
+function startTtsKeepAlive() {
+  stopTtsKeepAlive();
+  ttsKeepAliveTimer = setInterval(() => {
+    if (!ttsEnabled) return;
+    const synth = getSpeechSynthesis();
+    if (!synth) return;
+    try {
+      // Chrome: speaking+paused stuck mid-utterance until resume().
+      if (synth.speaking && synth.paused) {
+        logTtsDebug('keepalive resume');
+        synth.resume();
+      }
+    } catch (_) { /* ignore */ }
+  }, 4000);
+}
+
+function revokeTtsObjectUrl() {
+  if (!ttsObjectUrl) return;
+  try { URL.revokeObjectURL(ttsObjectUrl); } catch (_) { /* ignore */ }
+  ttsObjectUrl = null;
+}
+
+function stopTtsAudioGraph() {
+  try {
+    if (ttsAudioSource) {
+      try { ttsAudioSource.stop(0); } catch (_) { /* ignore */ }
+      try { ttsAudioSource.disconnect(); } catch (_) { /* ignore */ }
+      ttsAudioSource = null;
+    }
+  } catch (_) { /* ignore */ }
+}
+
+/**
+ * Stop all in-flight TTS (server WAV + browser synth).
+ * @param {{ hard?: boolean }} [opts] hard=true (toggle OFF / logout): do not
+ *   resume speechSynthesis after cancel, and suspend AudioContext so a late
+ *   BufferSource.start() after we null ttsAudioSource cannot be heard.
+ *   Soft stop (default) still resumes synth so the next speak works in Chrome.
+ */
+function stopTtsSpeech(opts) {
+  const hard = !!(opts && opts.hard);
+  ttsPlayGen += 1;
+  stopTtsKeepAlive();
+  ttsCurrentUtterance = null;
+  ttsUtteranceQueue = [];
+  stopTtsAudioGraph();
+  try {
+    if (ttsAudioEl) {
+      ttsAudioEl.pause();
+      ttsAudioEl.removeAttribute('src');
+      try { ttsAudioEl.load(); } catch (_) { /* ignore */ }
+      ttsAudioEl = null;
+    }
+  } catch (_) { /* ignore */ }
+  revokeTtsObjectUrl();
+  if (hard && ttsAudioCtx) {
+    try {
+      if (ttsAudioCtx.state === 'running') ttsAudioCtx.suspend();
+    } catch (_) { /* ignore */ }
+  }
+  try {
+    const synth = getSpeechSynthesis();
+    if (synth) {
+      synth.cancel();
+      // Soft stop only: cancel() frequently leaves paused=true; clear it so the
+      // next speak works. Hard stop (disable) must NOT resume — that can let a
+      // just-canceled utterance continue on some Chrome builds.
+      if (!hard) {
+        try { if (synth.paused) synth.resume(); } catch (_) { /* ignore */ }
+      }
+    }
+  } catch (_) { /* ignore */ }
+  if (hard) logTtsDebug('hard stop (disabled)');
+}
+
+/** Resume if cancel()/browser left synth paused (common Chrome gotcha). */
+function ensureTtsResumed() {
+  const synth = getSpeechSynthesis();
+  if (!synth) return;
+  try {
+    if (synth.paused) synth.resume();
+  } catch (_) { /* ignore */ }
+}
+
+function loadTtsEnabled() {
+  try {
+    return __storage.getItem(TTS_STORAGE_KEY) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+function saveTtsEnabled(on) {
+  try {
+    if (on) __storage.setItem(TTS_STORAGE_KEY, '1');
+    else __storage.removeItem(TTS_STORAGE_KEY);
+  } catch (_) { /* ignore */ }
+}
+
+function updateTtsToggleUi() {
+  const btn = document.getElementById('ttsToggle');
+  if (!btn || !btn.classList) return;
+  btn.classList.toggle('active', ttsEnabled);
+  if (typeof btn.setAttribute === 'function') {
+    btn.setAttribute('aria-pressed', ttsEnabled ? 'true' : 'false');
+  }
+  if (ttsUnavailableReason) {
+    btn.title = ttsUnavailableReason;
+    btn.classList.add('tts-unavailable');
+  } else {
+    btn.classList.remove('tts-unavailable');
+    let title = ttsEnabled
+      ? 'Text-to-speech ON (click to disable)'
+      : 'Text-to-speech OFF (click to enable)';
+    if (ttsEnabled && ttsServerAvailable === true) {
+      title += ' · oddbeaker-tts';
+    } else if (ttsEnabled && ttsServerAvailable === false) {
+      title += ' · browser voice fallback';
+    }
+    btn.title = title;
+  }
+}
+
+function setTtsUnavailable(reason) {
+  ttsUnavailableReason = reason || '';
+  updateTtsToggleUi();
+}
+
+function logTtsSpeakErrorOnce(err) {
+  if (ttsSpeakErrorLogged) return;
+  ttsSpeakErrorLogged = true;
+  try {
+    console.warn(
+      '[bizagent TTS] speak failed (service down, autoplay, or no voices):',
+      err || '',
+      ttsSynthSnapshot(),
+    );
+  } catch (_) { /* ignore */ }
+}
+
+/**
+ * Probe control-plane → oddbeaker-tts health.
+ * Caches positives indefinitely until a real failure; re-probes sticky-false
+ * after TTS_REPROBE_MS so a pre-login 401 or brief outage does not pin browser TTS.
+ */
+async function probeTtsServer(force) {
+  const now = Date.now();
+  if (!force && ttsServerAvailable === true) return true;
+  if (
+    !force
+    && ttsServerAvailable === false
+    && ttsServerProbedAt
+    && (now - ttsServerProbedAt) < TTS_REPROBE_MS
+  ) {
+    return false;
+  }
+  try {
+    const res = await fetch('/api/tts/health', { credentials: 'same-origin' });
+    if (!res.ok) {
+      // 401 before session is ready is not "service down" — leave cache unset.
+      if (res.status === 401 || res.status === 403) {
+        logTtsDebug('probe auth not ready', res.status);
+        return ttsServerAvailable === true;
+      }
+      ttsServerAvailable = false;
+      ttsServerProbedAt = now;
+      return false;
+    }
+    const data = await res.json().catch(() => ({}));
+    ttsServerAvailable = !!(data && data.available);
+    ttsServerProbedAt = now;
+    return ttsServerAvailable;
+  } catch (_) {
+    ttsServerAvailable = false;
+    ttsServerProbedAt = now;
+    return false;
+  }
+}
+
+/** Ensure AudioContext exists and is running (call under user gesture when possible). */
+async function ensureTtsAudioContext() {
+  const AC = typeof window !== 'undefined'
+    && (window.AudioContext || window.webkitAudioContext);
+  if (!AC) return null;
+  if (!ttsAudioCtx) {
+    try { ttsAudioCtx = new AC(); } catch (_) { return null; }
+  }
+  try {
+    if (ttsAudioCtx.state === 'suspended') await ttsAudioCtx.resume();
+  } catch (_) { /* ignore */ }
+  return ttsAudioCtx;
+}
+
+/**
+ * Play a WAV ArrayBuffer via Web Audio (preferred) or HTMLAudio blob URL.
+ * Web Audio stays unlocked after toggle-ON resume(), so async hub replies
+ * do not hit the HTMLMediaElement autoplay gate that forced speechSynthesis.
+ * @returns {'webaudio'|'element'} which path started
+ */
+/** True when this play generation is still current and TTS is still enabled. */
+function ttsPlayStillActive(gen) {
+  return gen === ttsPlayGen && !!ttsEnabled;
+}
+
+/**
+ * Pad trailing silence onto a decoded AudioBuffer so the last phoneme is not
+ * clipped when BufferSource.onended / output latency cuts the tail short.
+ * Does not change the WAV on disk — playback only.
+ */
+function padTtsAudioBuffer(ctx, decoded, padSec) {
+  const pad = Math.max(0, Number(padSec) || 0);
+  if (!decoded || !ctx || pad <= 0) return decoded;
+  const sampleRate = decoded.sampleRate || ctx.sampleRate || 24000;
+  const extra = Math.max(1, Math.floor(sampleRate * pad));
+  const channels = Math.max(1, decoded.numberOfChannels || 1);
+  const total = decoded.length + extra;
+  let out;
+  try {
+    out = ctx.createBuffer(channels, total, sampleRate);
+  } catch (_) {
+    return decoded;
+  }
+  for (let ch = 0; ch < channels; ch += 1) {
+    const src = decoded.getChannelData(ch);
+    const dst = out.getChannelData(ch);
+    dst.set(src, 0);
+    // remaining samples stay 0 (silence)
+  }
+  return out;
+}
+
+async function playTtsWavBuffer(arrayBuffer, gen) {
+  if (!ttsPlayStillActive(gen)) return 'webaudio';
+  const ctx = await ensureTtsAudioContext();
+  if (!ttsPlayStillActive(gen)) return 'webaudio';
+  if (ctx && typeof ctx.decodeAudioData === 'function') {
+    // copy: decodeAudioData may detach the buffer
+    const copy = arrayBuffer.slice ? arrayBuffer.slice(0) : arrayBuffer;
+    let decoded;
+    try {
+      decoded = await ctx.decodeAudioData(copy);
+    } catch (err) {
+      logTtsDebug('decodeAudioData failed', String(err && err.message || err));
+      decoded = null;
+    }
+    // Re-check after await: toggle OFF bumps gen and may suspend the context.
+    if (!ttsPlayStillActive(gen)) return 'webaudio';
+    if (decoded) {
+      stopTtsAudioGraph();
+      // Ensure context is running only when still enabled (hard-stop may have suspended it).
+      try {
+        if (ctx.state === 'suspended') await ctx.resume();
+      } catch (_) { /* ignore */ }
+      if (!ttsPlayStillActive(gen)) return 'webaudio';
+      // ~200ms tail pad: last word was getting clipped at BufferSource end on some
+      // Chromium builds even though the WAV itself still contained the phonemes.
+      const playBuffer = padTtsAudioBuffer(ctx, decoded, 0.2);
+      const source = ctx.createBufferSource();
+      source.buffer = playBuffer;
+      source.connect(ctx.destination);
+      ttsAudioSource = source;
+      logTtsDebug('server webaudio play', {
+        seconds: playBuffer.duration,
+        rawSeconds: decoded.duration,
+      });
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        let watch = null;
+        const finish = (err) => {
+          if (settled) return;
+          settled = true;
+          if (watch) {
+            try { clearInterval(watch); } catch (_) { /* ignore */ }
+            watch = null;
+          }
+          if (ttsAudioSource === source) ttsAudioSource = null;
+          if (err) reject(err instanceof Error ? err : new Error(String(err)));
+          else resolve();
+        };
+        source.onended = () => finish(null);
+        // Poll often so toggle-OFF cuts audio immediately (not up to 200ms later).
+        watch = setInterval(() => {
+          if (!ttsPlayStillActive(gen)) {
+            try { source.stop(0); } catch (_) { /* ignore */ }
+            try { source.disconnect(); } catch (_) { /* ignore */ }
+            if (ttsAudioSource === source) ttsAudioSource = null;
+            finish(null);
+          }
+        }, 50);
+        // Final gate: never start if disable won the race after assign.
+        if (!ttsPlayStillActive(gen)) {
+          try { source.disconnect(); } catch (_) { /* ignore */ }
+          if (ttsAudioSource === source) ttsAudioSource = null;
+          finish(null);
+          return;
+        }
+        try {
+          source.start(0);
+        } catch (err) {
+          finish(err);
+        }
+      });
+      return 'webaudio';
+    }
+  }
+
+  // Fallback: blob URL + HTMLAudio (still better than speechSynthesis when Kokoro worked).
+  if (!ttsPlayStillActive(gen)) return 'webaudio';
+  revokeTtsObjectUrl();
+  const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
+  const objUrl = URL.createObjectURL(blob);
+  ttsObjectUrl = objUrl;
+  const audio = new Audio(objUrl);
+  ttsAudioEl = audio;
+  logTtsDebug('server element play', { bytes: arrayBuffer.byteLength || 0 });
+  try {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      let watch = null;
+      const finish = (err) => {
+        if (settled) return;
+        settled = true;
+        if (watch) {
+          try { clearInterval(watch); } catch (_) { /* ignore */ }
+          watch = null;
+        }
+        if (err) reject(err instanceof Error ? err : new Error(String(err)));
+        else resolve();
+      };
+      audio.onended = () => finish(null);
+      audio.onerror = () => finish(new Error('audio element error'));
+      watch = setInterval(() => {
+        if (!ttsPlayStillActive(gen)) {
+          try { audio.pause(); } catch (_) { /* ignore */ }
+          finish(null);
+        }
+      }, 50);
+      if (!ttsPlayStillActive(gen)) {
+        try { audio.pause(); } catch (_) { /* ignore */ }
+        finish(null);
+        return;
+      }
+      const p = audio.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => { /* playing */ }).catch((err) => finish(err));
+      }
+    });
+  } finally {
+    if (ttsAudioEl === audio) ttsAudioEl = null;
+    if (ttsObjectUrl === objUrl) revokeTtsObjectUrl();
+  }
+  return 'element';
+}
+
+/**
+ * Speak via oddbeaker-tts (server proxy).
+ * Returns true when Kokoro produced audio (or nothing-to-speak) — caller must NOT
+ * fall back to speechSynthesis after a successful synthesize, even if local play fails.
+ * Throws only on transport/API failure (real service-down → browser fallback OK).
+ */
+async function speakViaServerTts(spokenText, gen) {
+  if (!ttsPlayStillActive(gen)) return false;
+  const res = await fetch('/api/tts/synthesize', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: spokenText, raw: true }),
+  });
+  if (!ttsPlayStillActive(gen)) return false;
+  if (!res.ok) {
+    ttsServerAvailable = false;
+    ttsServerProbedAt = Date.now();
+    throw new Error(`synthesize HTTP ${res.status}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!ttsPlayStillActive(gen)) return false;
+  // Empty / nothing_to_speak: success with no audio (do not fall back to browser noise).
+  if (!data || data.nothing_to_speak || !data.audio_url) {
+    logTtsDebug('server nothing to speak');
+    ttsServerAvailable = true;
+    ttsServerProbedAt = Date.now();
+    return true;
+  }
+  // Proxy must rewrite /tts/x.wav → /api/tts/audio/x.wav. If rewrite failed, real failure.
+  if (typeof data.audio_url !== 'string' || !data.audio_url.startsWith('/api/tts/')) {
+    ttsServerAvailable = false;
+    ttsServerProbedAt = Date.now();
+    throw new Error('synthesize missing proxied audio_url');
+  }
+  ttsServerAvailable = true;
+  ttsServerProbedAt = Date.now();
+
+  // Fetch WAV as blob (credentials) so playback does not depend on media element
+  // re-requesting a cookie'd URL, and so Web Audio can decode it.
+  const audioRes = await fetch(data.audio_url, { credentials: 'same-origin' });
+  if (!ttsPlayStillActive(gen)) return false;
+  if (!audioRes.ok) {
+    // Synthesize succeeded; audio fetch failed — treat as play error, not "use browser TTS".
+    throw new Error(`tts audio HTTP ${audioRes.status}`);
+  }
+  const buf = await audioRes.arrayBuffer();
+  if (!ttsPlayStillActive(gen)) return false;
+  if (!buf || !buf.byteLength) {
+    throw new Error('tts audio empty body');
+  }
+
+  try {
+    await playTtsWavBuffer(buf, gen);
+  } catch (err) {
+    // Kokoro already synthesized successfully. Do not signal browser fallback.
+    // Tag so speakTtsText keeps server preferred and stays silent rather than
+    // switching to speechSynthesis (the operator-visible bug).
+    const playErr = err instanceof Error ? err : new Error(String(err || 'play failed'));
+    playErr.code = 'tts_play_failed';
+    playErr.serverOk = true;
+    throw playErr;
+  }
+  return true;
+}
+
+function cleanLineForSpeech(line) {
+  return String(line || '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/#{1,6}\s+/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/https?:\/\/[^\s]+/g, 'link')
+    // Keep code-span *words* (`` `test` `` → "test"); only drop the backticks.
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{27BF}\u{2300}-\u{23FF}\u{2B50}\u{FE0F}\u{200D}\u{20E3}\u{E0020}-\u{E007F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2702}-\u{27B0}]/gu, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * Drop paths, filenames, SHAs, and other dense tokens that sound awful in TTS.
+ * Used by hub-reply summary mode (not the lighter buildSpokenText path).
+ */
+function scrubDenseSpeechTokens(text) {
+  let t = String(text || '');
+  // Speak-only: keep approx tildes as words before path/punct wipes
+  // (otherwise "~280" is eaten as a home-path or stripped to bare "280").
+  t = t.replace(/(\d+(?:,\d{3})*(?:\.\d+)?)\s*~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, '$1 to $2');
+  t = t.replace(/~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, 'about $1');
+  t = t.replace(/\babout\s+about\b/gi, 'about');
+  // Absolute / home / relative multi-segment paths (with or without trailing slash).
+  // Home paths require "/" after ~ or ~user so bare "~280" is not treated as a path.
+  t = t.replace(/(?:(?:~[\w.-]*)\/|\/|\.{1,2}\/)(?:[\w.-]+\/)*[\w.-]+\/?/g, ' ');
+  t = t.replace(/\b(?:[\w.-]+\/){1,}[\w.-]*\/?/g, ' ');
+  t = t.replace(/\b[A-Za-z]:\\[^\s]+/g, ' ');
+  // Bare filenames with common extensions
+  t = t.replace(
+    /\b[\w.-]+\.(?:js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|kt|md|markdown|txt|json|jsonc|ya?ml|toml|ini|env|sh|bash|zsh|ps1|css|scss|html?|vue|svelte|wasm|lock|wav|mp3|png|jpe?g|gif|svg|webp|ico|puml|sql|proto|gradle|xml|csv|tsv|log|diff|patch)\b/gi,
+    ' '
+  );
+  // Short git SHAs / commit-ish hex
+  t = t.replace(/\b[0-9a-f]{7,40}\b/gi, ' ');
+  // long kebab or snake identifiers (agent slugs, once-keys, etc.)
+  t = t.replace(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+){3,}\b/g, ' ');
+  t = t.replace(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+){3,}\b/g, ' ');
+  // Collapse leftover punctuation / connector noise after token drops
+  t = t.replace(/[`*_#~<>[\](){}|\\/]/g, ' ');
+  // "Updated and scripts See agents." style leftovers after path wipe — only when
+  // the tail is hollow verbs/connectors/file-ish words (no real content after).
+  t = t.replace(
+    /\b(?:updated|changed|modified|edited|touched|fixed|added|removed|deleted|see|check|review)\b(?:\s+(?:and|or|with|via|from|to|in|on|at|of|for|the|a|an|also|files?|paths?|scripts?|docs?|commits?|agents?|repos?|branches?|main|master))*\s*[.:]?\s*$/gi,
+    ' '
+  );
+  // Dangling connectors only when stacked or sentence-initial residue
+  // (" and or .", leading "to."). Do NOT strip a real final word like
+  // "…toggle on." / "…ship it to production." — that was cutting the last word.
+  t = t.replace(
+    /(?:^|\s)(?:and|or|with|via|from|to|in|on|at|of|for|see|also)(?:\s+(?:and|or|with|via|from|to|in|on|at|of|for|see|also))+\s*(?=[,.;:!?]|$)/gi,
+    ' '
+  );
+  t = t.replace(/^(?:and|or|with|via|from|to|in|on|at|of|for|see|also)\s*(?=[,.;:!?]|$)/gi, '');
+  t = t.replace(/(?:^|\s)(?:and|or)\s+(?=and\b|or\b|[,.;:!?]|$)/gi, ' ');
+  t = t.replace(/\s{2,}/g, ' ');
+  t = t.replace(/\s+([,.;:!?])/g, '$1');
+  t = t.replace(/([,.;:!?]){2,}/g, '$1');
+  t = t.replace(/^[,.;:\s]+|[,.;:\s]+$/g, '');
+  // Drop hollow lead-ins left after scrubbing objects ("Updated.", "Changed files:")
+  t = t.replace(
+    /^(?:updated|changed|modified|edited|touched|fixed|added|removed|deleted|see|files?|paths?|commits?|scripts?|docs?|agents?)\s*[:.]?\s*$/i,
+    ''
+  );
+  return t.trim();
+}
+
+/**
+ * Protect no-space dotted tokens (hostnames, decimals, versions) so sentence
+ * splitters do not treat bare "." as end-of-sentence. Inverse: restoreProtectedDots.
+ */
+function protectSpeechDots(text) {
+  return String(text || '').replace(
+    /(\d)\.(\d)|([A-Za-z0-9])\.([A-Za-z0-9])/g,
+    (_, d1, d2, a, b) => (d1 != null ? `${d1}\uE000${d2}` : `${a}\uE000${b}`)
+  );
+}
+
+function restoreProtectedDots(text) {
+  return String(text || '').replace(/\uE000/g, '.');
+}
+
+/**
+ * Speak-only pronunciation: numeric decimals → "point"; other no-space dotted
+ * tokens (hostnames, file.tar.gz, v2.x labels after decimals handled) → "dot".
+ * Sentence-ending ". " / ".\n" left alone. Optional light URL soften.
+ * On-screen markdown is never passed through this — TTS string only.
+ */
+function pronounceForSpeech(text) {
+  let t = String(text || '');
+  if (!t) return t;
+
+  // Soften raw URLs when they survived earlier scrub (optional / cheap).
+  t = t.replace(/\bhttps?:\/\/[^\s<>\]]+/gi, (url) => {
+    let u = url.replace(/^https?:\/\//i, '');
+    u = u.replace(/[/?#].*$/, ''); // host only
+    u = u.replace(/\/+/g, ' ');
+    return u.trim() || 'link';
+  });
+
+  // Tilde approximations (speak-only): "~280" → "about 280"; "10~20" → "10 to 20".
+  // Also applied earlier in scrubDenseSpeechTokens so path/punct wipes cannot drop them.
+  t = t.replace(/(\d+(?:,\d{3})*(?:\.\d+)?)\s*~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, '$1 to $2');
+  t = t.replace(/~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, 'about $1');
+  t = t.replace(/\babout\s+about\b/gi, 'about');
+
+  // 1) digit.digit → point (repeat for 3.1.4-style version chains)
+  t = t.replace(/(\d)\.(\d)/g, '$1 point $2');
+  // Collapse accidental double spaces from chained replaces
+  t = t.replace(/\s{2,}/g, ' ');
+
+  // 2) remaining no-space letter/digit joins across "." → dot
+  //    (beakerboard.net, foo.bar.baz, file.tar.gz, api.v2 leftover labels)
+  t = t.replace(/([A-Za-z0-9])\.([A-Za-z0-9])/g, '$1 dot $2');
+
+  return t.replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
+ * Split cleaned prose into sentence-ish chunks for summary selection.
+ * Protects dotted hostnames/decimals so "beakerboard.net" is one token.
+ */
+function splitSpeechSentences(text) {
+  const src = protectSpeechDots(String(text || '').replace(/\s+/g, ' ').trim());
+  if (!src) return [];
+  const parts = src.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+  return parts
+    .map((p) => restoreProtectedDots(p).trim())
+    .filter((p) => p.length > 1);
+}
+
+/**
+ * Finish a spoken sentence with terminal punctuation when missing.
+ * Does not clip length — preserves the full grammatical sentence.
+ */
+function ensureSpokenSentence(sentence) {
+  let s = String(sentence || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  s = s.replace(/^\W+/, '').trim();
+  if (!s) return '';
+  if (!/[.!?]$/.test(s)) s = `${s.replace(/[,:;\-–—]+$/g, '').trim()}.`;
+  return s.replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
+ * Extract a leading labeled TLDR block from a hub reply (speak path only).
+ * Accepts **TLDR:** / TLDR: / **TL;DR:** / TL;DR: (case-insensitive) at the
+ * start of the reply. Captures up to two complete sentences from that block
+ * only; strips the label word so it is not spoken. Returns null when absent.
+ */
+function extractLabeledTldr(text) {
+  const raw = String(text || '').replace(/^\uFEFF/, '').trimStart();
+  if (!raw) return null;
+  // Leading label only (liberal markdown bold / TL;DR variants).
+  const m = raw.match(
+    /^(?:\*\*\s*)?(?:TL\s*;\s*DR|TLDR)(?:\s*\*\*)?\s*:\s*/i
+  );
+  if (!m) return null;
+  let rest = raw.slice(m[0].length);
+  // TLDR body ends at first blank line (then full answer), else end of text.
+  const blank = rest.search(/\n\s*\n/);
+  if (blank >= 0) rest = rest.slice(0, blank);
+  // Soften markdown on the TLDR span only; keep pronounce/scrub for later.
+  let body = cleanLineForSpeech(rest.replace(/\n+/g, ' ')).replace(/\s+/g, ' ').trim();
+  // Drop any residual label token if bold/spacing left it behind.
+  body = body.replace(/^(?:TL\s*;\s*DR|TLDR)\s*:\s*/i, '').trim();
+  if (!body) return null;
+
+  const sentences = splitSpeechSentences(body)
+    .map((s) => scrubDenseSpeechTokens(s))
+    .map((s) => s.replace(/^\W+/, '').trim())
+    .filter((s) => s && s.length > 1)
+    .slice(0, 2)
+    .map((s) => ensureSpokenSentence(s))
+    .filter(Boolean);
+  if (!sentences.length) return null;
+  let result = sentences.join(' ').replace(/\.{2,}/g, '.').replace(/\s{2,}/g, ' ').trim();
+  if (!result) return null;
+  return result;
+}
+
+/**
+ * Hub-reply TTS summary: prefer a leading labeled two-sentence TLDR when
+ * present; otherwise the first two complete sentences of the cleaned prose
+ * lead (label optional — hub often opens with an unlabeled summary). Never a
+ * mid-sentence clip or full multi-paragraph body dump.
+ * Full markdown stays on screen. Returns null when nothing usable remains
+ * (caller uses minimal fallback — short acks may stay silent/fallback).
+ */
+function buildSpokenSummary(text) {
+  const tldr = extractLabeledTldr(text);
+  if (tldr) return tldr;
+
+  const blocks = String(text || '').split(/\n{2,}/);
+  const proseChunks = [];
+  let inCodeBlock = false;
+  let hadCode = false;
+  let hadTable = false;
+  let listHints = [];
+
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+    const lines = trimmed.split(/\n/);
+    const fenceCount = (trimmed.match(/```/g) || []).length;
+
+    if (inCodeBlock) {
+      if (fenceCount % 2 === 1) inCodeBlock = false;
+      continue;
+    }
+    if (trimmed.startsWith('```') || /^```/m.test(trimmed)) {
+      if (fenceCount % 2 === 1) inCodeBlock = true;
+      hadCode = true;
+      continue;
+    }
+
+    const tableLines = lines.filter((l) => l.trim().startsWith('|'));
+    if (tableLines.length >= 2) {
+      hadTable = true;
+      continue;
+    }
+
+    const listLines = lines.filter((l) => /^\s*(?:[-*]|\d+\.)\s/.test(l));
+    if (listLines.length >= 2) {
+      // Keep at most one short list cue from the first item — not the whole list.
+      if (listHints.length < 1) {
+        const first = scrubDenseSpeechTokens(
+          cleanLineForSpeech(listLines[0].replace(/^\s*(?:[-*]|\d+\.)\s+/, ''))
+        );
+        if (first && first.length >= 12 && first.length <= 160) listHints.push(first);
+      }
+      // Also keep any non-list lead-in line in the same block (e.g. "Done when:")
+      const lead = lines
+        .filter((l) => !/^\s*(?:[-*]|\d+\.)\s/.test(l) && !/^\s*```/.test(l))
+        .map((l) => scrubDenseSpeechTokens(cleanLineForSpeech(l)))
+        .filter(Boolean)
+        .join('. ');
+      if (lead) proseChunks.push(lead);
+      continue;
+    }
+
+    const prose = scrubDenseSpeechTokens(
+      lines.map((l) => cleanLineForSpeech(l)).join('. ')
+    );
+    if (prose) proseChunks.push(prose);
+  }
+
+  let combined = proseChunks.join('. ').replace(/\s{2,}/g, ' ').trim();
+  // Drop leftover empty shells after scrub
+  combined = scrubDenseSpeechTokens(combined)
+    .replace(/(?:^|\s)(?:link|path|file)(?:\s|$)/gi, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\.\s*\./g, '.')
+    .trim();
+
+  const sentences = splitSpeechSentences(combined)
+    .map((s) => scrubDenseSpeechTokens(s))
+    .map((s) => s.replace(/^\W+/, '').trim())
+    .filter((s) => {
+      if (!s || s.length < 10) return false;
+      // Reject leftover path-heavy, symbol-heavy, or hollow fragments
+      const words = s.split(/\s+/).filter((w) => /[A-Za-z]{2,}/.test(w));
+      if (words.length < 2) return false;
+      // Need at least one content word that is not a weak verb/noun shell
+      const content = words.filter((w) =>
+        !/^(?:updated|changed|modified|edited|touched|fixed|added|removed|deleted|see|check|files?|paths?|commits?|scripts?|docs?|agents?|and|or|with|the|a|an|to|of|in|on|at|for|from|via|also|main|master|public|live|hub|static|applied)$/i.test(w)
+      );
+      if (content.length < 1 && words.length < 4) return false;
+      const wordChars = (s.match(/[A-Za-z]/g) || []).length;
+      return wordChars >= 8 && wordChars / Math.max(s.length, 1) > 0.5;
+    });
+
+  let result = '';
+  if (sentences.length) {
+    // Contract: speak up to two complete lead sentences — no word/char mid-cuts.
+    // One usable sentence (short ack / single-line) stays one sentence; never invent a second.
+    result = sentences
+      .slice(0, 2)
+      .map((s) => ensureSpokenSentence(s))
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\.{2,}/g, '.')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+
+  // If prose was empty but structure existed, give a tiny structural cue.
+  if (!result) {
+    if (listHints.length) {
+      const cue = ensureSpokenSentence(listHints[0]);
+      result = cue
+        ? `Reply covers ${cue.replace(/[.!?]+$/g, '')}. Details are on screen.`
+        : '';
+    } else if (hadCode || hadTable) {
+      result = 'Reply ready — see the console.';
+    }
+  }
+
+  if (!result) return null;
+  result = result.replace(/\.{2,}/g, '.').replace(/\s{2,}/g, ' ').trim();
+  // Guard absurdly short noise
+  if (result.length < 12) return null;
+  return result;
+}
+
+/** Minimal fallback when summary generation yields nothing useful. */
+const TTS_REPLY_FALLBACK = 'Reply ready — see the console.';
+
+function buildSpokenText(text) {
+  const blocks = String(text || '').split(/\n{2,}/);
+  const spoken = [];
+  let inCodeBlock = false;
+
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+    const lines = trimmed.split(/\n/);
+    const fenceCount = (trimmed.match(/```/g) || []).length;
+
+    if (inCodeBlock) {
+      if (fenceCount % 2 === 1) inCodeBlock = false;
+      continue;
+    }
+    if (trimmed.startsWith('```')) {
+      if (fenceCount % 2 === 1) inCodeBlock = true;
+      spoken.push("Here's a code snippet.");
+      continue;
+    }
+
+    const tableLines = lines.filter((l) => l.trim().startsWith('|'));
+    if (tableLines.length >= 2) {
+      const dataRows = tableLines.filter((l) => !/^[\s|:-]+$/.test(l));
+      spoken.push(`Here's a table with ${Math.max(dataRows.length - 1, 0)} rows.`);
+      continue;
+    }
+
+    const listLines = lines.filter((l) => /^\s*(?:[-*]|\d+\.)\s/.test(l));
+    if (listLines.length >= 2) {
+      if (listLines.length <= 3) {
+        const items = listLines.map((l) =>
+          cleanLineForSpeech(l.replace(/^\s*(?:[-*]|\d+\.)\s+/, ''))
+        );
+        spoken.push(`${items.join('. ')}.`);
+      } else {
+        const first = cleanLineForSpeech(listLines[0].replace(/^\s*(?:[-*]|\d+\.)\s+/, ''));
+        const second = cleanLineForSpeech(listLines[1].replace(/^\s*(?:[-*]|\d+\.)\s+/, ''));
+        spoken.push(`Here are ${listLines.length} items, including ${first}, and ${second}.`);
+      }
+      continue;
+    }
+
+    const prose = lines.map((l) => cleanLineForSpeech(l)).join('. ');
+    if (prose.length > 800) {
+      const cutoff = prose.substring(0, 500);
+      const lastPeriod = cutoff.lastIndexOf('.');
+      if (lastPeriod > 100) spoken.push(prose.substring(0, lastPeriod + 1));
+      else spoken.push(`${cutoff}.`);
+      spoken.push('You can read the rest on screen.');
+    } else if (prose) {
+      spoken.push(prose);
+    }
+  }
+
+  let result = spoken.join(' ').trim();
+  result = result.replace(/\.{2,}/g, '.').replace(/\s{2,}/g, ' ');
+  return result || null;
+}
+
+/**
+ * Chunk long text so Chrome does not silently drop multi-minute utterances.
+ * Prefer sentence boundaries under ~180 chars.
+ */
+function chunkSpokenText(text, maxLen) {
+  const limit = maxLen || 180;
+  const src = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!src) return [];
+  if (src.length <= limit) return [src];
+  const parts = [];
+  let rest = src;
+  while (rest.length > limit) {
+    let cut = -1;
+    const window = rest.slice(0, limit + 1);
+    const m = window.match(/.*[.!?][\s]/);
+    if (m && m[0].length > 40) cut = m[0].length;
+    if (cut < 0) {
+      const sp = rest.lastIndexOf(' ', limit);
+      cut = sp > 40 ? sp : limit;
+    }
+    parts.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) parts.push(rest);
+  return parts.filter(Boolean);
+}
+
+function clearBrowserUtteranceState() {
+  ttsCurrentUtterance = null;
+  ttsUtteranceQueue = [];
+  stopTtsKeepAlive();
+}
+
+/**
+ * Queue and speak via speechSynthesis. Retains utterance refs (Chrome GC fix).
+ * @param {string} spokenText already-built spoken text
+ * @param {number} gen play generation — abort if stopTtsSpeech advanced it
+ * @returns {boolean}
+ */
+function speakViaBrowserTts(spokenText, gen) {
+  const playGen = gen == null ? ttsPlayGen : gen;
+  const synth = getSpeechSynthesis();
+  if (!synth) {
+    setTtsUnavailable('No TTS (oddbeaker-tts down; speechSynthesis missing)');
+    logTtsSpeakErrorOnce('speechSynthesis missing');
+    return false;
+  }
+  // Disabled or superseded — never queue browser speech.
+  if (!ttsPlayStillActive(playGen)) return false;
+
+  const chunks = chunkSpokenText(spokenText, 180);
+  if (!chunks.length) return false;
+
+  ensureTtsResumed();
+  const voices = getTtsVoices();
+  if (!voices.length) {
+    setTtsUnavailable('No TTS (oddbeaker-tts down; empty browser voice list)');
+  } else if (ttsUnavailableReason) {
+    setTtsUnavailable('');
+  }
+
+  let preferred = null;
+  try {
+    preferred = voices.find((v) =>
+      v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Daniel')
+    ) || null;
+  } catch (_) { /* ignore */ }
+
+  const utterances = chunks.map((chunk) => {
+    // Chrome speechSynthesis often clips the final word/syllable. A trailing
+    // pause marker keeps the real last word fully inside the spoken span.
+    const padded = /[.!?…]\s*$/.test(chunk) ? `${chunk} ` : `${chunk}. `;
+    const u = new SpeechSynthesisUtterance(padded);
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    u.volume = 1.0;
+    if (preferred) {
+      try { u.voice = preferred; } catch (_) { /* ignore */ }
+    }
+    return u;
+  });
+
+  // Retain ALL chunks so GC cannot kill mid-queue speech.
+  ttsUtteranceQueue = utterances;
+  ttsCurrentUtterance = utterances[0] || null;
+  startTtsKeepAlive();
+  logTtsDebug('browser speak start', { chunks: chunks.length, chars: spokenText.length });
+
+  let idx = 0;
+  const finishOk = () => {
+    if (!ttsPlayStillActive(playGen)) return;
+    clearBrowserUtteranceState();
+    logTtsDebug('browser speak end');
+  };
+
+  const speakNext = () => {
+    if (!ttsPlayStillActive(playGen)) return;
+    if (idx >= utterances.length) {
+      finishOk();
+      return;
+    }
+    const u = utterances[idx];
+    ttsCurrentUtterance = u;
+    let settled = false;
+    const advance = () => {
+      if (settled) return;
+      settled = true;
+      idx += 1;
+      // Yield a tick between chunks so cancel/resume state settles.
+      setTimeout(speakNext, 0);
+    };
+    u.onend = () => advance();
+    u.onerror = (ev) => {
+      const errName = ev && ev.error ? String(ev.error) : 'error';
+      // 'interrupted' / 'canceled' are expected when we stop for a newer reply.
+      if (errName === 'interrupted' || errName === 'canceled') {
+        logTtsDebug('utterance interrupted', errName);
+        // Do not advance — stopTtsSpeech owns the gen bump; leave queue.
+        return;
+      }
+      logTtsSpeakErrorOnce(errName);
+      logTtsDebug('utterance error', errName);
+      advance();
+    };
+
+    const doSpeak = (isRetry) => {
+      // Toggle OFF / newer speak must never call synth.speak.
+      if (!ttsPlayStillActive(playGen)) return;
+      try {
+        ensureTtsResumed();
+        synth.speak(u);
+        ensureTtsResumed();
+        // If speak() no-op'd (Chrome after cancel), retry once shortly.
+        if (!isRetry) {
+          setTimeout(() => {
+            if (!ttsPlayStillActive(playGen) || settled) return;
+            try {
+              if (!synth.speaking && !synth.pending) {
+                logTtsDebug('browser speak retry (idle after speak)');
+                doSpeak(true);
+              }
+            } catch (err) {
+              logTtsSpeakErrorOnce(err);
+            }
+          }, 50);
+        }
+      } catch (err) {
+        logTtsSpeakErrorOnce(err);
+        advance();
+      }
+    };
+
+    // First chunk: yield after cancel() so Chrome accepts the new utterance.
+    if (idx === 0) setTimeout(() => doSpeak(false), 0);
+    else doSpeak(false);
+  };
+
+  speakNext();
+  return true;
+}
+
+/**
+ * Speak text: prefer oddbeaker-tts via /api/tts/*; fall back to speechSynthesis
+ * ONLY when the service is actually down/unreachable — never after a successful
+ * Kokoro synthesize whose local play hit autoplay/decode issues.
+ * @param {string} text raw or already-built spoken text
+ * @param {{ raw?: boolean, summary?: boolean }} [opts]
+ *   raw=true skips preprocess (confirmation phrases).
+ *   summary=true (hub replies) speaks a leading labeled TLDR (up to two
+ *   complete sentences, label not spoken) when present; otherwise the first
+ *   two complete lead sentences (label optional) — never a mid-sentence clip
+ *   and never the full multi-paragraph body. Short single-sentence acks stay
+ *   one sentence. On summary failure uses TTS_REPLY_FALLBACK (or silence if
+ *   even that is empty) — never dumps the full reply.
+ * @returns {boolean} true if a speak attempt was started (may finish async)
+ */
+function speakTtsText(text, opts) {
+  if (!ttsEnabled) return false;
+  let spokenText;
+  if (opts && opts.raw) {
+    spokenText = String(text || '').trim();
+  } else if (opts && opts.summary) {
+    try {
+      spokenText = buildSpokenSummary(text) || TTS_REPLY_FALLBACK;
+    } catch (err) {
+      logTtsDebug('summary failed', String(err && err.message || err));
+      spokenText = TTS_REPLY_FALLBACK;
+    }
+  } else {
+    spokenText = buildSpokenText(text);
+  }
+  // Pronounce domains/decimals for speech engines; skip raw confirmations.
+  if (spokenText && !(opts && opts.raw)) {
+    spokenText = pronounceForSpeech(spokenText);
+  }
+  if (!spokenText) return false;
+
+  // Bump gen + stop prior audio/utterance.
+  stopTtsSpeech();
+  const gen = ttsPlayGen;
+  // Disable can race the lines above; never start a new speak when already off.
+  if (!ttsEnabled || !ttsPlayStillActive(gen)) return false;
+  logTtsDebug('speakTtsText', { raw: !!(opts && opts.raw), chars: spokenText.length });
+
+  // Always try server unless a recent probe proved it down (sticky-false expires).
+  const tryServer = ttsServerAvailable !== false
+    || !ttsServerProbedAt
+    || (Date.now() - ttsServerProbedAt) >= TTS_REPROBE_MS;
+
+  if (tryServer) {
+    (async () => {
+      let allowBrowserFallback = true;
+      try {
+        if (ttsServerAvailable !== true) await probeTtsServer(false);
+        // Toggle OFF must win over any in-flight synthesize/play.
+        if (!ttsPlayStillActive(gen)) return;
+        // Probe said down → browser. Probe unknown/true → attempt synthesize.
+        if (ttsServerAvailable === false) {
+          logTtsDebug('server unavailable → browser');
+        } else {
+          const ok = await speakViaServerTts(spokenText, gen);
+          if (!ttsPlayStillActive(gen)) return;
+          if (ok) {
+            if (ttsUnavailableReason) setTtsUnavailable('');
+            updateTtsToggleUi();
+            return;
+          }
+          // Declined without throw (gen race / empty) — do not browser-noise.
+          allowBrowserFallback = false;
+          logTtsDebug('server speak declined (no browser fallback)');
+        }
+      } catch (err) {
+        const msg = String(err && err.message || err || '');
+        const playOnly = !!(err && (err.code === 'tts_play_failed' || err.serverOk));
+        if (playOnly) {
+          // Kokoro synthesized OK; local play failed. Stay on server path — never
+          // speechSynthesis (that was the unwanted fallback the operator heard).
+          allowBrowserFallback = false;
+          ttsServerAvailable = true;
+          logTtsSpeakErrorOnce(err);
+          logTtsDebug('server play failed (no browser fallback)', msg);
+          if (ttsUnavailableReason) setTtsUnavailable('');
+          updateTtsToggleUi();
+        } else {
+          // Transport/API failure — real service problem.
+          if (/synthesize HTTP|missing proxied|Failed to fetch|NetworkError|TTS unavailable|502|503|401|403/i.test(msg)
+            || /tts audio HTTP|TypeError/i.test(msg)) {
+            ttsServerAvailable = false;
+            ttsServerProbedAt = Date.now();
+          }
+          if (!ttsPlayStillActive(gen)) return;
+          logTtsSpeakErrorOnce(err);
+          logTtsDebug('server speak failed → browser', msg);
+        }
+      }
+      if (!ttsPlayStillActive(gen)) return;
+      if (!allowBrowserFallback) return;
+      softUnlockBrowserSynth();
+      speakViaBrowserTts(spokenText, gen);
+      updateTtsToggleUi();
+    })();
+    return true;
+  }
+
+  softUnlockBrowserSynth();
+  return speakViaBrowserTts(spokenText, gen);
+}
+
+function speakHubReply(text) {
+  // Hub replies: full markdown stays in the console UI; TTS gets labeled TLDR
+  // (≤2 sentences) when present, else first two complete lead sentences.
+  logTtsDebug('speakHubReply', { chars: String(text || '').length, mode: 'summary' });
+  speakTtsText(text, { summary: true });
+}
+
+/**
+ * Unlock media under the toggle-ON user gesture:
+ * 1) AudioContext.resume() — primary path for async Kokoro WAV via Web Audio
+ * 2) silent HTMLAudio data-URI — secondary unlock for element fallback
+ */
+function unlockHtmlAudioGesture() {
+  // Web Audio unlock (survives across async synthesize → hub replies).
+  try {
+    ensureTtsAudioContext().catch(() => {});
+  } catch (_) { /* ignore */ }
+  try {
+    if (typeof Audio === 'undefined') return;
+    // Minimal valid WAV (very short silence).
+    const silent = new Audio(
+      'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
+    );
+    silent.volume = 0.01;
+    const p = silent.play();
+    if (p && typeof p.then === 'function') {
+      p.then(() => {
+        try { silent.pause(); } catch (_) { /* ignore */ }
+      }).catch(() => { /* autoplay still blocked — Web Audio path may still work */ });
+    }
+  } catch (_) { /* ignore */ }
+}
+
+/**
+ * Soft browser unlock used when starting a speak outside the original click
+ * (hub replies). Does not cancel in-flight speech; only resumes synth + AudioContext.
+ */
+function softUnlockBrowserSynth() {
+  try {
+    if (ttsAudioCtx && ttsAudioCtx.state === 'suspended') {
+      ttsAudioCtx.resume().catch(() => {});
+    }
+  } catch (_) { /* ignore */ }
+  const synth = getSpeechSynthesis();
+  if (!synth) return;
+  try {
+    ensureTtsResumed();
+    if (synth.paused) synth.resume();
+  } catch (_) { /* ignore */ }
+}
+
+/** Unlock autoplay + confirm enable inside the user-gesture click chain. */
+function primeTtsOnEnable() {
+  ttsGestureUnlocked = true;
+  // Warm browser synth + unlock Web Audio / HTMLAudio under this click.
+  // Hard-stop on disable may have left AudioContext suspended and synth paused.
+  try {
+    const synth = getSpeechSynthesis();
+    if (synth) {
+      synth.cancel();
+      ensureTtsResumed();
+      getTtsVoices();
+    }
+  } catch (err) {
+    logTtsSpeakErrorOnce(err);
+  }
+  unlockHtmlAudioGesture();
+  // Explicit resume under this user gesture (survives prior hard-stop suspend).
+  try {
+    ensureTtsAudioContext().catch(() => {});
+  } catch (_) { /* ignore */ }
+  // Re-probe so toggle-ON picks up a newly started oddbeaker-tts daemon
+  // (and clears any sticky-false from a pre-login 401 probe).
+  ttsServerAvailable = null;
+  ttsServerProbedAt = 0;
+  const ok = speakTtsText('Text to speech on.', { raw: true });
+  if (ok) setTtsUnavailable('');
+  updateTtsToggleUi();
+  logTtsDebug('primed on enable');
+}
+
+function maybeSpeakNewHubReplies(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  let latestHub = null;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const m = list[i];
+    if (!m || m.role !== 'hub') continue;
+    if (!String(m.content || '').trim()) continue;
+    latestHub = m;
+    break;
+  }
+  const key = hubMessageKey(latestHub);
+  if (!ttsPrimed) {
+    ttsPrimed = true;
+    lastSpokenHubKey = key;
+    logTtsDebug('prime baseline hub key', key ? key.slice(0, 60) : '');
+    return;
+  }
+  if (!key || key === lastSpokenHubKey) return;
+  lastSpokenHubKey = key;
+  if (ttsEnabled && latestHub) {
+    softUnlockBrowserSynth();
+    speakHubReply(latestHub.content);
+  }
+}
+
+function setTtsEnabled(on, opts) {
+  const next = !!on;
+  const wasOn = ttsEnabled;
+  // Set flag first so in-flight async speak paths see disabled immediately.
+  ttsEnabled = next;
+  saveTtsEnabled(ttsEnabled);
+  updateTtsToggleUi();
+  if (!ttsEnabled) {
+    // Hard stop: cancel audio/synth, suspend Web Audio, do not resume synth.
+    stopTtsSpeech({ hard: true });
+    return;
+  }
+  // Prime only on user toggle ON (click gesture unlocks later async speaks).
+  if (opts && opts.prime && !wasOn) {
+    primeTtsOnEnable();
+  }
+}
+
+/** Probe oddbeaker-tts after session is ready (avoids sticky-false from pre-login 401). */
+function refreshTtsServerProbe() {
+  probeTtsServer(true).then(() => updateTtsToggleUi()).catch(() => {});
+}
+
+function bindTtsToggle() {
+  ttsEnabled = loadTtsEnabled();
+  updateTtsToggleUi();
+  const btn = document.getElementById('ttsToggle');
+  if (!btn || btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', () => {
+    // Toggle OFF: stop. Toggle ON: enable + speak confirmation in this gesture.
+    setTtsEnabled(!ttsEnabled, { prime: true });
+  });
+  // Do NOT probe here — page script runs before login cookie is proven.
+  // boot()/login success calls refreshTtsServerProbe().
+  try {
+    const synth = getSpeechSynthesis();
+    if (synth) {
+      getTtsVoices();
+      synth.onvoiceschanged = () => {
+        try {
+          const voices = getTtsVoices();
+          // Only surface browser-voice warnings when server TTS is known down.
+          if (ttsServerAvailable) {
+            if (ttsUnavailableReason) setTtsUnavailable('');
+            return;
+          }
+          if (voices.length && ttsUnavailableReason) setTtsUnavailable('');
+          else if (!voices.length && ttsEnabled && ttsServerAvailable === false) {
+            setTtsUnavailable('No TTS (oddbeaker-tts down; empty browser voice list)');
+          }
+        } catch (_) { /* ignore */ }
+      };
+    }
+  } catch (_) { /* ignore */ }
+}
+
 function renderMessages(messages) {
   const root = document.getElementById('messages');
   root.innerHTML = '';
@@ -653,15 +1855,44 @@ function renderMessages(messages) {
     const el = document.createElement('div');
     el.className = messageClassName(msg);
     const author = messageAuthorLabel(msg);
-    if (author) {
+    const timeLabel = messageTimeLabel(msg);
+    if (author || timeLabel) {
       const label = document.createElement('div');
       label.className = 'message-author';
-      label.textContent = author;
+      if (author) {
+        const nameEl = document.createElement('span');
+        nameEl.className = 'message-author-name';
+        nameEl.textContent = author;
+        label.appendChild(nameEl);
+      }
+      if (timeLabel) {
+        const timeEl = document.createElement('span');
+        timeEl.className = 'message-time';
+        timeEl.textContent = timeLabel;
+        timeEl.title = msg.created_at || '';
+        label.appendChild(timeEl);
+      }
       el.appendChild(label);
     }
     const body = document.createElement('div');
     body.className = 'message-body';
-    body.innerHTML = renderMarkdown(msg.content);
+    // Live thinking: a launch-ack becomes a streaming "thinking" block instead
+    // of the static "Working. Stand by..." text. Replaced by the real reply
+    // when the conversation updates (the launch-ack is stripped on reply).
+    if (msg.role === 'status' && msg.kind === 'launch-ack') {
+      body.innerHTML = '';
+      const label = document.createElement('div');
+      label.className = 'thinking-label';
+      label.textContent = 'Thinking…';
+      const log = document.createElement('pre');
+      log.className = 'thinking-log';
+      log.setAttribute('data-thinking-log', '1');
+      log.setAttribute('data-thinking-ack', String(msg.created_at || ''));
+      body.appendChild(label);
+      body.appendChild(log);
+    } else {
+      body.innerHTML = renderMarkdown(msg.content);
+    }
     el.appendChild(body);
     if (Array.isArray(msg.attachments) && msg.attachments.length) {
       const row = document.createElement('div');
@@ -680,6 +1911,110 @@ function renderMessages(messages) {
     root.appendChild(el);
   });
   root.scrollTop = root.scrollHeight;
+  syncThinking();
+  maybeSpeakNewHubReplies(messages);
+}
+
+// --- Live thinking log (streams in-flight turn output) ---
+function closeThinkingStream() {
+  try { if (thinkingSource) thinkingSource.close(); } catch (_) {}
+  thinkingSource = null;
+  thinkingConv = null;
+  thinkingAck = null;
+}
+
+function thinkingLogEl() {
+  return document.querySelector('[data-thinking-log="1"]');
+}
+
+function thinkingActive() {
+  return !!thinkingSource && !!thinkingConv;
+}
+
+function openThinkingStream(convId) {
+  if (!convId) return;
+  const log = thinkingLogEl();
+  if (!log) { closeThinkingStream(); return; }
+  // Reopen whenever the conversation OR the launch-ack (turn) changes, so the
+  // stream always starts at the new turn's log offset — never old thinking.
+  const ack = log.getAttribute('data-thinking-ack') || '';
+  if (thinkingConv === convId && thinkingAck === ack) return;
+  closeThinkingStream();
+  thinkingConv = convId;
+  thinkingAck = ack;
+  thinkingSource = new EventSource(`/api/thinking/stream?conv=${encodeURIComponent(convId)}`);
+  thinkingSource.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    if (msg && msg.done) {
+      closeThinkingStream();
+      // Turn ended server-side — soft-refresh messages so a stripped launch-ack /
+      // real reply replaces Thinking… if the push was missed.
+      // MUST NOT call loadConversation(): that resets ttsPrimed + stopTtsSpeech(),
+      // which cancels Kokoro/browser speech for the hub reply and marks it as the
+      // baseline (toggle speaks, subsequent hub replies stay silent).
+      if (currentConversation === convId) {
+        softReloadConversation(convId).catch(() => {});
+      }
+      return;
+    }
+    if (msg && msg.text) {
+      const el = thinkingLogEl();
+      if (!el) { closeThinkingStream(); return; }
+      el.textContent += msg.text;
+      // Auto-scroll the thinking log itself (it has its own overflow area).
+      el.scrollTop = el.scrollHeight;
+      const root = document.getElementById('messages');
+      if (root) root.scrollTop = root.scrollHeight;
+    }
+  };
+  thinkingSource.onerror = () => { /* SSE will retry; close on done */ };
+}
+
+/** Open the thinking stream when a launch-ack is visible; close it otherwise. */
+function syncThinking() {
+  const hasAck = !!document.querySelector('[data-thinking-log="1"]');
+  if (hasAck && currentConversation) {
+    openThinkingStream(currentConversation);
+  } else if (!hasAck) {
+    closeThinkingStream();
+  }
+}
+
+/** Hard-stop the in-flight turn (operator pressed Escape). */
+async function stopThinking() {
+  const convId = thinkingConv || currentConversation;
+  closeThinkingStream();
+  try {
+    await api('/api/thinking/stop', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId: convId || '' }),
+    });
+  } catch (_err) { /* best-effort */ }
+  // Soft reload: keep TTS priming/in-flight speech rules intact.
+  if (currentConversation) await softReloadConversation(currentConversation);
+  try { await refreshStatus(); } catch (_err) { /* ignore */ }
+}
+
+async function stopAgent(slug) {
+  try {
+    // Hub light: same stop path as Escape so warm-daemon cancel is used.
+    if (slug === 'hub') {
+      await stopThinking();
+      return;
+    }
+    await api(`/api/agent/${encodeURIComponent(slug)}/stop`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    // Soft reload so the status line appears without waiting for the next poll.
+    if (currentConversation) {
+      try { await softReloadConversation(currentConversation); } catch (_err) { /* ignore */ }
+    }
+    try { await refreshStatus(); } catch (_err) { /* ignore */ }
+  } catch (err) {
+    console.error('Failed to stop agent', err);
+  }
 }
 
 async function loadProfile() {
@@ -751,18 +2086,49 @@ async function loadConversations() {
     option.textContent = conv.name;
     select.appendChild(option);
   });
-  currentConversation = currentConversation || convs[0].id;
+  // Prefer installer Welcome / first-run chat so the first bubble is visible (and TTS can speak it).
+  if (!currentConversation) {
+    const welcome = convs.find((c) => {
+      const n = String(c.name || '').toLowerCase();
+      return n === 'welcome' || n.includes('first-run') || n.includes('first run');
+    });
+    currentConversation = (welcome && welcome.id) || convs[0].id;
+  }
   select.value = currentConversation;
   await loadConversation(currentConversation);
 }
 
+/**
+ * Soft refresh of the open conversation (thinking done, stop, missed push).
+ * Applies new messages via applyConversation — does NOT reset TTS priming or
+ * cancel in-flight speech. New hub replies still speak via maybeSpeakNewHubReplies.
+ */
+async function softReloadConversation(id) {
+  if (!id || id !== currentConversation) return;
+  try {
+    const conv = await api(`/api/conversations/${encodeURIComponent(id)}`);
+    applyConversation(id, conv);
+  } catch (err) {
+    logTtsDebug('softReloadConversation failed', String(err && err.message || err));
+  }
+}
+
 async function loadConversation(id) {
+  const switching = id !== currentConversation;
   currentConversation = id;
   // Prefer WS subscribe for conversation feed; falls back to SSE inside subscribeConversation.
   subscribeConversation(id);
   const conv = await api(`/api/conversations/${encodeURIComponent(id)}`);
   const messages = conv.messages || [];
   lastConversationStamp = conversationPollStamp(conv);
+  // Only reset TTS baseline when opening/switching conversations (not soft reloads).
+  // Hard load always re-baselines so history is not read aloud.
+  ttsPrimed = false;
+  lastSpokenHubKey = '';
+  stopTtsSpeech();
+  if (switching) {
+    logTtsDebug('loadConversation switch', id);
+  }
   renderMessages(messages);
 }
 
@@ -847,6 +2213,8 @@ async function boot() {
     sessionActive = true;
     const named = await ensureDisplayName();
     setAuthenticated(true, displayName ? `Signed in as ${displayName}` : 'Signed in');
+    // Session cookie is valid — probe Kokoro now (not at bindTtsToggle pre-login).
+    refreshTtsServerProbe();
     if (!named) return;
     // Prefetch CLI/model catalog for the agent config dialog (non-blocking).
     loadCliModels().catch(() => {});
@@ -857,6 +2225,7 @@ async function boot() {
     await loadConversations();
     // Subscribe after WS has had a chance; subscribe* will close SSE if WS is live.
     subscribeAgents();
+    try { loadEnterprisePanel(); } catch (_) {}
   } catch (_err) {
     if (!sessionActive && !needsSetup) {
       setAuthenticated(false, 'Login required');
@@ -864,183 +2233,47 @@ async function boot() {
   }
 }
 
-// --- SPA routing (chat | library) ---
-function parseRoute() {
-  const h = String((__loc.hash || '').replace(/^#/, '')).replace(/^\/+/, '');
-  if (h === 'library' || h.startsWith('library/')) return 'library';
-  return 'chat';
-}
+// --- Library (named browser tab; full-page repo accordion) ---
+const LIBRARY_WINDOW_NAME = 'bizagent-library';
 
-function navigateRoute(route, { push = true } = {}) {
-  const next = route === 'library' ? 'library' : 'chat';
-  if (push) {
-    const want = next === 'library' ? '#/library' : '#/chat';
-    if ((__loc.hash || '') !== want && typeof history !== 'undefined') {
-      history.pushState(null, '', want);
-    } else if (typeof location !== 'undefined') {
-      location.hash = want;
-    }
-  }
-  applyRoute(next);
-}
-
-function applyRoute(route) {
-  currentRoute = route === 'library' ? 'library' : 'chat';
-  const chat = document.getElementById('chatShell');
-  const lib = document.getElementById('libraryShell');
-  if (chat) chat.hidden = currentRoute !== 'chat';
-  if (lib) lib.hidden = currentRoute !== 'library';
-  if (currentRoute === 'library') {
-    refreshLibraryList(librarySelectedId).catch(() => {});
-  }
-}
-
-// --- Library page (operator-facing plans/specs) ---
-function setLibraryStatus(message, kind = 'neutral') {
-  const status = document.getElementById('libraryStatus');
-  if (!status) return;
-  if (!message) {
-    status.hidden = true;
-    status.textContent = '';
-    return;
-  }
-  status.hidden = false;
-  status.textContent = message;
-  status.dataset.kind = kind;
-}
-
-function libraryFilterQuery() {
-  const el = document.getElementById('libraryFilter');
-  return ((el && el.value) || '').trim().toLowerCase();
-}
-
-function entryMatchesFilter(e, q) {
-  if (!q) return true;
-  const title = String(e.title || '').toLowerCase();
-  const p = String(e.path || '').toLowerCase();
-  const tags = Array.isArray(e.tags) ? e.tags.join(' ').toLowerCase() : '';
-  return title.includes(q) || p.includes(q) || tags.includes(q);
-}
-
-function renderLibraryList(selectId) {
-  const list = document.getElementById('libraryList');
-  if (!list) return;
-  const q = libraryFilterQuery();
-  const entries = libraryEntriesCache.filter((e) => entryMatchesFilter(e, q));
-  list.innerHTML = '';
-  if (libraryEntriesCache.length === 0) {
-    list.innerHTML = '<li class="company-file-empty">Library is empty. Ask the hub or an agent to save a plan under library/.</li>';
-    setLibraryDownloadEnabled(false);
-    return;
-  }
-  if (entries.length === 0) {
-    list.innerHTML = '<li class="company-file-empty">No documents match this filter.</li>';
-    setLibraryDownloadEnabled(false);
-    return;
-  }
-  for (const e of entries) {
-    const li = document.createElement('li');
-    li.className = 'company-file-item library-list-item';
-    li.dataset.id = e.id;
-    const when = e.created_at ? new Date(e.created_at).toLocaleString() : '';
-    li.innerHTML = `<span class="company-file-path">${escapeHtml(e.title || e.path || e.id)}</span>`
-      + `<span class="company-file-meta">${escapeHtml(when)}</span>`;
-    li.addEventListener('click', () => openLibraryDoc(e.id));
-    list.appendChild(li);
-  }
-  const pick = selectId && entries.some((e) => e.id === selectId)
-    ? selectId
-    : (entries[0] && entries[0].id);
-  if (pick) openLibraryDoc(pick);
-}
-
-function setLibraryDownloadEnabled(on) {
-  const btn = document.getElementById('libraryDownloadBtn');
-  if (btn) btn.disabled = !on;
-}
-
-async function openLibraryDoc(id) {
-  const titleEl = document.getElementById('libraryPreviewTitle');
-  const bodyEl = document.getElementById('libraryPreviewBody');
-  if (!bodyEl) return;
-  librarySelectedId = id;
-  bodyEl.innerHTML = '<p class="company-file-empty">Loading…</p>';
-  setLibraryDownloadEnabled(false);
+function openLibraryTab() {
+  const url = '/library.html';
   try {
-    const doc = await api(`/api/library/file?id=${encodeURIComponent(id)}`);
-    if (titleEl) {
-      titleEl.textContent = doc.title || doc.path || id;
+    const w = window.open(url, LIBRARY_WINDOW_NAME);
+    if (w) {
+      try { w.focus(); } catch (_err) { /* ignore */ }
+      return w;
     }
-    bodyEl.innerHTML = renderMarkdown(doc.content || '');
-    document.querySelectorAll('.library-list-item').forEach((el) => {
-      el.classList.toggle('is-selected', el.dataset.id === id);
-    });
-    setLibraryDownloadEnabled(true);
-  } catch (err) {
-    bodyEl.innerHTML = `<p class="company-file-empty">${escapeHtml(err.message || 'Failed to load')}</p>`;
+  } catch (_err) {
+    /* popup blocked — fall through */
   }
-}
-
-async function refreshLibraryList(selectId) {
-  const list = document.getElementById('libraryList');
-  if (!list) return;
-  list.innerHTML = '<li class="company-file-empty">Loading…</li>';
-  setLibraryStatus('');
-  try {
-    const data = await api('/api/library');
-    libraryEntriesCache = Array.isArray(data.entries) ? data.entries : [];
-    renderLibraryList(selectId || librarySelectedId);
-  } catch (err) {
-    list.innerHTML = '';
-    libraryEntriesCache = [];
-    setLibraryStatus(err.message || 'Failed to list library', 'warn');
-  }
-}
-
-function downloadLibraryDoc() {
-  if (!librarySelectedId) return;
-  const a = document.createElement('a');
-  a.href = `/api/library/file?id=${encodeURIComponent(librarySelectedId)}&download=1`;
-  a.rel = 'noopener';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  // Popup blocked: navigate this tab.
+  if (typeof location !== 'undefined') location.assign(url);
+  return null;
 }
 
 function bindLibraryPage() {
   const openBtn = document.getElementById('libraryBtn');
   if (openBtn && openBtn.dataset.bound !== '1') {
     openBtn.dataset.bound = '1';
-    openBtn.addEventListener('click', () => navigateRoute('library'));
+    openBtn.addEventListener('click', () => openLibraryTab());
   }
-  const backBtn = document.getElementById('libraryBackBtn');
-  if (backBtn && backBtn.dataset.bound !== '1') {
-    backBtn.dataset.bound = '1';
-    backBtn.addEventListener('click', () => navigateRoute('chat'));
-  }
-  const refreshBtn = document.getElementById('libraryRefresh');
-  if (refreshBtn && refreshBtn.dataset.bound !== '1') {
-    refreshBtn.dataset.bound = '1';
-    refreshBtn.addEventListener('click', () => refreshLibraryList(librarySelectedId));
-  }
-  const dlBtn = document.getElementById('libraryDownloadBtn');
-  if (dlBtn && dlBtn.dataset.bound !== '1') {
-    dlBtn.dataset.bound = '1';
-    dlBtn.addEventListener('click', () => downloadLibraryDoc());
-  }
-  const filter = document.getElementById('libraryFilter');
-  if (filter && filter.dataset.bound !== '1') {
-    filter.dataset.bound = '1';
-    let t = null;
-    filter.addEventListener('input', () => {
-      clearTimeout(t);
-      t = setTimeout(() => renderLibraryList(librarySelectedId), 120);
-    });
-  }
-  if (typeof window !== 'undefined' && !window.__bizagentHashBound) {
-    window.__bizagentHashBound = true;
-    window.addEventListener('hashchange', () => applyRoute(parseRoute()));
-    window.addEventListener('popstate', () => applyRoute(parseRoute()));
+  // Deep-link: #/library still opens the named Library tab once.
+  if (typeof window !== 'undefined' && !window.__bizagentLibraryHashBound) {
+    window.__bizagentLibraryHashBound = true;
+    const maybeOpenFromHash = () => {
+      const h = String((__loc.hash || '').replace(/^#/, '')).replace(/^\/+/, '');
+      if (h === 'library' || h.startsWith('library/')) {
+        openLibraryTab();
+        try {
+          if (typeof history !== 'undefined') history.replaceState(null, '', '#/chat');
+        } catch (_err) {
+          /* ignore */
+        }
+      }
+    };
+    window.addEventListener('hashchange', maybeOpenFromHash);
+    maybeOpenFromHash();
   }
 }
 
@@ -1267,8 +2500,8 @@ document.getElementById('logout').addEventListener('click', async () => {
 });
 bindCompanyModal();
 bindLibraryPage();
+bindTtsToggle();
 bindComposerAttachments();
-applyRoute(parseRoute());
 document.getElementById('newConversation').addEventListener('click', async () => {
   if (!displayName) {
     showNamePanel(true);
@@ -1315,6 +2548,8 @@ document.getElementById('composer').addEventListener('submit', async (event) => 
   const content = input.value.trim();
   const hasFiles = pendingAttachFiles.length > 0;
   if ((!content && !hasFiles) || !currentConversation) return;
+  // Stop prior hub speech when the operator sends a new message.
+  stopTtsSpeech();
   const text = content || (hasFiles ? '(attachments)' : '');
   input.value = '';
   let attachments = [];
@@ -1484,5 +2719,29 @@ setInterval(() => {
   const noPush = !wsReady && !convSource && currentConversation;
   if (FORCE_POLL || noPush) pollConversation().catch(() => {});
 }, 2000);
+// Optional Enterprise additive UI (served when plugin active).
+function loadEnterprisePanel() {
+  if (document.getElementById("enterprise-panel-script")) return;
+  const s = document.createElement("script");
+  s.id = "enterprise-panel-script";
+  s.src = "/enterprise/enterprise-panel.js";
+  s.onerror = function () { try { s.remove(); } catch (_) {} };
+  document.head.appendChild(s);
+}
+
+// Escape = hard-stop the in-flight thinking (also: click running status light).
+// Modal Escape handlers take precedence when a modal is open.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const modal = document.getElementById('configModal');
+  const companyModal = document.getElementById('companyModal');
+  const modalOpen = (modal && !modal.hidden) || (companyModal && !companyModal.hidden);
+  if (modalOpen) return;
+  if (thinkingActive()) {
+    e.preventDefault();
+    stopThinking();
+  }
+});
+
 
 boot();
