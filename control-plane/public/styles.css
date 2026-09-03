@@ -861,6 +861,9 @@ button {
   padding: 22px 18px;
 }
 .message-author {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: .04em;
@@ -870,7 +873,18 @@ button {
 }
 .message.user .message-author {
   color: #1d4ed8;
+  justify-content: flex-end;
   text-align: right;
+}
+.message-time {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+.message.user .message-time {
+  color: #93c5fd;
 }
 .message {
   max-width: min(760px, 82%);

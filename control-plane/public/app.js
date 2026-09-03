@@ -94,6 +94,24 @@ function messageAuthorLabel(msg) {
   return 'Hub';
 }
 
+/** Time-only stamp for chat bubbles (no date). Empty if created_at missing/invalid. */
+function messageTimeLabel(msg) {
+  const raw = msg && msg.created_at;
+  if (!raw) return '';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return '';
+  try {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  } catch (_) {
+    // Fallback HH:MM local
+    const h = d.getHours();
+    const m = String(d.getMinutes()).padStart(2, '0');
+    const h12 = h % 12 || 12;
+    const ampm = h < 12 ? 'AM' : 'PM';
+    return `${h12}:${m} ${ampm}`;
+  }
+}
+
 function setSetupMode(isSetup) {
   needsSetup = isSetup;
   document.getElementById('setupHint').hidden = !isSetup;
@@ -1827,10 +1845,23 @@ function renderMessages(messages) {
     const el = document.createElement('div');
     el.className = messageClassName(msg);
     const author = messageAuthorLabel(msg);
-    if (author) {
+    const timeLabel = messageTimeLabel(msg);
+    if (author || timeLabel) {
       const label = document.createElement('div');
       label.className = 'message-author';
-      label.textContent = author;
+      if (author) {
+        const nameEl = document.createElement('span');
+        nameEl.className = 'message-author-name';
+        nameEl.textContent = author;
+        label.appendChild(nameEl);
+      }
+      if (timeLabel) {
+        const timeEl = document.createElement('span');
+        timeEl.className = 'message-time';
+        timeEl.textContent = timeLabel;
+        timeEl.title = msg.created_at || '';
+        label.appendChild(timeEl);
+      }
       el.appendChild(label);
     }
     const body = document.createElement('div');
