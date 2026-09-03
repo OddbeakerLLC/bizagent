@@ -90,15 +90,20 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
 - New **hub** replies only (`role === 'hub'`), after the conversation view is primed.
 - Skips user messages, status/launch-ack/thinking, and empty bodies.
 - Initial conversation load and conversation switches **do not** read history aloud.
-- **Full hub reply always renders in the console UI** (markdown unchanged).
-- **TTS prefers a leading labeled TLDR** when the hub reply opens with `**TLDR:**` / `TLDR:` / `**TL;DR:**` / `TL;DR:` (case-insensitive):
+- **Full hub reply always renders in the console UI** (markdown). TTS markers are unwrapped, not hidden as a separate spoken-only block.
+- **TTS prefers a markdown ` ```tts ` fence** when present in the hub reply body:
+  - Speaks **only** the fence body — up to **two complete sentences**.
+  - Renderer **drops the fence markers** and keeps the inner prose so it flows with the rest of the reply (not rendered as a code block).
+  - Body after the fence is never spoken.
+- **Legacy HTML `<tts-summary>…</tts-summary>`** still accepted: unwrap tags, keep inner text on screen, speak ≤2 sentences from the body.
+- **Else a leading labeled TLDR** when the hub reply opens with `**TLDR:**` / `TLDR:` / `**TL;DR:**` / `TL;DR:` (case-insensitive):
   - Speaks **only** that labeled block — up to **two complete sentences**; the label word itself is not spoken.
-  - Body after the TLDR block is never spoken. On-screen markdown is unchanged.
-- **No TLDR block → complete first sentence only** — never a mid-sentence word/char clip, never a multi-sentence summary, never the full body:
-  - Light scrub of markdown/noise (fences, tables, paths, filenames, SHAs, backticks) **inside** that sentence is OK; the grammatical sentence stays whole.
+  - Body after the TLDR block is never spoken.
+- **No fence/tag/TLDR → up to two complete lead sentences** — never a mid-sentence word/char clip, never the full multi-paragraph body:
+  - Light scrub of markdown/noise (fences, tables, paths, filenames, SHAs, backticks) **inside** those sentences is OK; each grammatical sentence stays whole.
   - Sentence boundary = real `.` `!` `?` end (no em-dash / word-count / char-budget cuts for the spoken unit).
-- No usable TLDR/first sentence → minimal fallback *“Reply ready — see the console.”* (never dumps full text, never a partial sentence). Short one-liners / yes-no / “on it” acks may stay on that minimal path — do not invent a TLDR. Toggle confirmation still uses `raw: true` (“Text to speech on.”).
-- Client helpers: `extractLabeledTldr` + `buildSpokenSummary` + `ensureSpokenSentence` (hub replies) + retained `buildSpokenText` / `cleanLineForSpeech` (lighter Jobe-style path kept for non-summary callers). `clipSpokenHeadline` removed.
+- No usable summary → minimal fallback *“Reply ready — see the console.”* (never dumps full text, never a partial sentence). Short one-liners / yes-no / “on it” acks may stay on that minimal path — do not invent a summary. Toggle confirmation still uses `raw: true` (“Text to speech on.”).
+- Client helpers: `extractTtsSummaryTag` (```tts fence + legacy tag) + `extractLabeledTldr` + `buildSpokenSummary` + `ensureSpokenSentence` (hub replies) + retained `buildSpokenText` / `cleanLineForSpeech` (lighter Jobe-style path kept for non-summary callers). `clipSpokenHeadline` removed.
 - **Tilde approximations (speak string only):** `~280` / `~ 280` → “about 280”; `10~20` → “10 to 20”. Applied in `scrubDenseSpeechTokens` (before path/punct wipe) and again in `pronounceForSpeech`. Home paths still require `~/…`. On-screen markdown still shows `~`.
 - **Dotted tokens (speak string only):** `pronounceForSpeech` after summary/build — numeric `3.14` / `v2.0` → “point”; no-space hostnames/`file.tar.gz` → “dot” (`beakerboard.net` → “beakerboard dot net”). Sentence-ending `. ` / abbreviations with space after (e.g. `Dr. Smith`) unchanged. `splitSpeechSentences` protects no-space dots so domains are not false sentence breaks. Optional: strip `https://` and path from leftover URLs. On-screen markdown unchanged.
 - Server path sends **preprocessed** text with `raw: true` so oddbeaker-tts does not double-process. (Upstream can still preprocess if `raw` is false.)
