@@ -167,7 +167,21 @@ function renderInline(text) {
 }
 
 function renderMarkdown(text) {
-  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  // Hub TTS markers (speak path reads raw body before render):
+  // 1) Preferred: fenced ```tts block — drop the fence lines only; keep inner
+  //    prose so it flows with the rest of the markdown (not a <pre><code>).
+  // 2) Legacy: <tts-summary>…</tts-summary> — unwrap tags, keep inner text.
+  const cleaned = String(text || '')
+    .replace(/(^|\n)```\s*tts\b[^\n]*\n([\s\S]*?)\n```[ \t]*(?=\n|$)/gi, (m, lead, body) => {
+      // Keep surrounding newlines so a blank line after the fence still
+      // separates the spoken summary from the rest of the reply.
+      const inner = String(body || '').replace(/^\n+/, '').replace(/\n+$/, '');
+      return `${lead}${inner}`;
+    })
+    .replace(/<tts-summary\b[^>]*>([\s\S]*?)<\/tts-summary>/gi, '$1')
+    .replace(/<\/?tts-summary\b[^>]*>/gi, '')
+    .replace(/\r\n/g, '\n');
+  const lines = cleaned.split('\n');
   const htmlParts = [];
   let paragraphBuffer = [];
   // Nested lists: stack of { type: 'ul'|'ol', items: [{ text, children: listNode[] }] }
@@ -278,6 +292,7 @@ function renderMarkdown(text) {
     if (/^```/.test(line)) {
       flushParagraph();
       flushList();
+      const fenceOpen = line;
       const codeLines = [];
       i++;
       while (i < lines.length && !/^```/.test(lines[i])) {
@@ -285,6 +300,12 @@ function renderMarkdown(text) {
         i++;
       }
       i++;
+      // ```tts is a speak marker, not a code block — emit inner markdown only.
+      if (/^```\s*tts\b/i.test(fenceOpen)) {
+        const inner = codeLines.join('\n').replace(/^\n+/, '').replace(/\n+$/, '');
+        if (inner.trim()) htmlParts.push(renderMarkdown(inner));
+        continue;
+      }
       htmlParts.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
       continue;
     }

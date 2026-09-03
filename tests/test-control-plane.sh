@@ -2194,6 +2194,28 @@ const mixedKids = sandbox.renderMarkdown('- a\n  - b\n  1. c');
 if (!mixedKids.includes('<ul><li>a<ul><li>b</li></ul><ol><li>c</li></ol></li></ul>')) {
   console.error('mixed nested kids broken:', mixedKids); process.exit(17);
 }
+
+// TTS markdown fence: ```tts keeps inner prose, not a code block; speaks ≤2 sentences.
+const ttsFence = sandbox.renderMarkdown('```tts\nSpoken one. Spoken two.\n```\n\n## Body\n\nMore detail.');
+if (ttsFence.includes('<pre>') || ttsFence.includes('```')) {
+  console.error('tts fence should not render as code/fence:', ttsFence); process.exit(18);
+}
+if (!ttsFence.includes('Spoken one. Spoken two.') || !ttsFence.includes('<h2>Body</h2>')) {
+  console.error('tts fence unwrap lost prose/body:', ttsFence); process.exit(19);
+}
+const ttsSpoken = sandbox.buildSpokenSummary('```tts\nSpoken one. Spoken two.\n```\n\n## Body\n\nMore detail that must not be spoken.');
+if (ttsSpoken !== 'Spoken one. Spoken two.') {
+  console.error('tts fence speak mismatch:', ttsSpoken); process.exit(20);
+}
+// Legacy HTML tag still unwraps + speaks.
+const legacyHtml = sandbox.renderMarkdown('<tts-summary>Legacy one. Legacy two.</tts-summary>\n\nAfter.');
+if (legacyHtml.includes('tts-summary') || !legacyHtml.includes('Legacy one. Legacy two.')) {
+  console.error('legacy tts-summary unwrap broken:', legacyHtml); process.exit(21);
+}
+const legacySpoken = sandbox.buildSpokenSummary('<tts-summary>Legacy one. Legacy two.</tts-summary>\n\nAfter.');
+if (legacySpoken !== 'Legacy one. Legacy two.') {
+  console.error('legacy tts-summary speak mismatch:', legacySpoken); process.exit(22);
+}
 NODE
   then
     fail "renderMarkdown regression: numbers in chat messages render as literal 'undefined'"

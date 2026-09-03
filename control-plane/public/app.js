@@ -1194,6 +1194,46 @@ function ensureSpokenSentence(sentence) {
 }
 
 /**
+ * Extract a TTS summary marker from a hub reply (speak path only).
+ * Preferred: fenced markdown ```tts … ``` (info string "tts").
+ * Legacy: <tts-summary>…</tts-summary>.
+ * Captures up to two complete sentences from the marker body. Returns null
+ * when absent. Renderer keeps the inner prose and drops only the fence/tags.
+ */
+function extractTtsSummaryTag(text) {
+  const raw = String(text || '');
+  if (!raw) return null;
+  let inner = null;
+  // Prefer markdown fence: ```tts / ``` tts (optional trailing info).
+  const fence = raw.match(/(?:^|\n)```\s*tts\b[^\n]*\n([\s\S]*?)\n```[ \t]*(?=\n|$)/i);
+  if (fence) {
+    inner = fence[1];
+  } else {
+    const tag = raw.match(/<tts-summary\b[^>]*>([\s\S]*?)<\/tts-summary>/i);
+    if (tag) inner = tag[1];
+  }
+  if (inner == null) return null;
+  let body = cleanLineForSpeech(String(inner || '').replace(/\n+/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Drop a residual label if a model nested TLDR inside the marker.
+  body = body.replace(/^(?:\*\*\s*)?(?:TL\s*;\s*DR|TLDR)(?:\s*\*\*)?\s*:\s*/i, '').trim();
+  if (!body) return null;
+
+  const sentences = splitSpeechSentences(body)
+    .map((s) => scrubDenseSpeechTokens(s))
+    .map((s) => s.replace(/^\W+/, '').trim())
+    .filter((s) => s && s.length > 1)
+    .slice(0, 2)
+    .map((s) => ensureSpokenSentence(s))
+    .filter(Boolean);
+  if (!sentences.length) return null;
+  let result = sentences.join(' ').replace(/\.{2,}/g, '.').replace(/\s{2,}/g, ' ').trim();
+  if (!result) return null;
+  return result;
+}
+
+/**
  * Extract a leading labeled TLDR block from a hub reply (speak path only).
  * Accepts **TLDR:** / TLDR: / **TL;DR:** / TL;DR: (case-insensitive) at the
  * start of the reply. Captures up to two complete sentences from that block
@@ -1231,17 +1271,26 @@ function extractLabeledTldr(text) {
 }
 
 /**
- * Hub-reply TTS summary: prefer a leading labeled two-sentence TLDR when
- * present; otherwise the complete first sentence after light scrub (never a
- * mid-sentence clip or full multi-sentence body dump).
- * Full markdown stays on screen. Returns null when nothing usable remains
- * (caller uses minimal fallback — short acks may stay silent/fallback).
+ * Hub-reply TTS summary: prefer ```tts fence (or legacy <tts-summary>), then a
+ * leading labeled two-sentence TLDR, otherwise the first two complete sentences
+ * of the cleaned prose lead. Never a mid-sentence clip or full multi-paragraph
+ * body dump. Full markdown stays on screen (fence/tags unwrapped by renderer).
+ * Returns null when nothing usable remains (caller uses minimal fallback —
+ * short acks may stay silent/fallback).
  */
 function buildSpokenSummary(text) {
+  const tagged = extractTtsSummaryTag(text);
+  if (tagged) return tagged;
+
   const tldr = extractLabeledTldr(text);
   if (tldr) return tldr;
 
-  const blocks = String(text || '').split(/\n{2,}/);
+  // Ignore TTS markers if present so fallback prose is not polluted by fence lines.
+  const stripped = String(text || '')
+    .replace(/(?:^|\n)```\s*tts\b[^\n]*\n[\s\S]*?\n```[ \t]*(?=\n|$)/gi, '\n')
+    .replace(/<tts-summary\b[^>]*>[\s\S]*?<\/tts-summary>/gi, ' ')
+    .replace(/<\/?tts-summary\b[^>]*>/gi, ' ');
+  const blocks = stripped.split(/\n{2,}/);
   const proseChunks = [];
   let inCodeBlock = false;
   let hadCode = false;
@@ -1322,8 +1371,16 @@ function buildSpokenSummary(text) {
 
   let result = '';
   if (sentences.length) {
-    // Contract: speak the complete first sentence only — no word/char mid-cuts.
-    result = ensureSpokenSentence(sentences[0]);
+    // Contract: speak up to two complete lead sentences — no word/char mid-cuts.
+    // One usable sentence (short ack / single-line) stays one sentence; never invent a second.
+    result = sentences
+      .slice(0, 2)
+      .map((s) => ensureSpokenSentence(s))
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\.{2,}/g, '.')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
   }
 
   // If prose was empty but structure existed, give a tiny structural cue.
@@ -1576,11 +1633,13 @@ function speakViaBrowserTts(spokenText, gen) {
  * @param {string} text raw or already-built spoken text
  * @param {{ raw?: boolean, summary?: boolean }} [opts]
  *   raw=true skips preprocess (confirmation phrases).
- *   summary=true (hub replies) speaks a leading labeled TLDR (up to two
- *   complete sentences, label not spoken) when present; otherwise the
- *   complete first sentence only — never a mid-sentence clip and never the
- *   full multi-sentence body. On summary failure uses TTS_REPLY_FALLBACK
- *   (or silence if even that is empty) — never dumps the full reply.
+ *   summary=true (hub replies) speaks ```tts fence contents when present
+ *   (legacy <tts-summary> still accepted), else a leading labeled TLDR (up to
+ *   two complete sentences, label not spoken), else the first two complete
+ *   lead sentences — never a mid-sentence clip and never the full
+ *   multi-paragraph body. Short single-sentence acks stay one sentence. On
+ *   summary failure uses TTS_REPLY_FALLBACK (or silence if even that is empty)
+ *   — never dumps the full reply.
  * @returns {boolean} true if a speak attempt was started (may finish async)
  */
 function speakTtsText(text, opts) {
@@ -1676,8 +1735,9 @@ function speakTtsText(text, opts) {
 }
 
 function speakHubReply(text) {
-  // Hub replies: full markdown stays in the console UI; TTS gets labeled TLDR
-  // (≤2 sentences) when present, else first-sentence summary only.
+  // Hub replies: full markdown stays in the console UI; TTS gets
+  // ```tts fence body (or legacy <tts-summary>) when present, else labeled
+  // TLDR (≤2 sentences), else first two complete lead sentences.
   logTtsDebug('speakHubReply', { chars: String(text || '').length, mode: 'summary' });
   speakTtsText(text, { summary: true });
 }
