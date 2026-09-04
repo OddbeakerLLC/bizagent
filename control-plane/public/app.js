@@ -2357,8 +2357,25 @@ async function loadConversation(id) {
   stopTtsSpeech();
   if (switching) {
     logTtsDebug('loadConversation switch', id);
+    animateConversationSwitch();
   }
   renderMessages(messages);
+}
+
+// --- Conversation-switch transition (subtle, ~250ms) ---
+// Dropdown switches render instantly; this makes the change perceptible
+// without adding any delay. CSS disables it under prefers-reduced-motion.
+function animateConversationSwitch() {
+  const panel = document.getElementById('messages');
+  if (!panel) return;
+  panel.classList.remove('conv-switching');
+  void panel.offsetWidth; // restart the animation on rapid switches
+  panel.classList.add('conv-switching');
+  panel.addEventListener('animationend', (ev) => {
+    if (ev.target === panel && ev.animationName === 'convSwitchIn') {
+      panel.classList.remove('conv-switching');
+    }
+  }, { once: true });
 }
 
 async function refreshStatus() {
