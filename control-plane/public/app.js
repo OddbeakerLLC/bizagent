@@ -221,6 +221,20 @@ function modelOptionLabel(model) {
   return label;
 }
 
+// Experiment (2026-09-04): render the model dropdown sorted descending —
+// Z→A, case-insensitive, by display name. Applies to every list path (live
+// provider lists and the static cli.json fallback). Flip the constant to
+// false to restore the provider's natural order.
+const MODEL_SORT_DESCENDING = true;
+
+function modelSortName(model) {
+  return String((model && (model.name || model.id)) || '');
+}
+
+function compareModelsDescending(a, b) {
+  return modelSortName(b).localeCompare(modelSortName(a), undefined, { sensitivity: 'base' });
+}
+
 // Placeholder option while the live list loads (or as an empty state).
 function setModelSelectMessage(text) {
   const select = document.getElementById('modalModelSelect');
@@ -242,6 +256,7 @@ function fillModelSelect(models, selected) {
     // Keep the saved model selectable even if the live list changed.
     list.unshift({ id: selected, name: selected, pricing: null });
   }
+  if (MODEL_SORT_DESCENDING) list.sort(compareModelsDescending);
   for (const model of list) {
     const opt = document.createElement('option');
     opt.value = model.id;
