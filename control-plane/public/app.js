@@ -1062,7 +1062,29 @@ function cleanLineForSpeech(line) {
 }
 
 /**
- * Drop paths, filenames, SHAs, and other dense tokens that sound awful in TTS.
+ * Convert a filesystem path into a speakable word form (speak path only).
+ * "/workspace/viewlog.sh" → "workspace viewlog dot sh"; "~/a/b" → "home a b".
+ * On-screen markdown is never passed through this — TTS string only.
+ */
+function pathToSpeech(path) {
+  return String(path || '')
+    .split(/[\/\\]+/)
+    .filter((s) => s && s !== '.' && s !== '..')
+    .map((seg) => {
+      if (seg === '~') return 'home';
+      if (/^~[\w.-]+$/.test(seg)) return `${seg.slice(1)} home`;
+      if (/^[A-Za-z]:$/.test(seg)) return `${seg[0]} drive`;
+      // Dot-separated filename/extension → "dot" (viewlog.sh → "viewlog dot sh").
+      if (seg.includes('.')) return seg.split('.').filter(Boolean).join(' dot ');
+      return seg;
+    })
+    .join(' ')
+    .trim();
+}
+
+/**
+ * Drop filenames, SHAs, and other dense tokens that sound awful in TTS.
+ * Paths are spoken (via pathToSpeech) rather than dropped.
  * Used by hub-reply summary mode (not the lighter buildSpokenText path).
  */
 function scrubDenseSpeechTokens(text) {
@@ -1078,9 +1100,10 @@ function scrubDenseSpeechTokens(text) {
   t = t.replace(/(^|[^\/])\b([A-Za-z]+)\/([A-Za-z]+)\b(?!\/)/g, '$1$2 or $3');
   // Absolute / home / relative multi-segment paths (with or without trailing slash).
   // Home paths require "/" after ~ or ~user so bare "~280" is not treated as a path.
-  t = t.replace(/(?:(?:~[\w.-]*)\/|\/|\.{1,2}\/)(?:[\w.-]+\/)*[\w.-]+\/?/g, ' ');
-  t = t.replace(/\b(?:[\w.-]+\/){1,}[\w.-]*\/?/g, ' ');
-  t = t.replace(/\b[A-Za-z]:\\[^\s]+/g, ' ');
+  // Speak paths instead of dropping them (on-screen markdown unchanged).
+  t = t.replace(/(?:(?:~[\w.-]*)\/|\/|\.{1,2}\/)(?:[\w.-]+\/)*[\w.-]+\/?/g, (m) => ` ${pathToSpeech(m)} `);
+  t = t.replace(/\b(?:[\w.-]+\/){1,}[\w.-]*\/?/g, (m) => ` ${pathToSpeech(m)} `);
+  t = t.replace(/\b[A-Za-z]:\\[^\s]+/g, (m) => ` ${pathToSpeech(m)} `);
   // Bare filenames with common extensions
   t = t.replace(
     /\b[\w.-]+\.(?:js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|kt|md|markdown|txt|json|jsonc|ya?ml|toml|ini|env|sh|bash|zsh|ps1|css|scss|html?|vue|svelte|wasm|lock|wav|mp3|png|jpe?g|gif|svg|webp|ico|puml|sql|proto|gradle|xml|csv|tsv|log|diff|patch)\b/gi,
