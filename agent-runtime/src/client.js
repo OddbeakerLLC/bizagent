@@ -34,7 +34,7 @@ function sanitizeMessage(msg) {
 
   const out = {
     role,
-    content: typeof msg.content === 'string' ? msg.content : msg.content == null ? '' : JSON.stringify(msg.content),
+    content: sanitizeContent(msg.content),
   };
 
   if (typeof msg.name === 'string' && msg.name.trim()) out.name = msg.name;
@@ -65,6 +65,33 @@ function sanitizeMessage(msg) {
   }
 
   return out;
+}
+
+/**
+ * Content sanitizer. Plain strings pass through (JSON-stringifying junk
+ * objects as before). Arrays are treated as chat content parts and reduced to
+ * valid text + image_url blocks (vision); anything else in the array is
+ * dropped, and an unusable array degrades to ''.
+ */
+function sanitizeContent(content) {
+  if (typeof content === 'string') return content;
+  if (content == null) return '';
+  if (!Array.isArray(content)) return JSON.stringify(content);
+  const blocks = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    if (block.type === 'text' && typeof block.text === 'string') {
+      blocks.push({ type: 'text', text: block.text });
+    } else if (
+      block.type === 'image_url' &&
+      block.image_url &&
+      typeof block.image_url.url === 'string' &&
+      /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(block.image_url.url)
+    ) {
+      blocks.push({ type: 'image_url', image_url: { url: block.image_url.url } });
+    }
+  }
+  return blocks.length ? blocks : '';
 }
 
 /** Drop malformed entries and normalize every message before it is sent. */

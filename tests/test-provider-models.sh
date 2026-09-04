@@ -19,7 +19,7 @@ grep -q "provider-models" "$ROOT/control-plane/public/app.js" \
   || fail "app.js does not fetch live provider models"
 grep -q "modalModelCustom" "$ROOT/control-plane/public/index.html" \
   || fail "index.html missing custom model input"
-grep -q "v=20260904-model-picker" "$ROOT/control-plane/public/index.html" \
+grep -q "v=20260904-paste-vision" "$ROOT/control-plane/public/index.html" \
   || fail "index.html missing cache-bust for model picker"
 
 node - "$ROOT" <<'NODE' || exit 1

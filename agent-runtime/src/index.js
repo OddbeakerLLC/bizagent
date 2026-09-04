@@ -22,6 +22,7 @@ const { resolveProvider, listProviders } = require('./providers');
 const { TOOLS, DESTRUCTIVE_TOOLS, executeToolCall } = require('./tools');
 const { buildSystemPrompt } = require('./system-prompt');
 const { startMcpFromHub, stopMcp, getMcpSession } = require('./mcp-client');
+const { buildUserContent, loadVisionBlocks, looksImageRelated, parseVisionPaths } = require('./vision');
 
 // Provider-specific reasoning field names (verified for Venice, Grok; others from provider docs)
 const REASONING_FIELDS = {
@@ -211,7 +212,7 @@ if (require.main === module) {
       return answer.trim().toLowerCase() === 'y';
     }
 
-    async function runAgent(userMessage) {
+    async function runAgent(userMessage, imageBlocks = []) {
       const session = getMcpSession();
       const mcpNames = session ? session.getOpenAiTools().map((t) => t.function.name) : [];
       const messages = [
@@ -222,8 +223,11 @@ if (require.main === module) {
             mcpToolNames: mcpNames,
           }),
         },
-        { role: 'user', content: userMessage },
+        { role: 'user', content: buildUserContent(userMessage, imageBlocks) },
       ];
+      if (imageBlocks.length) {
+        console.log(`Vision: attaching ${imageBlocks.length} image(s) to this turn`);
+      }
 
       let iteration = 0;
       let consecutiveParseErrors = 0;
@@ -231,12 +235,30 @@ if (require.main === module) {
 
       while (iteration < MAX_ITERATIONS) {
         iteration += 1;
-        const completion = await chatCompletion(
-          client,
-          resolved.model,
-          messages,
-          tools,
-        );
+        let completion;
+        try {
+          completion = await chatCompletion(
+            client,
+            resolved.model,
+            messages,
+            tools,
+          );
+        } catch (err) {
+          // Soft-fail: provider/model can't take image content → one text-only
+          // retry so the turn still completes and the operator gets told why.
+          if (imageBlocks.length && iteration === 1 && looksImageRelated(err)) {
+            console.error(
+              `Vision: provider/model rejected the image(s) (${err.status || ''} ${(err.error && err.error.message) || err.message || err}).`.trim(),
+            );
+            imageBlocks = [];
+            messages[1] = {
+              role: 'user',
+              content: `${String(userMessage)}\n\n[Control plane: the provider/model rejected the attached image(s), so this turn is text-only. If the operator asked about the image(s), tell them this model cannot view images.]`,
+            };
+            continue;
+          }
+          throw err;
+        }
         const choice = completion.choices && completion.choices[0];
         if (!choice || !choice.message) {
           console.error('Error: empty model response');
@@ -391,7 +413,9 @@ if (require.main === module) {
         }
         const initialPrompt = await getInitialPrompt();
         if (initialPrompt) {
-          await runAgent(initialPrompt);
+          // Images the control plane marked in the turn prompt (vision).
+          const imageBlocks = loadVisionBlocks(parseVisionPaths(initialPrompt));
+          await runAgent(initialPrompt, imageBlocks);
         } else {
           await interactiveLoop();
         }

@@ -644,6 +644,13 @@ body.library-page {
   color: #1e3a8a;
   max-width: 100%;
 }
+.attach-chip-thumb {
+  width: 30px;
+  height: 30px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
 .attach-chip-name {
   overflow: hidden;
   text-overflow: ellipsis;

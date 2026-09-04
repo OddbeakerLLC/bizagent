@@ -2572,6 +2572,14 @@ function renderAttachChips() {
     name.className = 'attach-chip-name';
     name.textContent = `${file.name} (${formatBytes(file.size || 0)})`;
     name.title = file.name;
+    if (file.type && String(file.type).startsWith('image/')) {
+      // Pasted/attached image preview chip.
+      const thumb = document.createElement('img');
+      thumb.className = 'attach-chip-thumb';
+      thumb.alt = '';
+      try { thumb.src = URL.createObjectURL(file); } catch (_e) { /* preview optional */ }
+      chip.appendChild(thumb);
+    }
     const rm = document.createElement('button');
     rm.type = 'button';
     rm.className = 'attach-chip-remove';
@@ -2621,6 +2629,52 @@ function bindComposerAttachments() {
       pendingAttachFiles.push(f);
     }
     input.value = '';
+    renderAttachChips();
+  });
+}
+
+// --- Clipboard image paste (vision) ---
+// Ctrl/Cmd+V of a screenshot (or any image on the clipboard) drops it into
+// the composer attachment list; it then rides the normal upload pipeline
+// (.bizagent/uploads/) and the runtime attaches it to the model as vision
+// content. Plain-text paste is untouched.
+function pastedImageName(type) {
+  const ext = (String(type).split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'png';
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `pasted-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.${ext}`;
+}
+
+function clipboardImageFiles(clipboardData) {
+  const out = [];
+  if (!clipboardData || !clipboardData.items) return out;
+  const seen = new Set();
+  for (const item of clipboardData.items) {
+    if (!item || item.kind !== 'file') continue;
+    const type = String(item.type || '');
+    if (!type.startsWith('image/')) continue;
+    const blob = item.getAsFile && item.getAsFile();
+    if (!blob) continue;
+    const sig = `${type}|${blob.size}`;
+    if (seen.has(sig)) continue; // some browsers report the same image twice
+    seen.add(sig);
+    out.push({ blob, type, name: pastedImageName(type) });
+  }
+  return out;
+}
+
+function bindComposerPaste() {
+  const input = document.getElementById('messageInput');
+  if (!input || input.dataset.pasteBound === '1') return;
+  input.dataset.pasteBound = '1';
+  input.addEventListener('paste', (event) => {
+    const images = clipboardImageFiles(event.clipboardData);
+    if (images.length === 0) return; // no image on the clipboard — text paste
+    event.preventDefault();
+    for (const img of images) {
+      if (pendingAttachFiles.length >= 8) break;
+      pendingAttachFiles.push(new File([img.blob], img.name, { type: img.type }));
+    }
     renderAttachChips();
   });
 }
@@ -2748,6 +2802,7 @@ bindCompanyModal();
 bindLibraryPage();
 bindTtsToggle();
 bindComposerAttachments();
+bindComposerPaste();
 document.getElementById('newConversation').addEventListener('click', async () => {
   if (!displayName) {
     showNamePanel(true);
