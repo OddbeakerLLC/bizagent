@@ -17,6 +17,8 @@ grep -q "providerHasApiKey(config.hub, providers\[name\])" "$ROOT/control-plane/
   || fail "server.js provider list not key-gated"
 grep -q "provider-models" "$ROOT/control-plane/public/app.js" \
   || fail "app.js does not fetch live provider models"
+grep -q "MODEL_SORT_DESCENDING" "$ROOT/control-plane/public/app.js" \
+  || fail "app.js missing model dropdown descending sort"
 grep -q "modalModelCustom" "$ROOT/control-plane/public/index.html" \
   || fail "index.html missing custom model input"
 grep -q "v=20260904-paste-vision" "$ROOT/control-plane/public/index.html" \
