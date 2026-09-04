@@ -302,6 +302,7 @@ function attachEnterprisePlugin(config) {
 }
 
 const { providerEntries, resolveProviderName, getRuntimeDef } = require("./lib/cli-config");
+const { listProviderModels, providerHasApiKey } = require("./lib/provider-models");
 
 function listCliNames(cliJson) {
   return Object.keys(providerEntries(cliJson));
@@ -351,11 +352,15 @@ function buildCliModelsPayload(config) {
   const runtime = getRuntimeDef(cliJson);
   const runtimeOk = isCliInstalled(runtime.executable, config.hub);
 
-  // Show all catalog providers when runtime is installed. Always include
-  // currently-configured hub/product providers so the dialog can edit them.
+  // Key-gated picker: only providers with a saved API key (plus keyless /
+  // optional-key providers like Ollama). An agent's currently configured
+  // provider stays editable because the UI unshifts the saved selection
+  // into the dropdown.
   const keep = new Set();
   if (runtimeOk) {
-    for (const name of allNames) keep.add(name);
+    for (const name of allNames) {
+      if (providerHasApiKey(config.hub, providers[name])) keep.add(name);
+    }
   }
   const hubAgent =
     (config.registry &&
@@ -364,14 +369,19 @@ function buildCliModelsPayload(config) {
     {};
   const hubProv =
     hubAgent.provider || hubAgent.cliName || hubAgent.cli || "";
+  const configured = [];
   if (hubProv) {
-    keep.add(resolveProviderName(String(hubProv), cliJson) || String(hubProv));
+    configured.push(resolveProviderName(String(hubProv), cliJson) || String(hubProv));
   }
   for (const product of (config.registry && config.registry.products) || []) {
     const n = product && (product.provider || product.cliName || product.cli);
     if (n) {
-      keep.add(resolveProviderName(String(n), cliJson) || String(n));
+      configured.push(resolveProviderName(String(n), cliJson) || String(n));
     }
+  }
+  // Runtime missing: keep the dialog usable with configured providers.
+  if (!runtimeOk) {
+    for (const n of configured) keep.add(n);
   }
 
   const clis = allNames.filter((n) => keep.has(n));
@@ -393,7 +403,9 @@ function buildCliModelsPayload(config) {
 
   const cliModels = {};
   const labels = {};
-  for (const name of clis) {
+  // Static curated lists ship for every known provider (UI fallback), even
+  // ones key-gated out of the dropdown above.
+  for (const name of allNames) {
     const entry = providers[name] || cliJson[name] || {};
     labels[name] = entry.label || name;
     if (Array.isArray(byCli[name]) && byCli[name].length > 0) {
@@ -1439,6 +1451,20 @@ async function handleApi(config, req, res) {
     req.method === "GET"
   ) {
     return send(res, 200, buildCliModelsPayload(config));
+  }
+
+  // Live models list for one provider. Fetched server-side with the saved
+  // key so the key never reaches the browser; falls back to the provider's
+  // curated cli.json list with ok:false + error when no endpoint answers.
+  if (url.pathname === "/api/provider-models" && req.method === "GET") {
+    const provider = (url.searchParams.get("provider") || "").trim();
+    if (!provider) return send(res, 400, { error: "provider is required" });
+    const result = await listProviderModels({
+      hub: config.hub,
+      cliJson: config._cliJson,
+      provider,
+    });
+    return send(res, 200, result);
   }
 
   // Update agent provider/model in registry.json
