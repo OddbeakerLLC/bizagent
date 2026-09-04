@@ -1072,6 +1072,10 @@ function scrubDenseSpeechTokens(text) {
   t = t.replace(/(\d+(?:,\d{3})*(?:\.\d+)?)\s*~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, '$1 to $2');
   t = t.replace(/~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, 'about $1');
   t = t.replace(/\babout\s+about\b/gi, 'about');
+  // Speak-only: slash-separated alternatives "keep/delete" → "keep or delete".
+  // Guarded so multi-segment paths (/a/b, a/b/c, ~/x) still hit the path wipes below.
+  t = t.replace(/\band\/or\b/gi, 'and or');
+  t = t.replace(/(^|[^\/])\b([A-Za-z]+)\/([A-Za-z]+)\b(?!\/)/g, '$1$2 or $3');
   // Absolute / home / relative multi-segment paths (with or without trailing slash).
   // Home paths require "/" after ~ or ~user so bare "~280" is not treated as a path.
   t = t.replace(/(?:(?:~[\w.-]*)\/|\/|\.{1,2}\/)(?:[\w.-]+\/)*[\w.-]+\/?/g, ' ');
@@ -1154,6 +1158,10 @@ function pronounceForSpeech(text) {
   t = t.replace(/(\d+(?:,\d{3})*(?:\.\d+)?)\s*~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, '$1 to $2');
   t = t.replace(/~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, 'about $1');
   t = t.replace(/\babout\s+about\b/gi, 'about');
+
+  // Slash-separated alternatives (speak-only): "keep/delete" → "keep or delete".
+  t = t.replace(/\band\/or\b/gi, 'and or');
+  t = t.replace(/(^|[^\/])\b([A-Za-z]+)\/([A-Za-z]+)\b(?!\/)/g, '$1$2 or $3');
 
   // 1) digit.digit → point (repeat for 3.1.4-style version chains)
   t = t.replace(/(\d)\.(\d)/g, '$1 point $2');
