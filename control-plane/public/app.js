@@ -169,6 +169,99 @@ const expandedAgentSlugs = new Set();
 let pendingAgentConfig = null; // { slug, agentName, provider, model }
 let cliModelsCache = null; // { clis/providers, cliModels, labels, defaultModel }
 
+// Live model lists are fetched per provider through the control plane
+// (server-side saved key). Short cache so reopening the modal is instant.
+const MODEL_CUSTOM_VALUE = '__custom__';
+const LIVE_MODELS_TTL_MS = 60000;
+let liveModelsCache = {}; // provider -> { fetchedAt, payload }
+let modelListLoading = false; // true while a live list request is in flight
+
+function resetModelCustomInput() {
+  const input = document.getElementById('modalModelCustom');
+  if (input) input.value = '';
+}
+
+function setModelCustomInput(visible, focus) {
+  const input = document.getElementById('modalModelCustom');
+  if (!input) return;
+  input.hidden = !visible;
+  if (visible && focus) input.focus();
+}
+
+async function fetchProviderModels(provider, force = false) {
+  if (!provider) return null;
+  const cached = liveModelsCache[provider];
+  if (!force && cached && Date.now() - cached.fetchedAt < LIVE_MODELS_TTL_MS) {
+    return cached.payload;
+  }
+  const payload = await api('/api/provider-models?provider=' + encodeURIComponent(provider));
+  liveModelsCache[provider] = { fetchedAt: Date.now(), payload };
+  return payload;
+}
+
+function formatPrice(n) {
+  if (n == null || !Number.isFinite(n)) return null;
+  const v = n >= 100 ? n.toFixed(0) : n >= 1 ? n.toFixed(2) : Number(n.toPrecision(3));
+  return '$' + v;
+}
+
+// Dropdown label: real display name from the provider API, plus cost when
+// the API reports pricing (omitted gracefully otherwise).
+function modelOptionLabel(model) {
+  let label = (model && (model.name || model.id)) || '';
+  const pricing = model && model.pricing;
+  if (pricing && (pricing.input != null || pricing.output != null)) {
+    const inP = formatPrice(pricing.input);
+    const outP = formatPrice(pricing.output);
+    const cost = inP && outP
+      ? (inP + ' in / ' + outP + ' out per 1M tokens')
+      : (inP || outP) + ' per 1M tokens';
+    label = label + ' — ' + cost;
+  }
+  return label;
+}
+
+// Placeholder option while the live list loads (or as an empty state).
+function setModelSelectMessage(text) {
+  const select = document.getElementById('modalModelSelect');
+  if (!select) return;
+  select.innerHTML = '';
+  const opt = document.createElement('option');
+  opt.value = '';
+  opt.textContent = text;
+  select.appendChild(opt);
+  setModelCustomInput(false);
+}
+
+function fillModelSelect(models, selected) {
+  const select = document.getElementById('modalModelSelect');
+  if (!select) return;
+  select.innerHTML = '';
+  const list = (Array.isArray(models) ? models : []).filter((m) => m && m.id);
+  if (selected && !list.some((m) => m.id === selected)) {
+    // Keep the saved model selectable even if the live list changed.
+    list.unshift({ id: selected, name: selected, pricing: null });
+  }
+  for (const model of list) {
+    const opt = document.createElement('option');
+    opt.value = model.id;
+    opt.textContent = modelOptionLabel(model);
+    if (model.id === selected) opt.selected = true;
+    select.appendChild(opt);
+  }
+  // Manual model entry stays available for providers without a list.
+  const custom = document.createElement('option');
+  custom.value = MODEL_CUSTOM_VALUE;
+  custom.textContent = 'Custom model…';
+  select.appendChild(custom);
+  if (list.length === 0) {
+    select.value = MODEL_CUSTOM_VALUE;
+    setModelCustomInput(true);
+  } else {
+    setModelCustomInput(select.value === MODEL_CUSTOM_VALUE);
+  }
+}
+
 async function loadCliModels(force = false) {
   if (!force && cliModelsCache) return cliModelsCache;
   const data = await api('/api/cli-models');
@@ -208,18 +301,43 @@ function fillSelect(select, options, selected, labels) {
   }
 }
 
-function refreshModelOptionsForCli() {
-  if (!pendingAgentConfig || !cliModelsCache) return;
+async function refreshModelOptionsForCli() {
   const cliSelect = document.getElementById('modalCliSelect');
-  const modelSelect = document.getElementById('modalModelSelect');
-  if (!cliSelect || !modelSelect) return;
+  if (!pendingAgentConfig || !cliSelect) return;
   const provider = cliSelect.value;
-  const models = (cliModelsCache.cliModels && cliModelsCache.cliModels[provider]) || [];
-  // Prefer current model if still valid for this provider; otherwise first model.
-  const preferred =
-    models.includes(pendingAgentConfig.model) ? pendingAgentConfig.model
-      : (models[0] || pendingAgentConfig.model || '');
-  fillSelect(modelSelect, models, preferred);
+  const status = document.getElementById('modalStatus');
+  const currentModel = pendingAgentConfig.model || '';
+  modelListLoading = true;
+  setModelSelectMessage('Loading models…');
+  let payload = null;
+  try {
+    payload = await fetchProviderModels(provider);
+  } catch (_err) {
+    payload = null; // fall back to the static curated list below
+  }
+  modelListLoading = false;
+  // Modal/provider changed while we were loading — don't clobber it.
+  if (!pendingAgentConfig || !cliSelect.isConnected || cliSelect.value !== provider) return;
+  let models = payload && Array.isArray(payload.models) ? payload.models : [];
+  let source = payload ? String(payload.source || '') : '';
+  if (models.length === 0) {
+    // Fallback: curated static list from cli.json (ships with providers).
+    const staticModels = (cliModelsCache && cliModelsCache.cliModels
+      && cliModelsCache.cliModels[provider]) || [];
+    models = staticModels.map((id) => ({ id, name: id, pricing: null }));
+    if (staticModels.length) source = 'fallback';
+  }
+  fillModelSelect(models, currentModel);
+  if (status) {
+    if (source === 'fallback') {
+      status.hidden = false;
+      status.textContent = 'Live model list unavailable — showing the saved list; pick Custom model… to type one.';
+      status.dataset.kind = 'warn';
+    } else if (source === 'live') {
+      status.hidden = true;
+      status.textContent = '';
+    }
+  }
 }
 
 async function showAgentConfigModal(agent) {
@@ -257,7 +375,9 @@ async function showAgentConfigModal(agent) {
 
   const clis = (cliModelsCache && (cliModelsCache.providers || cliModelsCache.clis)) || [];
   fillSelect(cliSelect, clis, pendingAgentConfig.provider, cliModelsCache && cliModelsCache.labels);
-  refreshModelOptionsForCli();
+  resetModelCustomInput();
+  // Fire-and-forget: the modal opens immediately with a Loading… placeholder.
+  refreshModelOptionsForCli().catch(() => {});
   modal.hidden = false;
   cliSelect.focus();
 }
@@ -266,6 +386,9 @@ function hideAgentConfigModal() {
   const modal = document.getElementById('configModal');
   if (modal) modal.hidden = true;
   pendingAgentConfig = null;
+  modelListLoading = false;
+  setModelCustomInput(false);
+  resetModelCustomInput();
   const status = document.getElementById('modalStatus');
   if (status) {
     status.hidden = true;
@@ -280,7 +403,25 @@ async function saveAgentConfigModal() {
   const status = document.getElementById('modalStatus');
   const saveBtn = document.getElementById('modalSave');
   const provider = cliSelect ? cliSelect.value.trim() : '';
-  const model = modelSelect ? modelSelect.value.trim() : '';
+  let model = '';
+  if (modelSelect && modelSelect.value === MODEL_CUSTOM_VALUE) {
+    const customInput = document.getElementById('modalModelCustom');
+    model = customInput ? customInput.value.trim() : '';
+    if (!model) {
+      if (status) {
+        status.hidden = false;
+        status.textContent = 'Enter a custom model id';
+        status.dataset.kind = 'warn';
+      }
+      return;
+    }
+  } else {
+    model = modelSelect ? modelSelect.value.trim() : '';
+    if (!model && modelListLoading && pendingAgentConfig.model) {
+      // List still loading — keep the agent's current model.
+      model = pendingAgentConfig.model;
+    }
+  }
 
   if (!provider) {
     if (status) {
@@ -326,6 +467,13 @@ function bindAgentConfigModal() {
   const modalCancel = document.getElementById('modalCancel');
   const modalSave = document.getElementById('modalSave');
   const cliSelect = document.getElementById('modalCliSelect');
+  const modelSelect = document.getElementById('modalModelSelect');
+  if (modelSelect) {
+    modelSelect.addEventListener('change', () => {
+      const isCustom = modelSelect.value === MODEL_CUSTOM_VALUE;
+      setModelCustomInput(isCustom, isCustom);
+    });
+  }
   if (modalClose) modalClose.addEventListener('click', close);
   if (modalCancel) modalCancel.addEventListener('click', close);
   if (modalSave) modalSave.addEventListener('click', () => { saveAgentConfigModal(); });

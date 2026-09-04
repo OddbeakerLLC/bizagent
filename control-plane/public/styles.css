@@ -714,6 +714,14 @@ body.library-page {
   font: inherit;
   background: #fff;
 }
+.modal-body input#modalModelCustom {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font: inherit;
+}
 .modal-status {
   margin: 4px 0 0;
   font-size: 12px;

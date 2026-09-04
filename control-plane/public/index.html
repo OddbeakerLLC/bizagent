@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>BizAgent</title>
-  <link rel="stylesheet" href="/styles.css?v=20260903-chat-time">
+  <link rel="stylesheet" href="/styles.css?v=20260904-model-picker">
 </head>
 <body>
   <main class="app-shell">
@@ -75,6 +75,8 @@
         <select id="modalCliSelect"></select>
         <label for="modalModelSelect">Model</label>
         <select id="modalModelSelect"></select>
+        <input id="modalModelCustom" type="text" placeholder="Custom model id (e.g. gpt-5.4)"
+               hidden autocomplete="off" spellcheck="false">
         <p id="modalStatus" class="modal-status auth-status" hidden></p>
       </div>
       <div class="modal-footer">
@@ -124,6 +126,6 @@
 
   <script src="/enterprise/enterprise-panel.js" onerror="/* enterprise optional */"></script>
   <script src="/markdown.js?v=20260903-tts-md-fence"></script>
-  <script src="/app.js?v=20260904-tts-speak-paths"></script>
+  <script src="/app.js?v=20260904-model-picker"></script>
 </body>
 </html>
