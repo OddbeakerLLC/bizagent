@@ -868,6 +868,26 @@ button {
   overflow-y: auto;
   padding: 22px 18px;
 }
+/* Conversation-switch transition: subtle fade+slide so a switch is clearly
+   perceptible. Disabled entirely under prefers-reduced-motion. */
+.messages.conv-switching {
+  animation: convSwitchIn 250ms ease-out;
+}
+@keyframes convSwitchIn {
+  from {
+    opacity: 0.4;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .messages.conv-switching {
+    animation: none;
+  }
+}
 .message-author {
   display: flex;
   align-items: baseline;
