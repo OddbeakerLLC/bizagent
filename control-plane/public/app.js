@@ -22,6 +22,7 @@ let lastAgentsList = [];
 let thinkingSource = null;
 let thinkingConv = null;
 let thinkingAck = null; // identity (created_at) of the launch-ack currently streamed
+let thinkingDone = null; // { conv, ack, at } — suppress immediate reopen after done
 
 // UI polling gate for push test. Polling for /api/state and conversation history is OFF by default.
 // WS subscribe/push is the preferred and only driver when this flag is off (default).
@@ -2165,6 +2166,7 @@ function closeThinkingStream() {
   thinkingSource = null;
   thinkingConv = null;
   thinkingAck = null;
+  hideThinkingStall();
 }
 
 function thinkingLogEl() {
@@ -2175,6 +2177,24 @@ function thinkingActive() {
   return !!thinkingSource && !!thinkingConv;
 }
 
+function showThinkingStall(secs) {
+  let line = document.querySelector('[data-thinking-stall="1"]');
+  if (!line) {
+    const log = thinkingLogEl();
+    if (!log || !log.parentNode) return;
+    line = document.createElement('div');
+    line.className = 'thinking-stall';
+    line.setAttribute('data-thinking-stall', '1');
+    log.parentNode.appendChild(line);
+  }
+  line.textContent = `[running — no output for ${secs}s]`;
+}
+
+function hideThinkingStall() {
+  const line = document.querySelector('[data-thinking-stall="1"]');
+  if (line) line.remove();
+}
+
 function openThinkingStream(convId) {
   if (!convId) return;
   const log = thinkingLogEl();
@@ -2182,15 +2202,25 @@ function openThinkingStream(convId) {
   // Reopen whenever the conversation OR the launch-ack (turn) changes, so the
   // stream always starts at the new turn's log offset — never old thinking.
   const ack = log.getAttribute('data-thinking-ack') || '';
+  // A done for this exact ack already arrived — do not busy-reopen while the
+  // (still visible) launch-ack waits for its reply.
+  if (ack && thinkingDone && thinkingDone.conv === convId && thinkingDone.ack === ack
+      && Date.now() - thinkingDone.at < 30000) {
+    closeThinkingStream();
+    return;
+  }
+  if (!ack) thinkingDone = null;
   if (thinkingConv === convId && thinkingAck === ack) return;
   closeThinkingStream();
   thinkingConv = convId;
   thinkingAck = ack;
+  hideThinkingStall();
   thinkingSource = new EventSource(`/api/thinking/stream?conv=${encodeURIComponent(convId)}`);
   thinkingSource.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (_) { return; }
     if (msg && msg.done) {
+      thinkingDone = { conv: convId, ack, at: Date.now() };
       closeThinkingStream();
       // Turn ended server-side — soft-refresh messages so a stripped launch-ack /
       // real reply replaces Thinking… if the push was missed.
@@ -2202,7 +2232,13 @@ function openThinkingStream(convId) {
       }
       return;
     }
+    if (msg && msg.stall) {
+      // Process alive but log silent — explicit line instead of blank pane.
+      showThinkingStall(Number(msg.silent_for) || 0);
+      return;
+    }
     if (msg && msg.text) {
+      hideThinkingStall();
       const el = thinkingLogEl();
       if (!el) { closeThinkingStream(); return; }
       el.textContent += msg.text;
