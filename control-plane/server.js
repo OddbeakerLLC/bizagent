@@ -58,6 +58,7 @@ function wsBroadcastConv(id, conv) {
 const {
   agentsFromRegistry,
   loadHubEnv,
+  loadRegistry,
   loadRuntimeConfig,
   readJson,
   refreshRuntimeConfig,
@@ -92,6 +93,7 @@ const {
   writeHubInboxMessage,
 } = require("./lib/conversations");
 const {
+  clearDispatchState,
   dispatchPendingAgents,
   drainHubTurnSafety,
   isAgentActive,
@@ -825,6 +827,11 @@ async function handleApi(config, req, res) {
       } catch (_err) { /* ignore */ }
     };
     sendTail();
+    // Stream stays open while the process is alive (pid-based), not while the
+    // lease is unexpired. Silent-but-alive → explicit stall line, not blank.
+    let lastChange = Date.now();
+    let lastStall = 0;
+    const STALL_MS = 15000;
     const iv = setInterval(() => {
       if (!isAgentActive(config.hub, slug, config.lockLeaseSecs)) {
         clearInterval(iv);
@@ -833,7 +840,14 @@ async function handleApi(config, req, res) {
         try { res.end(); } catch (_err) { /* ignore */ }
         return;
       }
+      const before = offset;
       sendTail();
+      if (offset > before) {
+        lastChange = Date.now();
+      } else if (Date.now() - lastChange >= STALL_MS && Date.now() - lastStall >= 10000) {
+        lastStall = Date.now();
+        sendEvent({ stall: true, silent_for: Math.round((Date.now() - lastChange) / 1000) });
+      }
     }, 500);
     req.on("close", () => clearInterval(iv));
     return null;
@@ -898,8 +912,12 @@ async function handleApi(config, req, res) {
       try {
         const all = readThinking(config.hub);
         for (const [cid, entry] of Object.entries(all || {})) {
-          if (entry && entry.slug === slug) {
-            clearThinking(config.hub, cid);
+          // entry: per-slug map { [slug]: {...} } (legacy flat { slug, ... } tolerated)
+          const slugs = entry && entry.slug && !entry[entry.slug]
+            ? [entry.slug]
+            : Object.keys(entry || {});
+          if (slugs.includes(slug)) {
+            clearThinking(config.hub, cid, slug);
             if (!convId) convId = cid;
           }
         }
@@ -1475,16 +1493,50 @@ async function handleApi(config, req, res) {
     const slug = decodeURIComponent(agentConfigMatch[1]);
     try {
       const body = await parseBody(req);
+      // Previous values so a no-op PUT does not stop a running turn.
+      let oldProvider = "";
+      let oldModel = "";
+      try {
+        const reg = loadRegistry(config.hub);
+        if (slug === "hub") {
+          const ha = (reg.settings && reg.settings.hub_agent) || {};
+          oldProvider = ha.provider || ha.cliName || "";
+          oldModel = ha.model || "";
+        } else {
+          const prod = (reg.products || []).find((p) => p && p.slug === slug);
+          if (prod) {
+            oldProvider = prod.provider || prod.cliName || "";
+            oldModel = prod.model || "";
+          }
+        }
+      } catch (_err) { /* compare against empty */ }
       const result = updateAgentConfig(config.hub, slug, {
         provider: body.provider || body.cliName,
         cliName: body.cliName || body.provider,
         model: body.model,
       });
+      // A roster provider/model change on a running slug must stop the
+      // in-flight turn (same path as the agent-light stop) so the next
+      // dispatch uses the new provider/model once — never leave the old
+      // provider running.
+      let stopped = false;
+      const changed =
+        (result && (result.provider || "") !== oldProvider) ||
+        (result && (result.model || "") !== oldModel);
+      if (changed && isAgentActive(config.hub, slug, config.lockLeaseSecs)) {
+        try {
+          await stopAgentTurn(config.hub, slug);
+          stopped = true;
+          // Release the stop-hold markers: still-pending mail is
+          // re-dispatched on the next tick with the new provider/model.
+          try { clearDispatchState(config.hub, slug); } catch (_e) { /* ignore */ }
+        } catch (_err) { stopped = false; }
+      }
       // Force in-process registry reload even if mtime granularity is coarse.
       config._registryMtimeMs = 0;
       refreshRuntimeConfig(config);
       didChangeState();
-      return send(res, 200, { ok: true, ...result });
+      return send(res, 200, { ok: true, stopped, ...result });
     } catch (err) {
       const msg = err.message || "failed to update agent config";
       const status =
@@ -1603,10 +1655,28 @@ async function handleApi(config, req, res) {
   return send(res, 404, { error: "not found" });
 }
 
+/** Sorted live-slug key (hub + product agents) for board change detection. */
+function activeSlugKey(config) {
+  const lease = config.lockLeaseSecs;
+  const out = [];
+  try {
+    if (isAgentActive(config.hub, "hub", lease)) out.push("hub");
+    const agentsDir = path.join(config.hub, "agents");
+    for (const slug of fs.readdirSync(agentsDir)) {
+      if (slug === "hub") continue;
+      if (isAgentActive(config.hub, slug, lease)) out.push(slug);
+    }
+  } catch (_err) { /* no agents dir */ }
+  return out.sort().join(",");
+}
+
 function runTick(config) {
   const start = Date.now();
   refreshRuntimeConfig(config);
   maybeReloadEnterprise(config);
+  // Snapshot live slugs so a lock drop / cli_exit between ticks pushes the
+  // board (amber clears without a page refresh), not only hadWork ticks.
+  const activeBefore = activeSlugKey(config);
   const routed = routeOutboxes(config.hub);
   const relayed = syncUserInbox(config); // numeric for hadWork (compat)
   // Backup: if hub CLI exited without the shell safety hook, finish the turn.
@@ -1622,6 +1692,7 @@ function runTick(config) {
   // Also covers EXIT-hook child process that mutated conv JSON without broadcast.
   const stampPushed = pushConversationsChangedOnDisk(config);
 
+  const activeChanged = activeBefore !== activeSlugKey(config);
   const hadWork =
     (routed.delivered || 0) > 0 ||
     (routed.quarantined || 0) > 0 ||
@@ -1629,7 +1700,8 @@ function runTick(config) {
     relayed > 0 ||
     launched > 0 ||
     safetyIds.length > 0 ||
-    stampPushed > 0;
+    stampPushed > 0 ||
+    activeChanged;
 
   if (hadWork) {
     logEvent(config.hub, {

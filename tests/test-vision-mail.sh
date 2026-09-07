@@ -19,7 +19,7 @@ grep -q "conv-switching" "$ROOT/control-plane/public/styles.css" \
   || fail "styles.css missing conversation-switch animation"
 grep -q "prefers-reduced-motion" "$ROOT/control-plane/public/styles.css" \
   || fail "styles.css missing prefers-reduced-motion guard"
-grep -q "v=20260904-paste-vision" "$ROOT/control-plane/public/index.html" \
+grep -q "v=20260907-dispatch-lockfix" "$ROOT/control-plane/public/index.html" \
   || fail "index.html missing paste-vision cache-bust"
 
 # --- Runtime wiring: vision module used by the agent runtime ---

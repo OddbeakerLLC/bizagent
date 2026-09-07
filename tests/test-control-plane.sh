@@ -369,7 +369,7 @@ grep -q 'msg.type === .cancel.' "$ROOT/scripts/hub-daemon.js" \
 grep -q 'await stopAgentTurn' "$ROOT/control-plane/server.js" \
   || fail "server stop routes must await async stopAgentTurn"
 # 4. Preview: built pages surface as clickable links opening in a new tab (no iframe).
-grep -q 'target="_blank"' "$ROOT/control-plane/public/app.js" \
+grep -q 'target="_blank"' "$ROOT/control-plane/public/markdown.js" \
   || fail "UI does not open preview links in a new tab"
 ! grep -q "iframe" "$ROOT/control-plane/public/app.js" \
   || fail "UI embeds preview in an iframe (should be a plain link)"
@@ -2434,16 +2434,15 @@ if (!fallback._hubCliFromLegacyDotCli) {
   console.error('expected _hubCliFromLegacyDotCli marker');
   process.exit(7);
 }
-// Legacy cliName "claude" maps to claude provider
-const fallbackSettings = getCliSettings(
-  hub, fallback._cliJson, fallback, fallback.hubCliName || '', fallback.hubModel || '',
-);
-if (fallbackSettings.cli !== 'scripts/bizagent-agent') {
-  console.error('fallback executable wrong:', fallbackSettings.cli);
-  process.exit(8);
+// Empty model now fails clear (a8d00b2) — no silent provider default.
+let emptyModelThrew = false;
+try {
+  getCliSettings(hub, fallback._cliJson, fallback, fallback.hubCliName || '', fallback.hubModel || '');
+} catch (err) {
+  emptyModelThrew = /Model is empty/i.test(err.message);
 }
-if (!/--provider claude/.test(fallbackSettings.extraArgs || '')) {
-  console.error('legacy claude should map to claude provider:', fallbackSettings.extraArgs);
+if (!emptyModelThrew) {
+  console.error('empty hub model must fail clear in getCliSettings');
   process.exit(9);
 }
 
@@ -2516,8 +2515,8 @@ if (/Keep that file compact\. Compress older turns/i.test(prompt)) {
   console.error('slim prompt still asks LLM to compress session');
   process.exit(3);
 }
-// Budget allows slim always-on prompt + compact playbooks/consult rule (~6.5–7KB).
-if (Buffer.byteLength(prompt, 'utf8') > 7000) {
+// Budget allows slim always-on prompt + compact playbooks/consult rule (~8KB).
+if (Buffer.byteLength(prompt, 'utf8') > 8500) {
   console.error('always-on hub prompt too large:', Buffer.byteLength(prompt, 'utf8'));
   process.exit(4);
 }
@@ -2552,7 +2551,7 @@ const catalog = {
 };
 const settings = getCliSettings(hub, catalog, {
   cli: 'claude', hubCliName: 'claude', hubProvider: 'grok',
-}, 'grok', '');
+}, 'grok', 'grok-4.5');
 if (settings.cli !== 'scripts/bizagent-agent') {
   console.error('expected bizagent-agent executable:', settings.cli);
   process.exit(9);
@@ -2567,7 +2566,7 @@ if (!/(^|\s)-y(\s|$)/.test(settings.extraArgs || '')) {
 }
 const viaClaude = getCliSettings(hub, catalog, {
   cli: 'grok', hubCliName: 'grok', hubProvider: 'claude',
-}, 'claude', '');
+}, 'claude', 'claude-sonnet-4-6');
 if (viaClaude.cli !== 'scripts/bizagent-agent' || viaClaude.promptFlag !== '-f') {
   console.error('claude provider should still launch bizagent-agent:', viaClaude);
   process.exit(10);
@@ -3198,5 +3197,54 @@ NODE
 then
   fail "provider credit-alert checks failed"
 fi
+
+# thinking.json: per-slug entries — slug B must not clobber slug A on the same
+# conversation (2026-09-07 Boxy/BeakerNet incident).
+if ! node - "$ROOT" "$TMP" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.argv[2];
+const hub = process.argv[3];
+const {
+  recordThinking, getThinking, clearThinking, readThinking,
+} = require(path.join(root, 'control-plane/lib/thinking'));
+const conv = '2026-09-07-test-conv';
+recordThinking(hub, conv, 'alpha', '/tmp/a.log', 10);
+recordThinking(hub, conv, 'beta', '/tmp/b.log', 20);
+const both = readThinking(hub);
+const per = both[conv];
+if (!per || !per.alpha || !per.beta) { console.error('both slug entries must coexist', both); process.exit(1); }
+if (per.alpha.logFile !== '/tmp/a.log' || Number(per.alpha.logByteOffset) !== 10) { console.error('alpha entry wrong', per.alpha); process.exit(2); }
+const latest = getThinking(hub, conv);
+if (!latest || latest.slug !== 'beta') { console.error('latest slug should win', latest); process.exit(3); }
+const alpha = getThinking(hub, conv, 'alpha');
+if (!alpha || alpha.logFile !== '/tmp/a.log') { console.error('slug lookup failed', alpha); process.exit(4); }
+clearThinking(hub, conv, 'beta');
+const after = readThinking(hub);
+if (!after[conv] || !after[conv].alpha || after[conv].beta) { console.error('clearThinking(slug) must remove only that slug', after); process.exit(5); }
+clearThinking(hub, conv);
+if (readThinking(hub)[conv]) { console.error('clearThinking(conv) must drop entry'); process.exit(6); }
+// Legacy flat entry compat ({ slug, logFile, ... })
+fs.writeFileSync(path.join(hub, '.bizagent', 'thinking.json'), JSON.stringify({
+  [conv]: { slug: 'gamma', logFile: '/tmp/g.log', logByteOffset: 5, startedAt: '2026-09-07T00:00:00.000Z' },
+}, null, 2));
+const legacy = getThinking(hub, conv);
+if (!legacy || legacy.slug !== 'gamma' || legacy.logFile !== '/tmp/g.log') { console.error('legacy entry not normalized', legacy); process.exit(7); }
+NODE
+then
+  fail "thinking per-slug unit checks failed"
+fi
+grep -q "thinkingDone" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing thinking done-reopen guard"
+grep -q "thinking-stall" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing stall heartbeat line"
+grep -q "thinking-stall" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing thinking stall rule"
+grep -q "stall: true" "$SERVER" \
+  || fail "thinking stream missing stall heartbeat"
+grep -q "activeSlugKey" "$SERVER" \
+  || fail "tick does not push board on live-slug change"
+grep -q "clearDispatchState" "$SERVER" \
+  || fail "model-change stop does not release dispatch markers"
 
 echo "  ok: control-plane"

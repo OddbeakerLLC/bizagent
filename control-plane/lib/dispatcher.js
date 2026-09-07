@@ -449,6 +449,34 @@ function pidAlive(pid) {
   }
 }
 
+/**
+ * Scan /proc for a live bizagent-agent CLI process for this slug
+ * (node <hub>/agent-runtime/src/index.js -f …/turns/agent-<slug>-<turn>.md …).
+ * Returns the pid (string) or '' when none is running.
+ */
+function findAgentCliPid(hub, slug) {
+  const marker = slug === 'hub' ? 'hub-' : `agent-${slug}-`;
+  let entries;
+  try {
+    entries = fs.readdirSync('/proc');
+  } catch (_err) {
+    return '';
+  }
+  for (const entry of entries) {
+    if (!/^[0-9]+$/.test(entry)) continue;
+    let cmd = '';
+    try {
+      cmd = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8');
+    } catch (_err) {
+      continue;
+    }
+    if (!cmd.includes('src/index.js')) continue;
+    if (!cmd.includes(marker)) continue;
+    return entry;
+  }
+  return '';
+}
+
 function lockDir(hub, slug) {
   if (slug === 'hub') return path.join(appDir(hub), 'hub.lock');
   return path.join(hub, 'agents', slug, '.lock');
@@ -491,29 +519,37 @@ function dispatchRetrySecs(config) {
   return Math.max(60, Math.min(6 * 3600, Number(config.lockLeaseSecs || 1800)));
 }
 
-function activeDispatchMarker(item, fingerprint, now, retrySecs) {
+function activeDispatchMarker(item, fingerprint, now, retrySecs, running = false) {
   const dispatchedAt = Number(item.dispatchedAt || 0);
-  return sameFingerprint(item, fingerprint) && dispatchedAt > 0 && now - dispatchedAt < retrySecs;
+  if (!sameFingerprint(item, fingerprint) || dispatchedAt <= 0) return false;
+  // A slug that is actually running holds its markers regardless of age —
+  // the same inbox fingerprint must not launch a second copy.
+  if (running) return true;
+  return now - dispatchedAt < retrySecs;
 }
 
-function pendingUndispatchedMail(hub, slug, retrySecs = 0) {
+function pendingUndispatchedMail(hub, slug, retrySecs = 0, leaseSecs = 0) {
   const handled = readDispatchState(hub, slug);
   const now = Math.floor(Date.now() / 1000);
+  const running = leaseSecs ? isAgentActive(hub, slug, leaseSecs) : false;
   return pendingMail(hub, slug).filter((file) => {
     const fingerprint = dispatchFingerprint(file);
-    return !handled.some((item) => activeDispatchMarker(item, fingerprint, now, retrySecs));
+    return !handled.some((item) => activeDispatchMarker(item, fingerprint, now, retrySecs, running));
   });
 }
 
-function markMailDispatched(hub, slug, files, retrySecs = 0) {
+function markMailDispatched(hub, slug, files, retrySecs = 0, leaseSecs = 0) {
   const target = dispatchStateFile(hub, slug);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const handled = readDispatchState(hub, slug);
   const now = Math.floor(Date.now() / 1000);
   const mailDir = path.dirname(files[0] || '');
-  // Drop markers only when the inbox file is gone (archived) or past retry window.
+  const running = leaseSecs ? isAgentActive(hub, slug, leaseSecs) : false;
+  // Drop markers only when the inbox file is gone (archived) or past retry
+  // window — never while the slug is actually running.
   const next = handled.filter((item) => (
-    fs.existsSync(path.join(mailDir, item.file)) && Number(item.dispatchedAt || 0) > now - retrySecs
+    fs.existsSync(path.join(mailDir, item.file)) &&
+    (running || Number(item.dispatchedAt || 0) > now - retrySecs)
   ));
   for (const file of files) {
     const fingerprint = dispatchFingerprint(file);
@@ -563,8 +599,13 @@ function tryLock(hub, slug, leaseSecs) {
     } catch (_readErr) {
       pid = '';
     }
-    const age = lockAgeSecs(lock);
-    if (pidAlive(pid) && age < leaseSecs) return false;
+    // A still-running lock owner keeps exclusive ownership past the lease —
+    // long turns (>30m) must never be stolen / double-dispatched.
+    if (pidAlive(pid)) return false;
+    // Lock pid gone but a leftover bizagent-agent child for this slug may
+    // still be running (orphaned wrapper) — do not steal.
+    if (findAgentCliPid(hub, slug)) return false;
+    // Dead/stale lock: reclaim.
     fs.rmSync(lock, { recursive: true, force: true });
     return tryLock(hub, slug, leaseSecs);
   }
@@ -590,6 +631,10 @@ function liveRunCount(hub, leaseSecs) {
   return liveHubCount(hub, leaseSecs) + liveAgentCount(hub, leaseSecs);
 }
 
+/**
+ * True iff a live process exists for this slug — independent of lease age.
+ * False as soon as the process is gone (lights/thinking follow reality).
+ */
 function isAgentActive(hub, slug, leaseSecs) {
   const lock = lockDir(hub, slug);
   if (!fs.existsSync(lock)) return false;
@@ -599,7 +644,9 @@ function isAgentActive(hub, slug, leaseSecs) {
   } catch (_err) {
     pid = '';
   }
-  return pidAlive(pid) && lockAgeSecs(lock) < leaseSecs;
+  if (pidAlive(pid)) return true;
+  // Lock pid gone but a leftover bizagent-agent child may still run.
+  return !!findAgentCliPid(hub, slug);
 }
 
 /**
@@ -641,6 +688,32 @@ function killLockProcessGroup(hub, lock) {
     try { process.kill(n, 'SIGKILL'); killed = true; } catch (_err2) { /* gone */ }
   }
   return killed;
+}
+
+/**
+ * Kill a leftover bizagent-agent CLI process for this slug (whole process
+ * group when possible, else the pid). Used when the lock pid is missing or
+ * protected (CP/daemon) so an orphaned turn is still stopped.
+ * Returns true when a kill signal was sent.
+ */
+function killLeftoverAgentCli(hub, slug) {
+  const pid = findAgentCliPid(hub, slug);
+  if (!pid) return false;
+  const n = Number(pid);
+  if (isProtectedStopPid(hub, n)) return false;
+  // Prefer the process group (wrapper bash + CLI + stderr-tee children).
+  let pgrp = 0;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const close = stat.indexOf(')');
+    const fields = stat.slice(close + 2).trim().split(/\s+/);
+    pgrp = Number(fields[2]) || 0; // field 5 = pgrp
+  } catch (_err) { /* fall back to pid */ }
+  if (pgrp > 0 && pgrp !== n) {
+    try { process.kill(-pgrp, 'SIGKILL'); return true; } catch (_err) { /* fall through */ }
+  }
+  try { process.kill(-n, 'SIGKILL'); return true; } catch (_err) { /* fall through */ }
+  try { process.kill(n, 'SIGKILL'); return true; } catch (_err2) { return false; }
 }
 
 function operatorStopStampPath(hub, slug) {
@@ -750,6 +823,9 @@ async function stopAgentTurn(hub, slug) {
   // Cold spawn (product agents, or hub cold fallback): kill lock process group.
   // Skip if pid is protected (CP / daemon).
   if (killLockProcessGroup(hub, lock)) killed = true;
+  // Lock missing/stolen or pid protected (CP/daemon): scan for leftover
+  // bizagent-agent CLI children for this slug and kill their process groups.
+  if (!killed && killLeftoverAgentCli(hub, slug)) killed = true;
 
   // SIGKILL cannot be trapped, so the shell EXIT trap won't clean the lock.
   try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_err) { /* ignore */ }
@@ -897,7 +973,12 @@ function launchAgent(config, slug, model = '', cliName = '') {
     const cid =
       getPendingAgentWorkConversationId(hub, slug) ||
       getActiveConversationId(hub, 24 * 60 * 60 * 1000);
-    if (cid) recordThinking(hub, cid, slug, agentLog, logByteOffset(agentLog));
+    if (cid) {
+      // Visible thinking attachment on the bound conversation (launch-ack).
+      try { postLaunchAck(hub, cid); } catch (_ackErr) { /* best-effort */ }
+      recordThinking(hub, cid, slug, agentLog, logByteOffset(agentLog));
+      try { notifyConversationMutated(hub, cid); } catch (_pushErr) { /* best-effort */ }
+    }
   } catch (_err) {
     /* best-effort */
   }
@@ -1279,12 +1360,12 @@ function dispatchPendingAgents(config) {
   let skippedCap = 0;
   const retrySecs = dispatchRetrySecs(config);
 
-  const hubNew = pendingUndispatchedMail(config.hub, 'hub', retrySecs);
+  const hubNew = pendingUndispatchedMail(config.hub, 'hub', retrySecs, config.lockLeaseSecs);
   if (hubNew.length > 0) {
     if (hubRunning >= hubSlots) {
       skippedCap += 1;
     } else if (tryLock(config.hub, 'hub', config.lockLeaseSecs)) {
-      markMailDispatched(config.hub, 'hub', hubNew, retrySecs);
+      markMailDispatched(config.hub, 'hub', hubNew, retrySecs, config.lockLeaseSecs);
       launchHub(config);
       launched += 1;
       hubRunning += 1;
@@ -1296,7 +1377,7 @@ function dispatchPendingAgents(config) {
   for (const agent of agents) {
     const pending = pendingMail(config.hub, agent.slug);
     if (pending.length === 0) continue;
-    const fresh = pendingUndispatchedMail(config.hub, agent.slug, retrySecs);
+    const fresh = pendingUndispatchedMail(config.hub, agent.slug, retrySecs, config.lockLeaseSecs);
     if (fresh.length === 0) {
       continue;
     }
@@ -1305,7 +1386,7 @@ function dispatchPendingAgents(config) {
       continue;
     }
     if (tryLock(config.hub, agent.slug, config.lockLeaseSecs)) {
-      markMailDispatched(config.hub, agent.slug, fresh, retrySecs);
+      markMailDispatched(config.hub, agent.slug, fresh, retrySecs, config.lockLeaseSecs);
       launchAgent(config, agent.slug, agent.model || config.agentDefaultModel || '', agent.cliName || '');
       launched += 1;
       agentRunning += 1;
@@ -1339,10 +1420,12 @@ module.exports = {
   dispatchRetrySecs,
   drainHubTurnSafety,
   ensureDispatchPrompt,
+  findAgentCliPid,
   getHubConversationId,
   getRecentHubInboxMessage,
   hubDaemonSock,
   isAgentActive,
+  killLeftoverAgentCli,
   launchAgent,
   launchHub,
   launchHubCold,
