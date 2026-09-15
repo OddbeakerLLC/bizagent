@@ -257,6 +257,13 @@ File-based messaging was chosen over a database or git-commit log because it is
 trivially auditable (every message is a file you can open), needs no
 infrastructure, and is easy for both humans and agents to inspect and debug.
 
+`scripts/chat.sh` (backend `scripts/lib/operator-chat.js`) is an SSH/no-VPN
+path into that same messaging system: pick a conversation, talk to the hub,
+and watch replies in the terminal when you can SSH to the hub host but cannot
+reach the web UI. It posts through the identical hub-inbox path and reads the
+same `.bizagent/conversations/` files as the browser console — one inbox, one
+conversation store, not a second messaging system.
+
 ## Journals and sitemaps
 
 A **journal** entry is written only on days a project actually changed — think

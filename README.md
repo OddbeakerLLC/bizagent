@@ -279,6 +279,11 @@ scripts/hub-daemon.sh status
 scripts/hub-daemon.sh ping
 scripts/hub-daemon.sh stop
 
+# SSH operator console (pick a conversation, talk to the hub; no browser/VPN)
+scripts/chat.sh                          # interactive: list, pick, chat
+scripts/chat.sh --list                   # list conversations only
+scripts/chat.sh --conversation ID --send "hello"   # one-shot send
+
 # Safe preview then apply archive pruning (default 15 days)
 scripts/prune-archives.sh --dry-run
 scripts/prune-archives.sh
@@ -405,6 +410,8 @@ bizagent/
 │   └── bizagent-control-plane.service  systemd unit template
 ├── scripts/
 │   ├── bizagent-control-plane.js  Node control-plane CLI + write-message
+│   ├── chat.sh                SSH operator console (interactive + one-shot)
+│   ├── lib/operator-chat.js   chat.sh backend (conversation/inbox path)
 │   ├── control-plane.sh       start/stop/status/restart wrapper
 │   ├── hub-daemon.js          warm hub turn worker (socket protocol)
 │   ├── hub-daemon.sh          daemon start/stop/status/ping
