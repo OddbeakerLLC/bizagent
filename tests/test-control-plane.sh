@@ -1247,8 +1247,8 @@ const {
   reservedReplyBodyPath,
   setOnConversationMutated,
 } = require(`${root}/control-plane/lib/hub-turn-safety`);
-const { getHubConversationId, launchHub } = require(`${root}/control-plane/lib/dispatcher`);
-const { buildHubTurnPrompt, deriveHubRuntimePrompt, recoverPendingConversationIds } = require(`${root}/control-plane/lib/hub-memory`);
+const { getHubConversationId, launchHub, launchHubCold, dispatchPendingAgents } = require(`${root}/control-plane/lib/dispatcher`);
+const { buildHubTurnPrompt, deriveHubRuntimePrompt, recoverPendingConversationIds, pickPendingConversationId } = require(`${root}/control-plane/lib/hub-memory`);
 const { routeOutboxes, writeOutboxMessage } = require(`${root}/control-plane/lib/mail`);
 
 fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
@@ -1954,6 +1954,132 @@ if (!/^conversation_id:\s*2026-09-16-keep-abcdef\s*$/m.test(fs.readFileSync(keep
   process.exit(50);
 }
 fs.unlinkSync(keepPending);
+for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
+  if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
+}
+
+// Newest operator console mail wins over older agent reports (reserved-body bind).
+fs.writeFileSync(path.join(hub, 'inbox', '2026-09-15-home-control-old-report.md'), `---
+from: home-control
+to: hub
+date: 2026-09-15
+subject: old report
+conversation_id: 2026-09-14-home-control-ae9d71
+---
+
+old
+`);
+fs.writeFileSync(path.join(hub, 'inbox', '2026-09-16-operator-console-message-20260916020659323-65ce0f.md'), `---
+from: operator
+to: hub
+date: 2026-09-16
+subject: console message
+conversation_id: 2026-08-13-marketing-c3f516
+---
+
+Hello?
+`);
+if (pickPendingConversationId(hub) !== '2026-08-13-marketing-c3f516') {
+  console.error('operator console mail should win over older agent cid', pickPendingConversationId(hub));
+  process.exit(51);
+}
+if (getHubConversationId(hub) !== '2026-08-13-marketing-c3f516') {
+  console.error('getHubConversationId should prefer operator console mail');
+  process.exit(52);
+}
+const opTurn = buildHubTurnPrompt(hub, { conversationId: '2026-08-13-marketing-c3f516' });
+const opTurnText = fs.readFileSync(opTurn, 'utf8');
+const opReserved = reservedReplyBodyPath(hub, '2026-08-13-marketing-c3f516');
+if (!opTurnText.includes(opReserved)) {
+  console.error('turn prompt reserved body bound to wrong conversation', opTurnText.slice(0, 600));
+  process.exit(53);
+}
+const fifoTurn = buildHubTurnPrompt(hub);
+const fifoTurnText = fs.readFileSync(fifoTurn, 'utf8');
+if (!fifoTurnText.includes(opReserved)) {
+  console.error('buildHubTurnPrompt without opts should still pick operator cid', fifoTurnText.slice(0, 600));
+  process.exit(54);
+}
+for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
+  if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
+}
+
+// launchHubCold: prompt throw releases hub lock and logs hub_turn_prompt_error
+const promptErrLock = path.join(hub, '.bizagent', 'hub.lock');
+fs.mkdirSync(promptErrLock, { recursive: true });
+fs.writeFileSync(path.join(promptErrLock, 'pid'), String(process.pid));
+launchHubCold({ hub }, {
+  conversationId: '',
+  startedAt: new Date().toISOString(),
+  logOffset: 0,
+  stderrOffset: 0,
+  agentLog: path.join(hub, 'logs', 'dispatch-hub.log'),
+  agentStderr: path.join(hub, 'logs', 'dispatch-hub.stderr'),
+  runtimeCwd: hub,
+  lock: promptErrLock,
+  hubModel: '',
+  hubCliName: '',
+  cliJson: {},
+});
+if (fs.existsSync(promptErrLock)) {
+  console.error('hub_turn_prompt_error should release hub lock');
+  process.exit(55);
+}
+const structuredAfterPrompt = fs.existsSync(path.join(hub, 'logs', 'structured.log'))
+  ? fs.readFileSync(path.join(hub, 'logs', 'structured.log'), 'utf8')
+  : '';
+if (!/"event":"hub_turn_prompt_error"/.test(structuredAfterPrompt)) {
+  console.error('expected hub_turn_prompt_error log', structuredAfterPrompt.slice(-400));
+  process.exit(56);
+}
+
+// dispatchPendingAgents: launchHub throw releases hub lock and logs hub_launch_error
+const hubMemoryPath = require.resolve(`${root}/control-plane/lib/hub-memory`);
+const dispatcherPath = require.resolve(`${root}/control-plane/lib/dispatcher`);
+const hubMemoryMod = require(hubMemoryPath);
+const origEnsureHubRuntimePrompt = hubMemoryMod.ensureHubRuntimePrompt;
+hubMemoryMod.ensureHubRuntimePrompt = () => { throw new Error('forced hub launch fail'); };
+delete require.cache[dispatcherPath];
+const { dispatchPendingAgents: dispatchWithForcedLaunchFail } = require(dispatcherPath);
+fs.writeFileSync(path.join(hub, 'inbox', '2026-09-16-operator-console-message-launch-fail.md'), `---
+from: operator
+to: hub
+date: 2026-09-16
+subject: launch fail
+conversation_id: 2026-08-13-marketing-c3f516
+---
+
+ping
+`);
+const launchErrLock = path.join(hub, '.bizagent', 'hub.lock');
+let launchDispatchErr = null;
+try {
+  dispatchWithForcedLaunchFail({
+    hub,
+    registry: { products: [] },
+    hubSlots: 1,
+    agentSlots: 1,
+    lockLeaseSecs: 60,
+  });
+} catch (err) {
+  launchDispatchErr = err;
+} finally {
+  hubMemoryMod.ensureHubRuntimePrompt = origEnsureHubRuntimePrompt;
+  delete require.cache[dispatcherPath];
+}
+if (launchDispatchErr) {
+  console.error('dispatchPendingAgents should catch launchHub errors', launchDispatchErr);
+  process.exit(57);
+}
+if (fs.existsSync(launchErrLock)) {
+  console.error('hub_launch_error should release hub lock');
+  process.exit(58);
+}
+const structuredAfterLaunch = fs.readFileSync(path.join(hub, 'logs', 'structured.log'), 'utf8');
+if (!/"event":"hub_launch_error"/.test(structuredAfterLaunch)) {
+  console.error('expected hub_launch_error log', structuredAfterLaunch.slice(-400));
+  process.exit(59);
+}
 for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
   if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
 }

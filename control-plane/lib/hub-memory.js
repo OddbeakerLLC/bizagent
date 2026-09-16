@@ -467,6 +467,37 @@ function recoverPendingConversationIds(hub) {
   return first;
 }
 
+function isConsoleOperatorMail(file, body) {
+  const from = parseFrom(body).toLowerCase();
+  if (from === 'operator' || from === 'user') return true;
+  return /operator-console-message/.test(path.basename(file || ''));
+}
+
+/**
+ * Conversation id for this hub turn.
+ * Newest operator/user console mail wins (the chat the operator is waiting in);
+ * else oldest pending mail with a conversation_id (FIFO agent reports).
+ */
+function pickPendingConversationId(hub) {
+  recoverPendingConversationIds(hub);
+  const pending = listPendingInboxFiles(hub);
+  let oldest = '';
+  let newestOperator = '';
+  for (const file of pending) {
+    let body = '';
+    try {
+      body = fs.readFileSync(file, 'utf8');
+    } catch (_err) {
+      continue;
+    }
+    const cid = parseConversationId(body);
+    if (!cid) continue;
+    if (!oldest) oldest = cid;
+    if (isConsoleOperatorMail(file, body)) newestOperator = cid;
+  }
+  return newestOperator || oldest || '';
+}
+
 /**
  * Build an ephemeral turn prompt: slim system + pending mail + session pointer/excerpt.
  * Written under .bizagent/prompts/turns/; caller deletes after CLI exit.
@@ -525,12 +556,11 @@ function buildHubTurnPrompt(hub, opts) {
     ].join('\n');
   });
 
-  // FIFO: first pending inbox message with a conversation_id wins (matches dispatch).
-  let convId = conversationIds.length
-    ? conversationIds[0]
-    : '';
-  if (!convId && opts && opts.conversationId) {
-    convId = String(opts.conversationId).trim();
+  // Prefer the id the dispatcher/daemon already chose (operator console mail).
+  // Fall back to newest operator mail, then oldest pending cid.
+  let convId = opts && opts.conversationId ? String(opts.conversationId).trim() : '';
+  if (!convId) {
+    convId = pickPendingConversationId(hub) || (conversationIds.length ? conversationIds[0] : '');
   }
 
   // ALWAYS-WARM: conversation_id is guaranteed by dispatcher.getHubConversationId()
@@ -938,6 +968,7 @@ module.exports = {
   hubTurnsDir,
   listAgentPendingInboxFiles,
   listPendingInboxFiles,
+  pickPendingConversationId,
   recoverPendingConversationIds,
   resetHubSession,
   visionTurnBlock,
