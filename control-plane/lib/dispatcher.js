@@ -9,6 +9,7 @@ const {
   buildHubTurnPrompt,
   ensureHubRuntimeCwd,
   ensureHubRuntimePrompt,
+  recoverPendingConversationIds,
 } = require('./hub-memory');
 const { pendingMail } = require('./mail');
 const { logEvent, logLatency, logError, appendLog } = require('./log');
@@ -165,6 +166,14 @@ function getHubConversationId(hub) {
       const match = content.match(/^conversation_id:\s*(.+?)$/m);
       if (match) return match[1].trim();
     }
+  } catch (_err) {
+    /* ignore */
+  }
+
+  // Recover: stamp an archived conversation_id onto pending mail (same sender).
+  try {
+    const recovered = recoverPendingConversationIds(hub);
+    if (recovered) return recovered;
   } catch (_err) {
     /* ignore */
   }
@@ -1036,7 +1045,7 @@ function launchHub(config) {
     logEvent(hub, { event: 'dispatch_dry_run', slug: 'hub', type: 'hub' });
     // No CLI → no safety-net pending (would false-fail with empty log).
     // Still build turn prompt so reserved path + delivery instructions are exercised.
-    try { buildHubTurnPrompt(hub); } catch (_err) { /* optional in dry-run */ }
+    try { buildHubTurnPrompt(hub, { conversationId }); } catch (_err) { /* optional in dry-run */ }
     return;
   }
 
@@ -1166,7 +1175,7 @@ function launchHubCold(config, ctx) {
   const { hub } = config;
 
   // Build turn prompt first (creates reserved body file when conversation_id present).
-  const promptFile = buildHubTurnPrompt(hub);
+  const promptFile = buildHubTurnPrompt(hub, { conversationId });
   const replyBodyFile = conversationId
     ? (reservedReplyBodyPath(hub, conversationId) || prepareReservedReplyBody(hub, conversationId))
     : '';
