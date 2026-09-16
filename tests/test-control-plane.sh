@@ -1247,8 +1247,8 @@ const {
   reservedReplyBodyPath,
   setOnConversationMutated,
 } = require(`${root}/control-plane/lib/hub-turn-safety`);
-const { launchHub } = require(`${root}/control-plane/lib/dispatcher`);
-const { buildHubTurnPrompt, deriveHubRuntimePrompt } = require(`${root}/control-plane/lib/hub-memory`);
+const { getHubConversationId, launchHub } = require(`${root}/control-plane/lib/dispatcher`);
+const { buildHubTurnPrompt, deriveHubRuntimePrompt, recoverPendingConversationIds } = require(`${root}/control-plane/lib/hub-memory`);
 const { routeOutboxes, writeOutboxMessage } = require(`${root}/control-plane/lib/mail`);
 
 fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
@@ -1866,6 +1866,96 @@ if (!turnBody.includes(expectedPath)) {
 if (!fs.existsSync(expectedPath)) {
   console.error('reserved body not created by buildHubTurnPrompt');
   process.exit(41);
+}
+
+// --- recover conversation_id from archive by sender (from: / filename) ---
+for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
+  if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
+}
+fs.mkdirSync(path.join(hub, 'inbox', 'archive'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 2, lock_lease_secs: 60 } },
+  products: [{ slug: 'home-control', name: 'Home Control', agent_name: 'Agent HC', projects: [] }],
+}));
+fs.writeFileSync(path.join(hub, 'inbox', 'archive', '2026-09-14-home-control-prior-report.md'), `---
+from: home-control
+to: hub
+date: 2026-09-14
+subject: prior report
+conversation_id: 2026-09-14-home-control-ae9d71
+---
+
+old
+`);
+fs.writeFileSync(path.join(hub, 'inbox', 'archive', '2026-09-10-bizagent-other.md'), `---
+from: bizagent
+to: hub
+date: 2026-09-10
+subject: other
+conversation_id: 2026-08-14-bizagent-78cf12
+---
+
+other
+`);
+const recoveredPending = path.join(hub, 'inbox', '2026-09-16-home-control-fresh-report.md');
+fs.writeFileSync(recoveredPending, `---
+from: home-control
+to: hub
+date: 2026-09-16
+subject: fresh report
+---
+
+new work
+`);
+const recoveredTurn = buildHubTurnPrompt(hub);
+const recoveredBody = fs.readFileSync(recoveredPending, 'utf8');
+if (!/^conversation_id:\s*2026-09-14-home-control-ae9d71\s*$/m.test(recoveredBody)) {
+  console.error('pending mail not stamped from same-sender archive', recoveredBody.slice(0, 400));
+  process.exit(46);
+}
+const recoveredTurnText = fs.readFileSync(recoveredTurn, 'utf8');
+if (!recoveredTurnText.includes('2026-09-14-home-control-ae9d71')) {
+  console.error('turn prompt missing recovered conversation_id');
+  process.exit(47);
+}
+fs.unlinkSync(recoveredPending);
+const filenameOnlyPending = path.join(hub, 'inbox', '2026-09-16-home-control-filename-only.md');
+fs.writeFileSync(filenameOnlyPending, `---
+to: hub
+date: 2026-09-16
+subject: filename only
+---
+
+no from header
+`);
+if (getHubConversationId(hub) !== '2026-09-14-home-control-ae9d71') {
+  console.error('getHubConversationId did not recover from filename sender');
+  process.exit(48);
+}
+if (!/^conversation_id:\s*2026-09-14-home-control-ae9d71\s*$/m.test(fs.readFileSync(filenameOnlyPending, 'utf8'))) {
+  console.error('filename-only pending mail not stamped from archive');
+  process.exit(49);
+}
+fs.unlinkSync(filenameOnlyPending);
+const keepPending = path.join(hub, 'inbox', '2026-09-16-home-control-keep.md');
+fs.writeFileSync(keepPending, `---
+from: home-control
+to: hub
+date: 2026-09-16
+subject: keep
+conversation_id: 2026-09-16-keep-abcdef
+---
+
+keep me
+`);
+recoverPendingConversationIds(hub);
+if (!/^conversation_id:\s*2026-09-16-keep-abcdef\s*$/m.test(fs.readFileSync(keepPending, 'utf8'))) {
+  console.error('recovery overwrote existing conversation_id');
+  process.exit(50);
+}
+fs.unlinkSync(keepPending);
+for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
+  if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
 }
 
 // --- push path: safety net mutations notify main-process hook + return pushable ids ---

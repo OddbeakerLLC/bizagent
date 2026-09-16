@@ -338,11 +338,140 @@ function parseTo(text) {
   return match ? match[1].trim() : '';
 }
 
+function listArchiveInboxFiles(hub) {
+  const archiveDir = path.join(hub, 'inbox', 'archive');
+  try {
+    return fs.readdirSync(archiveDir)
+      .filter((f) => f.endsWith('.md') && !f.startsWith('.'))
+      .sort()
+      .reverse()
+      .map((f) => path.join(archiveDir, f));
+  } catch (_err) {
+    return [];
+  }
+}
+
+function filenameAfterDate(name) {
+  return String(name || '').replace(/^\d{4}-\d{2}-\d{2}-/, '').replace(/\.md$/i, '');
+}
+
+function filenameMatchesSender(name, sender) {
+  if (!sender) return false;
+  const rest = filenameAfterDate(name);
+  return rest === sender || rest.startsWith(`${sender}-`);
+}
+
+function knownSenders(hub) {
+  const slugs = new Set(['hub', 'operator', 'user']);
+  try {
+    const raw = fs.readFileSync(path.join(hub, 'registry.json'), 'utf8');
+    const products = JSON.parse(raw).products || [];
+    for (const product of products) {
+      if (product && product.slug) slugs.add(String(product.slug));
+    }
+  } catch (_err) {
+    /* ignore */
+  }
+  return [...slugs].sort((a, b) => b.length - a.length);
+}
+
+function inferSenderFromFilename(hub, name) {
+  const rest = filenameAfterDate(name);
+  for (const slug of knownSenders(hub)) {
+    if (rest === slug || rest.startsWith(`${slug}-`)) return slug;
+  }
+  return rest.split('-')[0] || '';
+}
+
+/**
+ * Newest archived conversation_id for this sender (`from:` or filename slug).
+ * Falls back to the newest archived conversation_id of any sender.
+ */
+function lookupArchivedConversationId(hub, sender) {
+  const senderNorm = String(sender || '').trim().toLowerCase();
+  let anyCid = '';
+  for (const file of listArchiveInboxFiles(hub)) {
+    let body = '';
+    try {
+      body = fs.readFileSync(file, 'utf8');
+    } catch (_err) {
+      continue;
+    }
+    const cid = parseConversationId(body);
+    if (!cid) continue;
+    if (!anyCid) anyCid = cid;
+    const from = parseFrom(body).toLowerCase();
+    const name = path.basename(file);
+    if (senderNorm && (from === senderNorm || filenameMatchesSender(name, senderNorm))) {
+      return cid;
+    }
+  }
+  return anyCid;
+}
+
+function stampConversationId(file, cid) {
+  if (!file || !cid) return false;
+  let body;
+  try {
+    body = fs.readFileSync(file, 'utf8');
+  } catch (_err) {
+    return false;
+  }
+  if (parseConversationId(body)) return false;
+  let next;
+  if (/^conversation_id:\s*$/m.test(body)) {
+    next = body.replace(/^conversation_id:\s*$/m, `conversation_id: ${cid}`);
+  } else {
+    const match = body.match(/^(---[ \t]*\r?\n)([\s\S]*?)(\r?\n---[ \t]*)/);
+    if (match) {
+      const frontmatter = match[2].replace(/\s+$/, '');
+      next = `${match[1]}${frontmatter}\nconversation_id: ${cid}${match[3]}${body.slice(match[0].length)}`;
+    } else {
+      next = `---\nconversation_id: ${cid}\n---\n\n${body}`;
+    }
+  }
+  if (next === body) return false;
+  fs.writeFileSync(file, next);
+  return true;
+}
+
+/**
+ * Stamp missing conversation_id on pending hub inbox mail from archived
+ * mail by the same sender (filename slug or from:). Returns the FIFO id.
+ */
+function recoverPendingConversationIds(hub) {
+  let first = '';
+  for (const file of listPendingInboxFiles(hub)) {
+    let body = '';
+    try {
+      body = fs.readFileSync(file, 'utf8');
+    } catch (_err) {
+      continue;
+    }
+    let cid = parseConversationId(body);
+    if (!cid) {
+      const sender = parseFrom(body) || inferSenderFromFilename(hub, path.basename(file));
+      cid = lookupArchivedConversationId(hub, sender);
+      if (cid && stampConversationId(file, cid)) {
+        logEvent(hub, {
+          event: 'conversation_id_recovered',
+          from: sender,
+          conversation_id: cid,
+          file: path.basename(file),
+          source: 'inbox-archive',
+        });
+      }
+    }
+    if (cid && !first) first = cid;
+  }
+  return first;
+}
+
 /**
  * Build an ephemeral turn prompt: slim system + pending mail + session pointer/excerpt.
  * Written under .bizagent/prompts/turns/; caller deletes after CLI exit.
  */
-function buildHubTurnPrompt(hub) {
+function buildHubTurnPrompt(hub, opts) {
   const start = Date.now();
   ensureHubRuntimePrompt(hub);
   ensureDir(hubTurnsDir(hub));
@@ -372,6 +501,9 @@ function buildHubTurnPrompt(hub) {
   } catch (_err) {
     sessionBody = '_No session file yet._';
   }
+  // Agent→hub mail often has no conversation_id. Steal one from archive
+  // (same sender via from:/filename) so a cold launch cannot crash the CP.
+  recoverPendingConversationIds(hub);
   const pending = listPendingInboxFiles(hub);
   const conversationIds = [];
   const mailBlocks = pending.map((file) => {
@@ -394,9 +526,12 @@ function buildHubTurnPrompt(hub) {
   });
 
   // FIFO: first pending inbox message with a conversation_id wins (matches dispatch).
-  const convId = conversationIds.length
+  let convId = conversationIds.length
     ? conversationIds[0]
     : '';
+  if (!convId && opts && opts.conversationId) {
+    convId = String(opts.conversationId).trim();
+  }
 
   // ALWAYS-WARM: conversation_id is guaranteed by dispatcher.getHubConversationId()
   // If somehow missing, fail fast rather than cold-launch
@@ -803,6 +938,7 @@ module.exports = {
   hubTurnsDir,
   listAgentPendingInboxFiles,
   listPendingInboxFiles,
+  recoverPendingConversationIds,
   resetHubSession,
   visionTurnBlock,
 };
