@@ -9,7 +9,7 @@ const {
   buildHubTurnPrompt,
   ensureHubRuntimeCwd,
   ensureHubRuntimePrompt,
-  recoverPendingConversationIds,
+  pickPendingConversationId,
 } = require('./hub-memory');
 const { pendingMail } = require('./mail');
 const { logEvent, logLatency, logError, appendLog } = require('./log');
@@ -151,29 +151,13 @@ function nowIso() {
 /**
  * Get conversation_id for hub dispatch.
  * ALWAYS returns a valid conversation_id — never null.
- * Prefer the oldest pending inbox message with an explicit id (FIFO),
- * not the newest file — avoids mis-binding when multiple messages queue.
+ * Newest operator/user console mail wins (the chat they are waiting in);
+ * else oldest pending mail with a conversation_id (FIFO agent reports).
  */
 function getHubConversationId(hub) {
-  // First: oldest pending hub inbox mail with explicit conversation_id (FIFO)
-  const inboxDir = path.join(hub, 'inbox');
   try {
-    const files = fs.readdirSync(inboxDir)
-      .filter(f => f.endsWith('.md') && !f.startsWith('.'))
-      .sort(); // ascending = oldest first
-    for (const name of files) {
-      const content = fs.readFileSync(path.join(inboxDir, name), 'utf8');
-      const match = content.match(/^conversation_id:\s*(.+?)$/m);
-      if (match) return match[1].trim();
-    }
-  } catch (_err) {
-    /* ignore */
-  }
-
-  // Recover: stamp an archived conversation_id onto pending mail (same sender).
-  try {
-    const recovered = recoverPendingConversationIds(hub);
-    if (recovered) return recovered;
+    const picked = pickPendingConversationId(hub);
+    if (picked) return picked;
   } catch (_err) {
     /* ignore */
   }
@@ -1175,7 +1159,19 @@ function launchHubCold(config, ctx) {
   const { hub } = config;
 
   // Build turn prompt first (creates reserved body file when conversation_id present).
-  const promptFile = buildHubTurnPrompt(hub, { conversationId });
+  let promptFile;
+  try {
+    promptFile = buildHubTurnPrompt(hub, { conversationId });
+  } catch (err) {
+    try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_e) { /* ignore */ }
+    logEvent(hub, {
+      event: 'hub_turn_prompt_error',
+      message: err.message,
+      conversation_id: conversationId || '',
+      status: 'error',
+    });
+    return;
+  }
   const replyBodyFile = conversationId
     ? (reservedReplyBodyPath(hub, conversationId) || prepareReservedReplyBody(hub, conversationId))
     : '';
@@ -1375,9 +1371,18 @@ function dispatchPendingAgents(config) {
       skippedCap += 1;
     } else if (tryLock(config.hub, 'hub', config.lockLeaseSecs)) {
       markMailDispatched(config.hub, 'hub', hubNew, retrySecs, config.lockLeaseSecs);
-      launchHub(config);
-      launched += 1;
-      hubRunning += 1;
+      try {
+        launchHub(config);
+        launched += 1;
+        hubRunning += 1;
+      } catch (err) {
+        try { fs.rmSync(lockDir(config.hub, 'hub'), { recursive: true, force: true }); } catch (_e) { /* ignore */ }
+        logEvent(config.hub, {
+          event: 'hub_launch_error',
+          message: err.message,
+          status: 'error',
+        });
+      }
     } else {
       skippedLocked += 1;
     }
