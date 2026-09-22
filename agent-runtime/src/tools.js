@@ -193,7 +193,53 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'hire_helper',
+      description:
+        'Hire a cheap in-turn helper for bounded read-only work (research, search, summarize, test-extract). Returns text; you review and act. Helpers cannot write, mail, or hire. If the pool is full or hire fails, do the work yourself.',
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: {
+            type: 'string',
+            description: 'research | search | summarize | test-extract',
+          },
+          justification: {
+            type: 'string',
+            description: 'One sentence why this hire is cheaper than doing it yourself.',
+          },
+          prompt: {
+            type: 'string',
+            description: 'Exact task for the helper (paths, URLs, done-when detail).',
+          },
+          done_when: {
+            type: 'string',
+            description: 'How the helper knows it is finished.',
+          },
+        },
+        required: ['kind', 'justification', 'prompt', 'done_when'],
+      },
+    },
+  },
 ];
+
+const HELPER_READONLY = [
+  'list_directory',
+  'glob_files',
+  'grep_search',
+  'read_file',
+  'fetch_url',
+];
+
+const HELPER_TOOLS = TOOLS.filter((t) => HELPER_READONLY.includes(t.function.name));
+
+function helperToolsForKind(kind) {
+  const names = new Set(HELPER_READONLY);
+  if (String(kind || '').trim() === 'test-extract') names.add('execute_shell_command');
+  return TOOLS.filter((t) => names.has(t.function.name));
+}
 
 const DESTRUCTIVE_TOOLS = new Set([
   'write_file',
@@ -497,6 +543,18 @@ async function executeToolCall(toolCall) {
       ? JSON.parse(toolCall.function.arguments || '{}')
       : toolCall.function.arguments || {};
 
+  const { isHelperProcess } = require('./helpers');
+  if (isHelperProcess()) {
+    const kind = String(process.env.BIZAGENT_HELPER_KIND || '').trim();
+    const allowed = helperToolsForKind(kind).map((t) => t.function.name);
+    if (!allowed.includes(toolCall.function.name)) {
+      return {
+        success: false,
+        error: `Helpers cannot use ${toolCall.function.name}. Read-only (plus shell only for test-extract).`,
+      };
+    }
+  }
+
   let result;
   switch (toolCall.function.name) {
     case 'list_directory':
@@ -531,6 +589,11 @@ async function executeToolCall(toolCall) {
     case 'fetch_url':
       result = await fetchUrlTool(args.url);
       break;
+    case 'hire_helper': {
+      const { hireHelper } = require('./helpers');
+      result = await hireHelper(args);
+      break;
+    }
     default:
       throw new Error(`Unknown tool: ${toolCall.function.name}`);
   }
@@ -539,8 +602,10 @@ async function executeToolCall(toolCall) {
 
 module.exports = {
   TOOLS,
+  HELPER_TOOLS,
   DESTRUCTIVE_TOOLS,
   executeToolCall,
+  helperToolsForKind,
   // exported for tests
   searchReplaceTool,
   readFileTool,

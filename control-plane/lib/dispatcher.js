@@ -950,8 +950,9 @@ function launchAgent(config, slug, model = '', cliName = '') {
   const child = spawn('bash', ['-c', script, '_', hub, slug, cliSettings.cli, cliSettings.promptFlag, cliSettings.extraArgs, promptFile, agentLog, agentStderr], {
     detached: true,
     stdio: 'ignore',
-    // BIZAGENT_HUB so agent-runtime can load settings.mcp from registry.json
-    env: { ...process.env, BIZAGENT_HUB: hub },
+    // BIZAGENT_HUB / BIZAGENT_AGENT_SLUG so hire_helper can attribute pool slots
+    // (and agent-runtime can load settings.mcp from registry.json).
+    env: { ...process.env, BIZAGENT_HUB: hub, BIZAGENT_AGENT_SLUG: slug },
   });
 
   child.on('exit', (code) => {
@@ -1292,8 +1293,9 @@ function launchHubCold(config, ctx) {
   ], {
     detached: true,
     stdio: 'ignore',
-    // BIZAGENT_HUB so agent-runtime can load settings.mcp from registry.json
-    env: { ...process.env, BIZAGENT_HUB: hub },
+    // BIZAGENT_HUB / BIZAGENT_AGENT_SLUG so hire_helper can attribute pool slots
+    // (and agent-runtime can load settings.mcp from registry.json).
+    env: { ...process.env, BIZAGENT_HUB: hub, BIZAGENT_AGENT_SLUG: 'hub' },
   });
 
   child.on('exit', (code) => {

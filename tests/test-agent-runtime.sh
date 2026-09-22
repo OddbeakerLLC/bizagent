@@ -15,6 +15,14 @@ fi
 
 (cd "$ROOT/agent-runtime" && npm test) || fail "agent-runtime unit tests failed"
 
+# Standby helper pool
+[ -f "$ROOT/agent-runtime/src/helpers.js" ] || fail "helpers.js missing"
+[ -f "$ROOT/agent-runtime/test/helpers.test.js" ] || fail "helpers.test.js missing"
+grep -q 'hire_helper' "$ROOT/agent-runtime/src/tools.js" || fail "tools.js missing hire_helper"
+grep -q '"helpers"' "$ROOT/registry.example.json" || fail "registry.example.json missing helpers"
+grep -q 'Standby helper pool' "$ROOT/docs/ARCHITECTURE.md" || fail "ARCHITECTURE missing helper pool note"
+grep -q 'hire_helper' "$ROOT/templates/dispatch.md.template" || fail "dispatch template missing hire_helper"
+
 # MCP client module present
 [ -f "$ROOT/agent-runtime/src/mcp-client.js" ] || fail "mcp-client.js missing"
 [ -f "$ROOT/agent-runtime/test/mcp-client.test.js" ] || fail "mcp-client.test.js missing"
