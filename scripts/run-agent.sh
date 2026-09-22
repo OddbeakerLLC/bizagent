@@ -111,7 +111,7 @@ esac
 
 ts_out "run-agent: launch cli=$CLI flag=$PFLAG extra=$EXTRA"
 
-# Hub root for agent-runtime MCP config (registry.json settings.mcp).
+# Hub root for agent-runtime MCP config and hire_helper (registry.json).
 export BIZAGENT_HUB="${BIZAGENT_HUB:-$HUB}"
 
 # Timestamp every stdout/stderr line so nightly.log / weekly.log are navigable.

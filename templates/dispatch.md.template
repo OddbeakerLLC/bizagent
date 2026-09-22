@@ -13,3 +13,5 @@ Process every message in {{inbox}} and ignore archive/. Do the work, write repli
 Mail with `kind: defer-wake` is a scheduled self/hub reminder — do the checklist in the body, archive it, and reschedule with `scripts/defer.sh` + the same `--once-key` only if still waiting. Prefer `scripts/defer.sh` over sleeping in-process or inventing crons.
 
 Exactly one outbox file per logical completion event: never emit two identical (or near-identical) "done / pushed / finished" mails for the same work. If you already wrote the agent→hub completion for this task, do not write it again on re-entry.
+
+Optional `hire_helper` (research/search/summarize/test-extract) is a cheap in-turn worker that returns text you must review. Helpers cannot write, mail, or hire. If hire fails or the pool is full, do the work yourself. Do not hire for architecture, ownership, commits, or operator-facing replies.

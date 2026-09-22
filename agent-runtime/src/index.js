@@ -19,9 +19,10 @@ const path = require('path');
 const readline = require('readline');
 const { createClient, chatCompletion, sanitizeMessages } = require('./client');
 const { resolveProvider, listProviders } = require('./providers');
-const { TOOLS, DESTRUCTIVE_TOOLS, executeToolCall } = require('./tools');
+const { TOOLS, DESTRUCTIVE_TOOLS, executeToolCall, helperToolsForKind } = require('./tools');
 const { buildSystemPrompt } = require('./system-prompt');
 const { startMcpFromHub, stopMcp, getMcpSession } = require('./mcp-client');
+const { isHelperProcess } = require('./helpers');
 const { buildUserContent, loadVisionBlocks, looksImageRelated, parseVisionPaths } = require('./vision');
 
 // Provider-specific reasoning field names (verified for Venice, Grok; others from provider docs)
@@ -74,6 +75,7 @@ program
   )
   .option('--base-url <url>', 'OpenAI-compatible base URL override')
   .option('-y, --yes', 'Auto-confirm destructive tool actions')
+  .option('--helper', 'Read-only in-turn helper (no writes, mail, or nested hire)')
   .option('--list-providers', 'Print built-in providers and exit')
   .option('--list-tools', 'Print tool names and exit')
   .parse();
@@ -139,6 +141,8 @@ function toolProgressLine(name, args) {
       return `→ shell ${String(a.command || '').slice(0, 100)}`.trim();
     case 'fetch_url':
       return `→ fetch_url ${String(a.url || '').slice(0, 80)}`.trim();
+    case 'hire_helper':
+      return `→ hire_helper ${a.kind || ''}`.trim();
     default:
       if (typeof name === 'string' && name.startsWith('mcp__')) {
         return `→ ${name}`;
@@ -147,7 +151,14 @@ function toolProgressLine(name, args) {
   }
 }
 
+function helperMode() {
+  return !!(opts.helper || isHelperProcess());
+}
+
 function activeTools() {
+  if (helperMode()) {
+    return helperToolsForKind(process.env.BIZAGENT_HELPER_KIND);
+  }
   const session = getMcpSession();
   const mcpTools = session ? session.getOpenAiTools() : [];
   return mcpTools.length ? TOOLS.concat(mcpTools) : TOOLS;
@@ -213,7 +224,8 @@ if (require.main === module) {
     }
 
     async function runAgent(userMessage, imageBlocks = []) {
-      const session = getMcpSession();
+      const helper = helperMode();
+      const session = helper ? null : getMcpSession();
       const mcpNames = session ? session.getOpenAiTools().map((t) => t.function.name) : [];
       const messages = [
         {
@@ -221,6 +233,7 @@ if (require.main === module) {
           content: buildSystemPrompt({
             cwd: process.cwd(),
             mcpToolNames: mcpNames,
+            helper,
           }),
         },
         { role: 'user', content: buildUserContent(userMessage, imageBlocks) },
@@ -277,6 +290,15 @@ if (require.main === module) {
         }
 
         if (!msg.tool_calls || msg.tool_calls.length === 0) {
+          if (helper && process.env.BIZAGENT_HELPER_RESULT && msg.content) {
+            try {
+              require('fs').writeFileSync(
+                process.env.BIZAGENT_HELPER_RESULT,
+                String(msg.content),
+                'utf8',
+              );
+            } catch (_e) { /* ignore */ }
+          }
           break;
         }
 
@@ -305,6 +327,23 @@ if (require.main === module) {
             continue;
           }
           consecutiveParseErrors = 0;
+
+          if (helper) {
+            const helperOk = helperToolsForKind(process.env.BIZAGENT_HELPER_KIND).some(
+              (t) => t.function.name === name,
+            );
+            if (!helperOk) {
+              messages.push({
+                tool_call_id: toolCall.id,
+                role: 'tool',
+                content: JSON.stringify({
+                  success: false,
+                  error: 'Helpers are read-only and cannot write, run shell, send mail, or hire.',
+                }),
+              });
+              continue;
+            }
+          }
 
           if (DESTRUCTIVE_TOOLS.has(name)) {
             const allowed = await confirm(name, args);

@@ -155,6 +155,27 @@ Lease and caps are configurable via env (`BIZAGENT_*`) or
 `settings.dispatch.{poll_seconds,max_concurrency,hub_slots,agent_slots,lock_lease_secs}`
 in `registry.json`.
 
+### Standby helper pool (in-turn workers)
+
+Named product agents stay on smart models. For bounded grunt work they may call
+`hire_helper` inside an already-locked turn. The control plane / runtime
+spawns a short **read-only** `bizagent-agent` on the cheap helper model and
+returns one string; the parent reviews and is the only writer.
+
+- **Not products.** Helpers have no slug, inbox, sitemap, or rail entry.
+- **Config:** `registry.json` → `settings.helpers`
+  - `enabled` (bool; example default **false**)
+  - `pool_size` — floor on live helpers (default **10**)
+  - live cap is **`max(pool_size, product count)`** so the pool never undershoots the product set
+  - `provider` / `model` — same `cli.json` keys as agents (default Venice `qwen3-5-9b`)
+  - `max_concurrent_per_agent`, `max_wall_secs` (kill), `max_depth` (always 1), `allow` kinds
+- **Kinds:** `research`, `search`, `summarize`, `test-extract`. Unknown kind = refuse.
+- **Read-only:** list/glob/grep/read/fetch only. Shell only for `test-extract`. No write, mail, or nested hire.
+- **Runtime:** parent tool `hire_helper` → spawn `bizagent-agent --helper` → one text result in the same turn.
+- **Slots:** `.bizagent/helper-slots/` (hub-wide). Over-cap hire returns an error; parent does the work itself.
+- Dispatch sets `BIZAGENT_HUB` and `BIZAGENT_AGENT_SLUG` so the parent is attributed on the slot.
+- Design: `docs/2026-09-22-standby-helper-pool.md`.
+
 LLM selection is **registry + `cli.json`** (single runtime):
 
 - **Runtime:** always `bizagent-agent` (`agent-runtime/`, launcher

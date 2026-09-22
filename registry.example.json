@@ -58,6 +58,17 @@
       "_comment": "Default model for product agent launches. Per-product model field overrides this. Required when products omit model — empty means launch fails (no silent runtime fallback).",
       "agent_default": "grok-4.5"
     },
+    "helpers": {
+      "_comment": "Optional cheap in-turn workers hired by product/hub agents. Not products, slugs, or mailboxes. Off by default. pool_size is the floor (default 10); live cap is max(pool_size, product count).",
+      "enabled": false,
+      "pool_size": 10,
+      "provider": "venice",
+      "model": "qwen3-5-9b",
+      "max_concurrent_per_agent": 1,
+      "max_wall_secs": 120,
+      "max_depth": 1,
+      "allow": ["research", "search", "summarize", "test-extract"]
+    },
     "tuning": {
       "_comment": "Operational tunables. archive.retention_days default 15.",
       "archive": {
