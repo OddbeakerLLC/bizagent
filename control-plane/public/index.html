@@ -2,15 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>BizAgent</title>
-  <link rel="stylesheet" href="/styles.css?v=20260907-dispatch-lockfix">
+  <link rel="stylesheet" href="/styles.css?v=20260928-drawer-underline">
 </head>
 <body>
   <main class="app-shell">
     <aside class="agent-rail" aria-label="Products">
-      <div class="rail-title">Products</div>
-      <div id="agents"></div>
+      <details class="rail-drawer">
+        <summary class="rail-title">Products</summary>
+        <div id="agents"></div>
+      </details>
     </aside>
     <section class="chat-shell" id="chatShell">
       <header class="topbar">
@@ -20,15 +22,25 @@
           <button id="newConversation" type="button" title="New conversation" aria-label="New conversation">+</button>
           <button id="deleteConversation" type="button" class="btn-secondary" title="Delete conversation" aria-label="Delete conversation">Delete</button>
         </div>
-        <div class="auth-controls">
-          <button id="libraryBtn" type="button" class="btn-secondary" hidden title="Browse plans, specs, and other docs written for you">Library</button>
-          <button id="companyFilesBtn" type="button" class="btn-secondary" hidden title="Upload files to company/ for the Knowledge Stack">Company</button>
-          <button id="ttsToggle" type="button" class="btn-secondary tts-toggle" hidden title="Text-to-speech for hub replies (off)" aria-pressed="false">TTS</button>
-          <button id="editDisplayName" type="button" class="btn-secondary" hidden title="Change your display name">Name</button>
-          <span id="authStatus" class="auth-status">Checking session...</span>
-          <button id="logout" type="button" hidden>Logout</button>
-        </div>
+        <button id="navDrawerToggle" type="button" class="nav-drawer-toggle" aria-controls="navDrawer" aria-expanded="false" aria-label="Open menu" title="Menu">
+          <span class="nav-drawer-toggle-bars" aria-hidden="true"></span>
+        </button>
       </header>
+      <div id="navDrawerBackdrop" class="nav-drawer-backdrop" hidden></div>
+      <aside id="navDrawer" class="nav-drawer" hidden aria-label="Account and tools">
+        <div class="nav-drawer-head">
+          <span class="nav-drawer-title">Menu</span>
+          <button id="navDrawerClose" type="button" class="modal-close" aria-label="Close menu">&times;</button>
+        </div>
+        <div class="auth-controls nav-drawer-controls">
+          <span id="authStatus" class="auth-status">Checking session...</span>
+          <a id="libraryBtn" href="/library.html" class="nav-drawer-link" hidden title="Browse plans, specs, and other docs written for you">Library</a>
+          <a id="companyFilesBtn" href="#company" class="nav-drawer-link" hidden title="Upload files to company/ for the Knowledge Stack">Company</a>
+          <a id="ttsToggle" href="#tts" class="nav-drawer-link tts-toggle" hidden title="Text-to-speech for hub replies (off)" role="switch" aria-checked="false" aria-pressed="false"><span class="nav-drawer-link-label">TTS</span></a>
+          <a id="editDisplayName" href="#name" class="nav-drawer-link" hidden title="Change your display name">Name</a>
+          <a id="logout" href="#logout" class="nav-drawer-link" hidden>Logout</a>
+        </div>
+      </aside>
       <div id="authPanel" class="auth-panel" hidden>
         <p id="setupHint" class="setup-hint" hidden>First run — create a login to get started.</p>
         <input id="username" autocomplete="username" placeholder="Username">
@@ -126,6 +138,6 @@
 
   <script src="/enterprise/enterprise-panel.js" onerror="/* enterprise optional */"></script>
   <script src="/markdown.js?v=20260903-tts-md-fence"></script>
-  <script src="/app.js?v=20260907-dispatch-lockfix"></script>
+  <script src="/app.js?v=20260928-drawer-underline"></script>
 </body>
 </html>

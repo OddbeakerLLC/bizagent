@@ -53,6 +53,45 @@ function conversationPollStamp(conv) {
   return `${conv && conv.updated_at ? conv.updated_at : ''}\0${messages.length}\0${lastPart}`;
 }
 
+function setNavDrawerOpen(open) {
+  const drawer = document.getElementById('navDrawer');
+  const backdrop = document.getElementById('navDrawerBackdrop');
+  const toggle = document.getElementById('navDrawerToggle');
+  if (!drawer || !backdrop || !toggle) return;
+  const next = !!open;
+  drawer.hidden = !next;
+  backdrop.hidden = !next;
+  toggle.setAttribute('aria-expanded', next ? 'true' : 'false');
+  toggle.setAttribute('aria-label', next ? 'Close menu' : 'Open menu');
+  document.body.classList.toggle('nav-drawer-open', next);
+}
+
+function bindNavDrawer() {
+  const toggle = document.getElementById('navDrawerToggle');
+  const closeBtn = document.getElementById('navDrawerClose');
+  const backdrop = document.getElementById('navDrawerBackdrop');
+  const drawer = document.getElementById('navDrawer');
+  if (!toggle || toggle.dataset.bound === '1') return;
+  toggle.dataset.bound = '1';
+  toggle.addEventListener('click', () => {
+    const drawerEl = document.getElementById('navDrawer');
+    setNavDrawerOpen(!!(drawerEl && drawerEl.hidden));
+  });
+  if (closeBtn) closeBtn.addEventListener('click', () => setNavDrawerOpen(false));
+  if (backdrop) backdrop.addEventListener('click', () => setNavDrawerOpen(false));
+  if (drawer) {
+    drawer.addEventListener('click', (event) => {
+      const target = event.target;
+      if (!target || !target.closest) return;
+      if (target.closest('#ttsToggle')) return;
+      if (target.closest('a.nav-drawer-link, button')) setNavDrawerOpen(false);
+    });
+  }
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') setNavDrawerOpen(false);
+  });
+}
+
 function setAuthStatus(message, kind = 'neutral') {
   const status = document.getElementById('authStatus');
   status.textContent = message;
@@ -893,8 +932,11 @@ function updateTtsToggleUi() {
   const btn = document.getElementById('ttsToggle');
   if (!btn || !btn.classList) return;
   btn.classList.toggle('active', ttsEnabled);
+  const label = btn.querySelector('.nav-drawer-link-label');
+  if (label) label.textContent = ttsEnabled ? 'TTS ✓' : 'TTS';
   if (typeof btn.setAttribute === 'function') {
     btn.setAttribute('aria-pressed', ttsEnabled ? 'true' : 'false');
+    btn.setAttribute('aria-checked', ttsEnabled ? 'true' : 'false');
   }
   if (ttsUnavailableReason) {
     btn.title = ttsUnavailableReason;
@@ -2065,7 +2107,8 @@ function bindTtsToggle() {
   const btn = document.getElementById('ttsToggle');
   if (!btn || btn.dataset.bound === '1') return;
   btn.dataset.bound = '1';
-  btn.addEventListener('click', () => {
+  btn.addEventListener('click', (event) => {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
     // Toggle OFF: stop. Toggle ON: enable + speak confirmation in this gesture.
     setTtsEnabled(!ttsEnabled, { prime: true });
   });
@@ -2501,11 +2544,24 @@ async function setup() {
   }
 }
 
+function syncProductsRail() {
+  const drawer = document.querySelector('.rail-drawer');
+  if (!drawer || typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+  const desktop = window.matchMedia('(min-width: 761px)');
+  const apply = () => {
+    if (desktop.matches) drawer.open = true;
+  };
+  apply();
+  if (typeof desktop.addEventListener === 'function') desktop.addEventListener('change', apply);
+  else if (typeof desktop.addListener === 'function') desktop.addListener(apply);
+}
+
 async function boot() {
   let sessionActive = false;
   try {
     setAuthStatus('Checking session...', 'pending');
     bindAgentConfigModal();
+    syncProductsRail();
     await refreshStatus();
     sessionActive = true;
     const named = await ensureDisplayName();
@@ -2553,7 +2609,10 @@ function bindLibraryPage() {
   const openBtn = document.getElementById('libraryBtn');
   if (openBtn && openBtn.dataset.bound !== '1') {
     openBtn.dataset.bound = '1';
-    openBtn.addEventListener('click', () => openLibraryTab());
+    openBtn.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      openLibraryTab();
+    });
   }
   // Deep-link: #/library still opens the named Library tab once.
   if (typeof window !== 'undefined' && !window.__bizagentLibraryHashBound) {
@@ -2820,7 +2879,10 @@ function bindCompanyModal() {
   if (!modal || modal.dataset.bound === '1') return;
   modal.dataset.bound = '1';
   const openBtn = document.getElementById('companyFilesBtn');
-  if (openBtn) openBtn.addEventListener('click', () => showCompanyModal());
+  if (openBtn) openBtn.addEventListener('click', (event) => {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+    showCompanyModal();
+  });
   const close = () => hideCompanyModal();
   const closeBtn = document.getElementById('companyModalClose');
   const doneBtn = document.getElementById('companyModalDone');
@@ -2845,12 +2907,14 @@ document.getElementById('login').addEventListener('click', () => {
   if (needsSetup) setup();
   else login();
 });
-document.getElementById('logout').addEventListener('click', async () => {
+document.getElementById('logout').addEventListener('click', async (event) => {
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
   await api('/api/logout', { method: 'POST', body: '{}' }).catch(() => {});
   setAuthenticated(false, 'Signed out');
 });
 bindCompanyModal();
 bindLibraryPage();
+bindNavDrawer();
 bindTtsToggle();
 bindComposerAttachments();
 bindComposerPaste();
@@ -2879,7 +2943,10 @@ document.getElementById('deleteConversation').addEventListener('click', async ()
   await loadConversations();
 });
 document.getElementById('conversationSelect').addEventListener('change', (event) => loadConversation(event.target.value));
-document.getElementById('editDisplayName').addEventListener('click', () => showNamePanel(false));
+document.getElementById('editDisplayName').addEventListener('click', (event) => {
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
+  showNamePanel(false);
+});
 document.getElementById('saveDisplayName').addEventListener('click', async () => {
   const ok = await saveDisplayName();
   if (ok && !currentConversation) await loadConversations();

@@ -10,11 +10,15 @@ body {
   display: grid;
   grid-template-columns: 248px 1fr;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 .agent-rail {
   background: #172033;
   color: #f7fafc;
   padding: 16px;
+}
+.rail-drawer {
+  margin: 0;
 }
 .rail-title {
   font-size: 12px;
@@ -23,6 +27,28 @@ body {
   text-transform: uppercase;
   color: #9ca3af;
   margin-bottom: 12px;
+}
+.rail-drawer > summary.rail-title {
+  list-style: none;
+}
+.rail-drawer > summary.rail-title::-webkit-details-marker,
+.rail-drawer > summary.rail-title::marker {
+  display: none;
+}
+@media (min-width: 761px) {
+  .rail-drawer > summary.rail-title {
+    cursor: default;
+    pointer-events: none;
+  }
+  /* Closed <details> is hidden via ::details-content in current Chromium;
+     display:block on #agents alone no longer reveals the product list. */
+  .rail-drawer::details-content {
+    display: block;
+    content-visibility: visible;
+  }
+  .rail-drawer > *:not(summary) {
+    display: block !important;
+  }
 }
 .agent-row {
   display: flex;
@@ -799,6 +825,132 @@ body.library-page {
 .auth-controls button.btn-secondary:hover {
   background: #f3f4f6;
 }
+.nav-drawer-toggle {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  background: #ffffff;
+  color: #172033;
+  border: 1px solid #d1d5db;
+}
+.nav-drawer-toggle:hover {
+  background: #f3f4f6;
+}
+.nav-drawer-toggle-bars,
+.nav-drawer-toggle-bars::before,
+.nav-drawer-toggle-bars::after {
+  display: block;
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  background: #172033;
+  content: "";
+}
+.nav-drawer-toggle-bars {
+  position: relative;
+}
+.nav-drawer-toggle-bars::before,
+.nav-drawer-toggle-bars::after {
+  position: absolute;
+  left: 0;
+}
+.nav-drawer-toggle-bars::before { top: -5px; }
+.nav-drawer-toggle-bars::after { top: 5px; }
+.nav-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.28);
+  z-index: 40;
+}
+.nav-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(320px, 100vw);
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  background: #172033;
+  color: #f7fafc;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: -12px 0 32px rgba(15, 23, 42, 0.28);
+}
+.nav-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.nav-drawer-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: #9ca3af;
+}
+.nav-drawer .modal-close {
+  color: #9ca3af;
+}
+.nav-drawer .modal-close:hover {
+  color: #f7fafc;
+}
+.nav-drawer .auth-status {
+  color: #d1d5db;
+}
+.nav-drawer .auth-status[data-kind="ok"] { color: #86efac; }
+.nav-drawer .auth-status[data-kind="warn"] { color: #fdba74; }
+.nav-drawer .auth-status[data-kind="pending"] { color: #93c5fd; }
+.nav-drawer-controls {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 8px;
+}
+.nav-drawer-controls .auth-status {
+  padding: 4px 2px 8px;
+}
+.nav-drawer-controls button,
+.nav-drawer-controls button.btn-secondary,
+.nav-drawer-controls a.nav-drawer-link {
+  width: 100%;
+  min-height: 40px;
+  text-align: left;
+}
+.nav-drawer-controls a.nav-drawer-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  padding: 8px 4px;
+  color: #93c5fd;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-decoration: none;
+  cursor: pointer;
+}
+.nav-drawer-controls a.nav-drawer-link:hover,
+.nav-drawer-controls a.nav-drawer-link:focus-visible {
+  color: #ffffff;
+  background: rgba(147, 197, 253, 0.16);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 2px;
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+body.nav-drawer-open {
+  overflow: hidden;
+}
 .auth-controls button.tts-toggle.active {
   background: #dbeafe;
   border-color: #93c5fd;
@@ -1072,17 +1224,145 @@ button {
   min-height: 42px;
 }
 @media (max-width: 760px) {
-  .app-shell { grid-template-columns: 1fr; }
-  .agent-rail { display: none; }
+  html {
+    height: 100%;
+  }
+  body {
+    font-size: 16px;
+    line-height: 1.45;
+  }
+  button, select, input, textarea {
+    font-size: 16px;
+  }
+  .app-shell {
+    grid-template-columns: 1fr;
+    min-height: 100dvh;
+  }
+  .agent-rail {
+    display: block;
+    padding-top: 10px;
+    padding-bottom: 10px;
+    padding-left: calc(12px + env(safe-area-inset-left, 0px));
+    padding-right: calc(12px + env(safe-area-inset-right, 0px));
+  }
+  .rail-drawer > summary.rail-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0;
+    padding: 10px 4px;
+    cursor: pointer;
+    list-style: none;
+  }
+  .rail-drawer > summary.rail-title::after {
+    content: "▾";
+    font-size: 12px;
+    color: #9ca3af;
+  }
+  .rail-drawer[open] > summary.rail-title::after {
+    content: "▴";
+  }
+  .rail-drawer > summary.rail-title::-webkit-details-marker,
+  .rail-drawer > summary.rail-title::marker {
+    display: none;
+  }
   .topbar {
-    align-items: stretch;
-    flex-direction: column;
+    align-items: flex-start;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 10px;
+    min-height: 0;
+    overflow: visible;
+    padding-top: calc(10px + env(safe-area-inset-top, 0px));
+    padding-left: calc(12px + env(safe-area-inset-left, 0px));
+    padding-right: calc(12px + env(safe-area-inset-right, 0px));
+  }
+  .conversation-menu {
+    flex-wrap: wrap;
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+  .nav-drawer-toggle {
+    margin-left: auto;
+    margin-top: 2px;
   }
   .conversation-menu select {
     min-width: 0;
     width: 100%;
     max-width: none;
+    flex: 1 1 100%;
   }
-  .fixed-composer { left: 0; }
-  .messages { height: calc(100vh - 124px - 98px); }
+  .auth-panel,
+  .name-panel {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .auth-panel input,
+  .name-panel input {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+  }
+  .chat-shell {
+    padding-bottom: calc(98px + env(safe-area-inset-bottom, 0px));
+  }
+  .fixed-composer {
+    left: 0;
+    right: 0;
+    padding-left: calc(12px + env(safe-area-inset-left, 0px));
+    padding-right: calc(12px + env(safe-area-inset-right, 0px));
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+  .fixed-composer textarea {
+    min-height: 48px;
+    font-size: 16px;
+  }
+  .composer-row {
+    flex-wrap: wrap;
+  }
+  .messages {
+    height: calc(100dvh - 168px - 98px);
+    height: calc(100svh - 168px - 98px);
+    padding-left: calc(12px + env(safe-area-inset-left, 0px));
+    padding-right: calc(12px + env(safe-area-inset-right, 0px));
+  }
+  .message,
+  .message.status {
+    max-width: 100%;
+  }
+  .modal {
+    align-items: stretch;
+    justify-content: flex-end;
+  }
+  .modal-content,
+  .modal-content--wide {
+    width: 100%;
+    min-width: 0;
+    max-width: 100vw;
+    max-height: 100dvh;
+    border-radius: 12px 12px 0 0;
+  }
+  .company-upload-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .library-app {
+    min-height: 100dvh;
+  }
+  .library-topbar {
+    flex-direction: column;
+    align-items: stretch;
+    padding-top: calc(10px + env(safe-area-inset-top, 0px));
+  }
+  .library-layout {
+    flex-direction: column;
+  }
+  .library-sidebar {
+    width: 100%;
+    max-height: 42vh;
+  }
+  .library-preview {
+    min-height: 40vh;
+  }
 }
