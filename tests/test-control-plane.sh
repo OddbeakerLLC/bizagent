@@ -2395,11 +2395,11 @@ if (!/<ul><li>parent<ul><li>child<\/li><li>child2<\/li><\/ul><\/li><li>sibling<\
   console.error('nested ul not rendered:', nestedUl); process.exit(13);
 }
 const nestedMixed = sandbox.renderMarkdown('- a\n  1. one\n  2. two\n- b');
-if (!nestedMixed.includes('<ul><li>a<ol><li>one</li><li>two</li></ol></li><li>b</li></ul>')) {
+if (!nestedMixed.includes('<ul><li>a<ol><li>one</li><li value="2">two</li></ol></li><li>b</li></ul>')) {
   console.error('ul>ol nest broken:', nestedMixed); process.exit(14);
 }
 const nestedOlUl = sandbox.renderMarkdown('1. first\n   - nested\n2. second');
-if (!nestedOlUl.includes('<ol><li>first<ul><li>nested</li></ul></li><li>second</li></ol>')) {
+if (!nestedOlUl.includes('<ol><li>first<ul><li>nested</li></ul></li><li value="2">second</li></ol>')) {
   console.error('ol>ul nest broken:', nestedOlUl); process.exit(15);
 }
 const nestEnds = sandbox.renderMarkdown('- a\n  - b\n\nAfter');
@@ -2409,6 +2409,24 @@ if (!nestEnds.includes('<p>After</p>') || nestEnds.includes('After</li>')) {
 const mixedKids = sandbox.renderMarkdown('- a\n  - b\n  1. c');
 if (!mixedKids.includes('<ul><li>a<ul><li>b</li></ul><ol><li>c</li></ol></li></ul>')) {
   console.error('mixed nested kids broken:', mixedKids); process.exit(17);
+}
+// Loose ordered lists (blank line between items) must stay one <ol> so the
+// browser numbers 1, 2, 3 — not a fresh "1." per item.
+const looseOl = sandbox.renderMarkdown('1. one\n\n2. two\n\n3. three');
+if (looseOl !== '<ol><li>one</li><li value="2">two</li><li value="3">three</li></ol>') {
+  console.error('loose ol restarted at 1:', looseOl); process.exit(161);
+}
+const looseAllOnes = sandbox.renderMarkdown('1. one\n\n1. two\n\n1. three');
+if (looseAllOnes !== '<ol><li>one</li><li value="2">two</li><li value="3">three</li></ol>') {
+  console.error('all-1 markers should still increment:', looseAllOnes); process.exit(162);
+}
+const tightOl = sandbox.renderMarkdown('1. one\n2. two\n3. three');
+if (tightOl !== '<ol><li>one</li><li value="2">two</li><li value="3">three</li></ol>') {
+  console.error('tight ol values broken:', tightOl); process.exit(163);
+}
+const olStart = sandbox.renderMarkdown('10. ten\n11. eleven');
+if (!olStart.includes('<ol start="10">') || !olStart.includes('<li value="10">ten</li><li value="11">eleven</li>')) {
+  console.error('ol start/value broken:', olStart); process.exit(164);
 }
 
 // TTS markdown fence: ```tts keeps inner prose, not a code block; speaks ≤2 sentences.

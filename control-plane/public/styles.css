@@ -1092,6 +1092,13 @@ button {
 .library-preview-body ul, .library-preview-body ol {
   margin: 0 0 8px;
   padding-left: 1.35em;
+  list-style-position: outside;
+}
+.message-body ol, .message ol, .library-preview-body ol {
+  list-style-type: decimal;
+}
+.message-body ul, .message ul, .library-preview-body ul {
+  list-style-type: disc;
 }
 .message-body ul ul, .message-body ul ol, .message-body ol ul, .message-body ol ol,
 .message ul ul, .message ul ol, .message ol ul, .message ol ol,
