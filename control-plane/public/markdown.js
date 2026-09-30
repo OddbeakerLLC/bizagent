@@ -200,9 +200,21 @@ function renderMarkdown(text) {
     const itemsHtml = node.items.map((item) => {
       const body = renderInline(item.text);
       const nested = (item.children || []).map(renderListNode).join('');
-      return `<li>${body}${nested}</li>`;
+      // Explicit value so a loose ordered list still shows 1, 2, 3…
+      // (a split <ol> would restart each item at 1).
+      const shown = item.displayValue != null ? item.displayValue : item.value;
+      const valueAttr = tag === 'ol' && Number.isFinite(shown) && shown !== 1
+        ? ` value="${shown}"`
+        : '';
+      return `<li${valueAttr}>${body}${nested}</li>`;
     }).join('');
-    return `<${tag}>${itemsHtml}</${tag}>`;
+    const firstShown = node.items[0]
+      ? (node.items[0].displayValue != null ? node.items[0].displayValue : node.items[0].value)
+      : null;
+    const startAttr = tag === 'ol' && Number.isFinite(firstShown) && firstShown !== 1
+      ? ` start="${firstShown}"`
+      : '';
+    return `<${tag}${startAttr}>${itemsHtml}</${tag}>`;
   };
 
   const flushList = () => {
@@ -225,8 +237,8 @@ function renderMarkdown(text) {
     const rest = line.slice(i);
     let m = /^[-*+]\s+(.*)$/.exec(rest);
     if (m) return { indent, type: 'ul', text: m[1] };
-    m = /^\d+\.\s+(.*)$/.exec(rest);
-    if (m) return { indent, type: 'ol', text: m[1] };
+    m = /^(\d+)\.\s+(.*)$/.exec(rest);
+    if (m) return { indent, type: 'ol', text: m[2], value: Number(m[1]) };
     return null;
   };
 
@@ -282,7 +294,45 @@ function renderMarkdown(text) {
       }
     }
 
-    listStack[listStack.length - 1].items.push({ text: parsed.text, children: [] });
+    const item = { text: parsed.text, children: [] };
+    if (parsed.type === 'ol' && Number.isFinite(parsed.value)) item.value = parsed.value;
+    const dest = listStack[listStack.length - 1];
+    if (item.value != null && dest.type === 'ol' && dest.items.length) {
+      const prev = dest.items[dest.items.length - 1];
+      const running = prev.displayValue != null ? prev.displayValue : prev.value;
+      // Lazy "1. / 1. / 1." must still paint 1, 2, 3. "2." then "1." restarts.
+      if (item.value === 1 && running != null && (prev.value === 1 || prev.displayValue != null)) {
+        item.displayValue = running + 1;
+      }
+    }
+    dest.items.push(item);
+  };
+
+  /**
+   * Blank line between list items is loose-list spacing, not a new list.
+   * Closing the <ol> here made every following item its own list, so the
+   * browser painted "1." on each. A paragraph, heading, fence, or a "1."
+   * restart after a higher number still ends the list.
+   */
+  const blankContinuesList = (from) => {
+    if (!listStack.length) return false;
+    let j = from;
+    while (j < lines.length && lines[j].trim() === '') j++;
+    if (j >= lines.length) return false;
+    const next = parseListItem(lines[j]);
+    if (!next) return false;
+    const level = Math.floor(next.indent / 2);
+    if (level >= listStack.length) return false;
+    const open = listStack[level];
+    if (next.type !== open.type) return false;
+    if (next.type === 'ol' && open.items.length && Number.isFinite(next.value)) {
+      const last = open.items[open.items.length - 1];
+      const running = last.displayValue != null ? last.displayValue : last.value;
+      if (next.value === 1 && running != null && running !== 1 && last.value !== 1 && last.displayValue == null) {
+        return false;
+      }
+    }
+    return true;
   };
 
   let i = 0;
@@ -381,6 +431,10 @@ function renderMarkdown(text) {
 
     if (line.trim() === '') {
       flushParagraph();
+      if (blankContinuesList(i + 1)) {
+        i++;
+        continue;
+      }
       flushList();
       i++;
       continue;

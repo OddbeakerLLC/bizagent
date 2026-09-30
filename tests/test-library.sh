@@ -510,7 +510,7 @@ if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
     process.exit(40);
   }
   const mixed = md.renderMarkdown('1. a\n   - b\n2. c');
-  if (!mixed.includes('<ol><li>a<ul><li>b</li></ul></li><li>c</li></ol>')) {
+  if (!mixed.includes('<ol><li>a<ul><li>b</li></ul></li><li value="2">c</li></ol>')) {
     console.error('library ol>ul nest broken', mixed);
     process.exit(41);
   }
@@ -518,6 +518,11 @@ if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
   if (!mixedKids.includes('<ul><li>a<ul><li>b</li></ul><ol><li>c</li></ol></li></ul>')) {
     console.error('library mixed nested kids broken', mixedKids);
     process.exit(42);
+  }
+  const looseOl = md.renderMarkdown('1. one\n\n2. two\n\n3. three');
+  if (looseOl !== '<ol><li>one</li><li value="2">two</li><li value="3">three</li></ol>') {
+    console.error('library loose ol restarted at 1', looseOl);
+    process.exit(45);
   }
 }
 
