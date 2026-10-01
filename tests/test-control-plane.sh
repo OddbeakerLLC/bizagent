@@ -3480,5 +3480,135 @@ grep -q "activeSlugKey" "$SERVER" \
   || fail "tick does not push board on live-slug change"
 grep -q "clearDispatchState" "$SERVER" \
   || fail "model-change stop does not release dispatch markers"
+grep -q "syncProductsRail" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing desktop products-rail open sync"
+grep -q "::details-content" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing desktop details-content override for products rail"
+
+# Fleet thinking viewer: drawer link + dispatch-*.log SSE (stdout only).
+grep -q "/api/logs/stream" "$SERVER" \
+  || fail "server missing /api/logs/stream thinking-logs endpoint"
+grep -q "streamThinkingLogs" "$SERVER" \
+  || fail "server does not wire streamThinkingLogs"
+grep -q "thinkingLogsBtn" "$ROOT/control-plane/public/index.html" \
+  || fail "drawer missing Thinking... link"
+grep -q "Thinking..." "$ROOT/control-plane/public/index.html" \
+  || fail "drawer Thinking... label missing"
+grep -q "openThinkingLogsTab" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing named Thinking logs tab open"
+[ -f "$ROOT/control-plane/public/logs.html" ] || fail "logs.html missing"
+[ -f "$ROOT/control-plane/public/logs.js" ] || fail "logs.js missing"
+[ -f "$ROOT/control-plane/lib/thinking-logs.js" ] || fail "thinking-logs module missing"
+grep -q "THINKING_LOG_RE" "$ROOT/control-plane/lib/thinking-logs.js" \
+  || fail "thinking-logs missing THINKING_LOG_RE"
+! grep -E "name: '\\*\\.stderr'|structured\\.log" "$ROOT/control-plane/lib/thinking-logs.js" \
+  || fail "thinking-logs should not select stderr or structured.log"
+grep -q "logs-pane" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing thinking logs pane"
+grep -q "logs-chrome" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing sticky thinking logs chrome"
+grep -q "This is" "$ROOT/control-plane/public/logs.js" \
+  || fail "logs UI missing speaker header for All view"
+grep -q "lastSpeaker" "$ROOT/control-plane/public/logs.js" \
+  || fail "logs UI missing speaker-change tracking"
+
+if ! node - "$ROOT" <<'NODE'
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const {
+  ALL_TAIL_LINES,
+  filesMatchingFilter,
+  initialOffset,
+  listThinkingLogFiles,
+  normalizeFilter,
+  parseThinkingLogName,
+  readChunk,
+  startOffsetForFilter,
+  tailLineOffset,
+} = require(path.join(process.argv[2], 'control-plane/lib/thinking-logs'));
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'ba-tlogs-'));
+const logs = path.join(hub, 'logs');
+fs.mkdirSync(logs);
+fs.writeFileSync(path.join(logs, 'dispatch-hub.log'), 'hub thinks\n');
+fs.writeFileSync(path.join(logs, 'dispatch-alpha.log'), 'alpha thinks\n');
+fs.writeFileSync(path.join(logs, 'dispatch-alpha.stderr'), 'alpha err\n');
+fs.writeFileSync(path.join(logs, 'structured.log'), '{"no":true}\n');
+fs.writeFileSync(path.join(logs, 'control-plane.log'), 'cp\n');
+fs.writeFileSync(path.join(logs, 'nightly.log'), 'cron\n');
+fs.mkdirSync(path.join(logs, 'dispatch-sneaky.log')); // not a file
+
+const listed = listThinkingLogFiles(hub);
+const names = listed.map((f) => f.name).sort();
+if (names.join(',') !== 'dispatch-alpha.log,dispatch-hub.log') {
+  console.error('listed wrong', names);
+  process.exit(1);
+}
+if (listed.some((f) => f.name.endsWith('.stderr') || f.name === 'structured.log')) {
+  console.error('non-thinking files leaked', names);
+  process.exit(2);
+}
+if (normalizeFilter('../etc/passwd') !== null) {
+  console.error('pathy filter accepted');
+  process.exit(3);
+}
+if (normalizeFilter('all') !== 'all' || normalizeFilter('hub') !== 'hub') {
+  console.error('normalizeFilter failed');
+  process.exit(4);
+}
+const hubOnly = filesMatchingFilter(listed, 'hub');
+if (hubOnly.length !== 1 || hubOnly[0].slug !== 'hub') {
+  console.error('hub filter failed', hubOnly);
+  process.exit(5);
+}
+if (parseThinkingLogName('dispatch-foo.stderr') || parseThinkingLogName('structured.log')) {
+  console.error('parse should reject non-thinking names');
+  process.exit(6);
+}
+const big = Buffer.alloc(40 * 1024, 'x');
+const bigPath = path.join(logs, 'dispatch-big.log');
+fs.writeFileSync(bigPath, big);
+const off = initialOffset(big.length);
+if (off !== big.length - 32 * 1024) {
+  console.error('initialOffset wrong', off);
+  process.exit(7);
+}
+const chunk = readChunk(bigPath, off, 64 * 1024);
+if (!chunk.text || chunk.text.length !== 32 * 1024) {
+  console.error('readChunk tail wrong', chunk.text && chunk.text.length);
+  process.exit(8);
+}
+const rotated = readChunk(path.join(logs, 'dispatch-hub.log'), 99999, 1024);
+if (!rotated.rotated || rotated.offset !== rotated.text.length) {
+  console.error('rotation reset failed', rotated);
+  process.exit(9);
+}
+const linesPath = path.join(logs, 'dispatch-lines.log');
+const lines = Array.from({ length: 25 }, (_, i) => `line-${i + 1}`).join('\n') + '\n';
+fs.writeFileSync(linesPath, lines);
+const tailOff = tailLineOffset(linesPath, 20);
+const tailText = fs.readFileSync(linesPath).slice(tailOff).toString('utf8');
+const tailCount = tailText.replace(/\n$/, '').split('\n').length;
+if (tailCount !== 20 || !tailText.startsWith('line-6\n')) {
+  console.error('tailLineOffset last-20 failed', tailCount, JSON.stringify(tailText.slice(0, 40)));
+  process.exit(10);
+}
+if (ALL_TAIL_LINES !== 20) {
+  console.error('ALL_TAIL_LINES should be 20', ALL_TAIL_LINES);
+  process.exit(11);
+}
+if (startOffsetForFilter('hub', linesPath, 0) !== 0) {
+  console.error('single-agent filter must start at byte 0');
+  process.exit(12);
+}
+if (startOffsetForFilter('all', linesPath, 0) !== tailOff) {
+  console.error('all filter must start at last-20 offset');
+  process.exit(13);
+}
+NODE
+then
+  fail "thinking-logs unit checks failed"
+fi
 
 echo "  ok: control-plane"
