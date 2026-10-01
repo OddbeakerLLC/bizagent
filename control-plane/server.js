@@ -143,6 +143,7 @@ const {
   getThinking,
   readThinking,
 } = require("./lib/thinking");
+const { streamThinkingLogs } = require("./lib/thinking-logs");
 const { renderPlantUml } = require("./lib/plantuml");
 
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -892,6 +893,10 @@ async function handleApi(config, req, res) {
     return send(res, 200, { ok: true, killed, slug: slug || null });
   }
 
+  // --- Fleet thinking logs (dispatch-*.log only; live-tail like viewlog all, stdout) ---
+  if (url.pathname === "/api/logs/stream" && req.method === "GET") {
+    return streamThinkingLogs(config.hub, req, res, url.searchParams.get("filter"));
+  }
 
   // --- Hard-stop a specific agent turn (click running status light) ---
   const agentStopMatch = url.pathname.match(/^\/api\/agent\/([^/]+)\/stop$/);

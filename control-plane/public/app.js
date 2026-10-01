@@ -106,6 +106,8 @@ function setAuthenticated(isAuthenticated, message) {
   if (companyBtn) companyBtn.hidden = !isAuthenticated;
   const libraryBtn = document.getElementById('libraryBtn');
   if (libraryBtn) libraryBtn.hidden = !isAuthenticated;
+  const thinkingLogsBtn = document.getElementById('thinkingLogsBtn');
+  if (thinkingLogsBtn) thinkingLogsBtn.hidden = !isAuthenticated;
   const ttsBtn = document.getElementById('ttsToggle');
   if (ttsBtn) ttsBtn.hidden = !isAuthenticated;
   if (!isAuthenticated) {
@@ -2633,6 +2635,35 @@ function bindLibraryPage() {
   }
 }
 
+// --- Thinking logs (named browser tab; live-tail dispatch-*.log) ---
+const THINKING_LOGS_WINDOW_NAME = 'bizagent-thinking';
+
+function openThinkingLogsTab() {
+  const url = '/logs.html';
+  try {
+    const w = window.open(url, THINKING_LOGS_WINDOW_NAME);
+    if (w) {
+      try { w.focus(); } catch (_err) { /* ignore */ }
+      return w;
+    }
+  } catch (_err) {
+    /* popup blocked — fall through */
+  }
+  if (typeof location !== 'undefined') location.assign(url);
+  return null;
+}
+
+function bindThinkingLogsPage() {
+  const openBtn = document.getElementById('thinkingLogsBtn');
+  if (openBtn && openBtn.dataset.bound !== '1') {
+    openBtn.dataset.bound = '1';
+    openBtn.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      openThinkingLogsTab();
+    });
+  }
+}
+
 // --- Composer attachments ---
 function formatBytes(n) {
   if (n < 1024) return `${n} B`;
@@ -2914,6 +2945,7 @@ document.getElementById('logout').addEventListener('click', async (event) => {
 });
 bindCompanyModal();
 bindLibraryPage();
+bindThinkingLogsPage();
 bindNavDrawer();
 bindTtsToggle();
 bindComposerAttachments();
