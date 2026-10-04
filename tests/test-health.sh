@@ -5,7 +5,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+HTMP="$(mktemp -d)"
+trap 'rm -rf "$TMP" "$HTMP"' EXIT
 
 NODE_EVAL() { node -e "$1" "$ROOT"; }
 

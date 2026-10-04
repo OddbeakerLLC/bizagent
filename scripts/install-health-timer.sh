@@ -5,15 +5,47 @@
 # scripts/health-alert-failure.sh; falls back to a cron line when systemd
 # user units are unavailable (containers, WSL1, …).
 #
-# Usage: scripts/install-health-timer.sh [hub-path]
+# Usage: scripts/install-health-timer.sh [--check] [hub-path]
+#   --check  exit 0 when the timer/cron probe is already installed, 1 when not
 # Env:
 #   BIZAGENT_HEALTH_WEBHOOK   optional out-of-band webhook (fires via OnFailure)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HUB="${1:-$ROOT}"
 SERVICE_NAME="bizagent-health"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+
+CHECK_ONLY=0
+for arg in "$@"; do
+  [[ "$arg" == "--check" ]] && CHECK_ONLY=1
+done
+if [[ "${1:-}" == "--check" ]]; then
+  shift
+fi
+HUB="${1:-$ROOT}"
+
+# True when the out-of-process probe is wired up (systemd user timer enabled
+# or the cron fallback line present).
+timer_installed() {
+  if command -v systemctl >/dev/null 2>&1 \
+     && systemctl --user is-enabled "${SERVICE_NAME}.timer" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v crontab >/dev/null 2>&1 \
+     && crontab -l 2>/dev/null | grep -qF "scripts/health-probe.sh"; then
+    return 0
+  fi
+  return 1
+}
+
+if [[ "$CHECK_ONLY" -eq 1 ]]; then
+  if timer_installed; then
+    echo "health timer: installed"
+    exit 0
+  fi
+  echo "health timer: NOT installed (run: scripts/install-health-timer.sh)"
+  exit 1
+fi
 
 chmod +x "$ROOT/scripts/health-probe.sh" "$ROOT/scripts/health-alert-failure.sh" 2>/dev/null || true
 

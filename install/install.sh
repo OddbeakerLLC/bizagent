@@ -244,6 +244,21 @@ else
   ok "cron entry installed"
 fi
 
+# --- 3b. Health watchdog (out-of-process probe timer / cron fallback) ---
+if [[ -n "${BIZAGENT_SKIP_HEALTH_TIMER:-}" ]]; then
+  note "skipping health probe timer (BIZAGENT_SKIP_HEALTH_TIMER)"
+elif [[ -f "$HUB/scripts/install-health-timer.sh" ]]; then
+  if bash "$HUB/scripts/install-health-timer.sh" "$HUB"; then
+    ok "health probe timer installed and enabled"
+  else
+    warn "could not enable the health probe timer automatically (no systemd user session?)"
+    note "Enable it with one command:"
+    note "  bash $HUB/scripts/install-health-timer.sh $HUB"
+  fi
+else
+  warn "scripts/install-health-timer.sh missing — out-of-process health probe not installed"
+fi
+
 # --- 4. Detect headless and patch registry if needed ---
 _is_headless=0
 if [[ "$(uname -s)" == "Linux" ]]; then

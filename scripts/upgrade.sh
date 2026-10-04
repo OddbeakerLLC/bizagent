@@ -18,12 +18,13 @@
 # Usage:
 #   scripts/upgrade.sh [--hub PATH] [--source PATH|URL] [--ref REF]
 #                      [--dry-run] [-v|--verbose] [--yes|-y] [--no-restart]
-#                      [--with-tts|--no-tts]
+#                      [--with-tts|--no-tts] [--no-health-timer]
 #
 # Env:
 #   BIZAGENT_FRAMEWORK   Default framework path or git URL (same as factory-reset)
 #   BIZAGENT_SKIP_TTS=1  Skip oddbeaker-tts offer/install on upgrade
 #   BIZAGENT_TTS_*       See scripts/install-oddbeaker-tts.sh
+#   BIZAGENT_SKIP_HEALTH_TIMER=1  Skip health probe timer ensure on upgrade
 #
 # Manual path (any time): run this script, or ask PTL to apply updates.
 # Nightly auto path: only when registry.json settings.auto_update === true
@@ -41,10 +42,11 @@ VERBOSE=0
 YES=0
 NO_RESTART=0
 WITH_TTS=""   # empty=auto (offer if missing), 1=force try, 0=skip
+WITH_HEALTH_TIMER=1  # 0=skip via --no-health-timer or BIZAGENT_SKIP_HEALTH_TIMER
 DEFAULT_FRAMEWORK_URL="https://github.com/OddbeakerLLC/bizagent.git"
 
 usage() {
-  sed -n '2,36p' "$0" | sed 's/^# \?//'
+  sed -n '2,38p' "$0" | sed 's/^# \?//'
   exit 2
 }
 
@@ -63,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --no-restart) NO_RESTART=1; shift ;;
     --with-tts) WITH_TTS=1; shift ;;
     --no-tts) WITH_TTS=0; shift ;;
+    --no-health-timer) WITH_HEALTH_TIMER=0; shift ;;
     -h|--help) usage ;;
     *)
       die "unknown argument: $1 (try --help)"
@@ -145,6 +148,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "upgrade: DRY-RUN — no files will be changed, control plane will not restart"
   log "upgrade: would backup under $HUB/.bizagent/backups/factory-reset-repair-*"
   log "upgrade: would stop control plane, restore framework paths from source, npm install, restart"
+  log "upgrade: would ensure health probe timer (scripts/install-health-timer.sh — systemd user timer or cron)"
   if [[ -d "$SOURCE_LABEL" ]]; then
     for path in "${FRAMEWORK_PATHS[@]}"; do
       if [[ -e "$SOURCE_LABEL/$path" ]]; then
@@ -277,6 +281,34 @@ ensure_tts_on_upgrade() {
 }
 
 ensure_tts_on_upgrade
+
+# Health survival: make sure the out-of-process probe timer exists after an
+# upgrade that ships it. Idempotent — hubs that already have the systemd user
+# timer (or cron fallback) are left untouched.
+ensure_health_timer_on_upgrade() {
+  if [[ -n "${BIZAGENT_SKIP_HEALTH_TIMER:-}" || "$WITH_HEALTH_TIMER" == "0" ]]; then
+    log "upgrade: skipping health-timer ensure (BIZAGENT_SKIP_HEALTH_TIMER or --no-health-timer)"
+    return 0
+  fi
+  local helper="$HUB/scripts/install-health-timer.sh"
+  if [[ ! -f "$helper" ]]; then
+    log "upgrade: install-health-timer.sh not present — skip health timer"
+    return 0
+  fi
+  if bash "$helper" --check "$HUB" >/dev/null 2>&1; then
+    log "upgrade: health probe timer already installed"
+    return 0
+  fi
+  log "upgrade: installing health probe timer (systemd user timer or cron)…"
+  if bash "$helper" "$HUB"; then
+    log "upgrade: health probe timer enabled"
+  else
+    log "upgrade: WARN could not enable the health probe timer automatically"
+    log "upgrade: enable it with:  bash $HUB/scripts/install-health-timer.sh $HUB"
+  fi
+}
+
+ensure_health_timer_on_upgrade
 
 log "upgrade: done"
 log "upgrade: operator data (registry, cli.json, agents, company, KS, library, mail, .bizagent) was not overwritten"

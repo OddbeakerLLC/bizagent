@@ -54,8 +54,12 @@ chmod +x "$TMP/hub/scripts/control-plane.sh"
 
 # Need factory-reset on hub path after upgrade copies scripts from source —
 # apply uses current hub's factory-reset first.
-bash "$TMP/hub/scripts/upgrade.sh" --hub "$TMP/hub" --source "$ROOT" --yes --no-restart \
-  || fail "upgrade apply failed"
+# Health-timer ensure is skipped here so the sandbox apply never touches the
+# real user crontab; the skip path itself is asserted below.
+apply_out="$(BIZAGENT_SKIP_HEALTH_TIMER=1 bash "$TMP/hub/scripts/upgrade.sh" --hub "$TMP/hub" --source "$ROOT" --yes --no-restart 2>&1)" \
+  || fail "upgrade apply failed: $apply_out"
+echo "$apply_out" | grep -qi 'skipping health-timer' \
+  || fail "upgrade should honor BIZAGENT_SKIP_HEALTH_TIMER: $apply_out"
 
 grep -q 'KEEP_CLI' "$TMP/hub/cli.json" || fail "upgrade clobbered cli.json"
 grep -q 'agent' "$TMP/hub/agents/alpha/agent.md" || fail "upgrade clobbered agents/"
@@ -111,4 +115,19 @@ grep -q 'install-oddbeaker-tts\|ensure_tts_on_upgrade\|with-tts' "$SCRIPT" \
   || fail "upgrade.sh missing oddbeaker-tts ensure step"
 grep -q 'BIZAGENT_TTS_VOICE' "$ROOT/scripts/install-oddbeaker-tts.sh" \
   || fail "install-oddbeaker-tts missing voice persistence"
+
+# health survival timer wired into install + upgrade
+grep -q 'install-health-timer' "$SCRIPT" \
+  || fail "upgrade.sh missing health-timer ensure step"
+grep -q 'install-health-timer' "$ROOT/install.sh" \
+  || fail "install.sh missing health-timer step"
+grep -q 'install-health-timer' "$ROOT/install/install.sh" \
+  || fail "install/install.sh missing health-timer step"
+for f in scripts/health-probe.sh scripts/health-alert-failure.sh \
+         scripts/install-health-timer.sh docs/HEALTH-SURVIVAL.md \
+         control-plane/lib/health.js; do
+  [[ -e "$ROOT/$f" ]] || fail "health survival file missing: $f"
+done
+echo "$out" | grep -qi 'health' \
+  || fail "upgrade dry-run should mention the health-timer step: $out"
 
