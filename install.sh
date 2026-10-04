@@ -20,6 +20,7 @@
 #   BIZAGENT_TTS_SOURCE=path|url   oddbeaker-tts checkout or git URL (default: discover/SSH)
 #   BIZAGENT_TTS_DIR=path          Install root for oddbeaker-tts (default ~/.bizagent/oddbeaker-tts)
 #   BIZAGENT_SKIP_TTS=1            Skip oddbeaker-tts install (console TTS stays browser-only)
+#   BIZAGENT_SKIP_HEALTH_TIMER=1   Skip the out-of-process health probe timer install
 #   BIZAGENT_NONINTERACTIVE=1      No prompts (provider/key/voice use env/defaults)
 
 set -euo pipefail
@@ -1392,6 +1393,32 @@ ensure_oddbeaker_tts() {
   ok "oddbeaker-tts step finished (voice in .bizagent/env when set)"
 }
 
+# --- out-of-process health watchdog (survival instinct) ---
+# Installs the systemd user timer (or cron fallback) for scripts/health-probe.sh
+# so the operator does not have to run scripts/install-health-timer.sh by hand.
+# Soft-fails: prints the one command to run if auto-enable is impossible here.
+ensure_health_timer() {
+  if [[ -n "${BIZAGENT_SKIP_HEALTH_TIMER:-}" ]]; then
+    ok "skipping health probe timer (BIZAGENT_SKIP_HEALTH_TIMER)"
+    return 0
+  fi
+  local helper="$INSTALL_DIR/scripts/install-health-timer.sh"
+  if [[ ! -f "$helper" ]]; then
+    warn "install-health-timer.sh missing — out-of-process health probe not installed"
+    note "Later: bash scripts/install-health-timer.sh (from the hub directory)"
+    return 0
+  fi
+  step "Health watchdog"
+  note "Out-of-process probe every 2 min (systemd user timer, cron fallback)."
+  if bash "$helper" "$INSTALL_DIR"; then
+    ok "health probe timer installed and enabled"
+  else
+    warn "could not enable the health probe timer automatically (no systemd user session?)"
+    note "Enable it with one command:"
+    note "  bash $INSTALL_DIR/scripts/install-health-timer.sh $INSTALL_DIR"
+  fi
+}
+
 # --- clone + handoff ---
 DEFAULT_DIR="$HOME/bizagent"
 BIZAGENT_SOURCE_EXPLICIT=0
@@ -1563,6 +1590,7 @@ main() {
   write_registry_seed
   write_env_file
   ensure_oddbeaker_tts
+  ensure_health_timer
 
   handoff
 }

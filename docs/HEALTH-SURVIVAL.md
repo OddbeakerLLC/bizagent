@@ -21,6 +21,14 @@ Install the timer: `scripts/install-health-timer.sh [hub-path]`
 `scripts/health-alert-failure.sh`). Probe exit codes: 0 ok/warn, 1 critical,
 2 emergency, 3 probe itself failed (all non-zero trigger `OnFailure=`).
 
+The timer is wired in automatically: a fresh `install.sh` / `install/install.sh`
+installs and enables it after setup, and `scripts/upgrade.sh` installs it when
+missing (idempotent — existing timers are left untouched; dry-run mentions the
+step). Set `BIZAGENT_SKIP_HEALTH_TIMER=1` (or upgrade with `--no-health-timer`)
+to opt out. If the environment has no systemd user session and cron cannot be
+written, install/upgrade print the single command to run by hand.
+`scripts/install-health-timer.sh --check` exits 0 when the probe is wired up.
+
 ## Checks and tripwires
 
 | Check | Warn | Critical | Emergency |
