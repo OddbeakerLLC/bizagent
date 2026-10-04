@@ -1468,3 +1468,30 @@ body.thinking-page {
   }
 }
 
+/* --- Health banner (survival instinct) --- */
+.health-banner {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 14px;
+  padding: 10px 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #fff;
+}
+.health-banner strong {
+  font-size: 13px;
+}
+.health-banner-detail {
+  opacity: 0.92;
+  font-size: 12px;
+}
+.health-banner-red {
+  background: #b3261e;
+}
+.health-banner-yellow {
+  background: #9a6b00;
+}

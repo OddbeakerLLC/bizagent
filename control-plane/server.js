@@ -138,6 +138,10 @@ const {
 const { agentMailStatus, routeOutboxes } = require("./lib/mail");
 const enterpriseClient = require("./lib/enterprise-server-client");
 const { getProfile, setProfile } = require("./lib/profile");
+const health = require("./lib/health");
+const safeMode = require("./lib/safe-mode");
+const logCaps = require("./lib/log-caps");
+const ollamaFallback = require("./lib/ollama-fallback");
 const { logEvent, logHubTurn, logError, appendLog } = require("./lib/log");
 const {
   clearThinking,
@@ -680,6 +684,28 @@ async function handleApi(config, req, res) {
   const didChangeState = () => { try { pushState(config); } catch (_) {} };
   const didChangeActiveConv = () => { try { pushActiveConv(config); } catch (_) {} };
 
+  // --- Health (public, no auth): drives the console banner + external monitors. ---
+  if (url.pathname === "/api/health" && req.method === "GET") {
+    const file = path.join(config.hub, "logs", "health.json");
+    let report = null;
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+      // Fresh enough (2 min) → serve as-is; else re-check inline (cheap).
+      if (raw && raw.ts && Date.now() - Date.parse(raw.ts) < 2 * 60 * 1000) report = raw;
+    } catch (_err) { /* absent/corrupt */ }
+    if (!report) {
+      try { report = health.runHealthCheck(config.hub, { mitigate: false }); } catch (_err) { report = null; }
+    }
+    return send(res, 200, {
+      ok: report ? report.level === "ok" : false,
+      level: report ? report.level : "unknown",
+      safe_mode: safeMode.isSafeMode(config.hub),
+      provider_fallback_active: ollamaFallback.isFallbackActive(config.hub),
+      checks: report ? report.checks : [],
+      ts: report ? report.ts : new Date().toISOString(),
+    });
+  }
+
   if (url.pathname === "/api/setup" && req.method === "POST") {
     const provider = authProvider(config);
     const already =
@@ -744,6 +770,17 @@ async function handleApi(config, req, res) {
   }
 
   if (!requireAuth(config, req, res)) return null;
+
+  // Boot safe-mode: only login + banner + health JSON get through; everything
+  // else is refused with the health payload so the UI can block with a banner.
+  if (safeMode.isSafeMode(config.hub) && !safeMode.routeAllowedInSafeMode(url.pathname)) {
+    return send(res, 503, {
+      error: "hub in safe mode (health emergency) — only login and health are served",
+      safe_mode: true,
+      level: "emergency",
+      provider_fallback_active: ollamaFallback.isFallbackActive(config.hub),
+    });
+  }
 
   if (pluginRoute) {
     try {
@@ -1832,19 +1869,26 @@ function runTick(config) {
   const start = Date.now();
   refreshRuntimeConfig(config);
   maybeReloadEnterprise(config);
+  // Heartbeat for the out-of-process probe (cheap single small write).
+  try {
+    const hbDir = path.join(config.hub, ".bizagent");
+    fs.mkdirSync(hbDir, { recursive: true });
+    fs.writeFileSync(path.join(hbDir, "control-plane.heartbeat"), `${Date.now()}\n`, "utf8");
+  } catch (_err) { /* disk trouble — the probe will flag it */ }
   // Snapshot live slugs so a lock drop / cli_exit between ticks pushes the
   // board (amber clears without a page refresh), not only hadWork ticks.
   const activeBefore = activeSlugKey(config);
-  const routed = routeOutboxes(config.hub);
-  const relayed = syncUserInbox(config); // numeric for hadWork (compat)
+  const safeModeActive = safeMode.isSafeMode(config.hub);
+  const routed = safeModeActive ? { delivered: 0, quarantined: 0, warnings: 0 } : routeOutboxes(config.hub);
+  const relayed = safeModeActive ? 0 : syncUserInbox(config); // numeric for hadWork (compat)
   // Backup: if hub CLI exited without the shell safety hook, finish the turn.
   // Safety may route+relay or hard-fail AFTER syncUserInbox — push those ids next.
-  const safetyResults = drainHubTurnSafety(config) || [];
+  const safetyResults = safeModeActive ? [] : (drainHubTurnSafety(config) || []);
   const safetyIds = conversationIdsFromSafetyResults(safetyResults);
   for (const id of safetyIds) {
     try { pushConv(config, id); } catch (_) {}
   }
-  const dispatched = dispatchPendingAgents(config) || {};
+  const dispatched = safeModeActive ? {} : (dispatchPendingAgents(config) || {});
   const launched = Number(dispatched.launched || 0);
   // Launch-ack (and any other same-tick conv mutation) — push by disk stamp.
   // Also covers EXIT-hook child process that mutated conv JSON without broadcast.
@@ -2034,6 +2078,25 @@ function start(hubInput) {
     refreshRuntimeConfig(config);
     runTick(config);
   }, pollMs);
+  // --- In-process watchdog (survival instinct layer 1, every ~45s). ---
+  // Cheap statfs/os checks + health files + emergency mitigation. The
+  // out-of-process timer (scripts/install-health-timer.sh) covers the case
+  // where this process cannot start at all.
+  const healthTick = () => {
+    try {
+      const report = health.runHealthCheck(config.hub, { mitigate: true });
+      if (report && report.level !== "ok") {
+        console.warn(`${new Date().toISOString()} health: ${report.level} — see logs/health.json`);
+      }
+      // Paid-provider probe while the Ollama fallback flag is active: a
+      // successful probe clears `provider_fallback_active` (banner + health).
+      if (ollamaFallback.isFallbackActive(config.hub)) {
+        ollamaFallback.probePaidProvider(config.hub).catch(() => {});
+      }
+    } catch (_err) { /* never kill the tick loop over health */ }
+  };
+  healthTick();
+  setInterval(healthTick, 45 * 1000);
   server.listen(config.port, config.host, () => {
     const bindUrl = `http://${config.host}:${config.port}`;
     const openUrl = config.host === '0.0.0.0' ? `http://localhost:${config.port}` : bindUrl;

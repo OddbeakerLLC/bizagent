@@ -3206,5 +3206,46 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// --- Health banner (survival instinct): red = cannot run / disk critical;
+// yellow = heading there or provider fallback active. Persisted by the server
+// state itself — the banner stays until the check is green again. ---
+function renderHealthBanner(h) {
+  const el = document.getElementById('healthBanner');
+  if (!el) return;
+  const level = (h && h.level) || 'unknown';
+  const safeMode = !!h.safe_mode;
+  const fallback = !!h.provider_fallback_active;
+  const bad = (h.checks || []).filter((c) => c.level && c.level !== 'ok');
+  const red = safeMode || level === 'critical' || level === 'emergency';
+  const yellow = !red && (level === 'warn' || fallback || level === 'unknown');
+  if (!red && !yellow) {
+    el.hidden = true;
+    el.innerHTML = '';
+    return;
+  }
+  el.hidden = false;
+  el.className = `health-banner ${red ? 'health-banner-red' : 'health-banner-yellow'}`;
+  const title = safeMode
+    ? 'Hub is in safe mode (health emergency) — agents paused, only login and health are served'
+    : red
+      ? `Hub health: ${level} — agent runs may fail`
+      : fallback
+        ? 'Paid LLM provider refused; hub turns running on local Ollama (provider_fallback_active)'
+        : `Hub health: ${level}`;
+  const details = bad.slice(0, 4).map((c) => `${c.name}: ${c.detail}`).join(' · ');
+  el.innerHTML =
+    `<strong>${title}</strong>` +
+    (details ? `<span class="health-banner-detail">${details}</span>` : '') +
+    (fallback && !safeMode ? '<span class="health-banner-detail">Fix the paid provider (top up / new key) to restore normal turns.</span>' : '');
+}
+async function pollHealthBanner() {
+  try {
+    const res = await fetch('/api/health', { cache: 'no-store' });
+    if (!res.ok) return;
+    renderHealthBanner(await res.json());
+  } catch (_err) { /* server down — banner state unchanged */ }
+}
+pollHealthBanner();
+setInterval(pollHealthBanner, 30000);
 
 boot();

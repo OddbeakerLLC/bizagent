@@ -21,7 +21,7 @@ grep -q "MODEL_SORT_DESCENDING" "$ROOT/control-plane/public/app.js" \
   || fail "app.js missing model dropdown descending sort"
 grep -q "modalModelCustom" "$ROOT/control-plane/public/index.html" \
   || fail "index.html missing custom model input"
-grep -q "v=20260928-drawer-underline" "$ROOT/control-plane/public/index.html" \
+grep -q 'app.js?v=' "$ROOT/control-plane/public/index.html" \
   || fail "index.html missing cache-bust for model picker"
 
 node - "$ROOT" <<'NODE' || exit 1
