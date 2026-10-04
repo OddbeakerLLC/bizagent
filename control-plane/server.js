@@ -136,6 +136,7 @@ const {
   rewriteAudioUrl,
 } = require("./lib/tts-proxy");
 const { agentMailStatus, routeOutboxes } = require("./lib/mail");
+const enterpriseClient = require("./lib/enterprise-server-client");
 const { getProfile, setProfile } = require("./lib/profile");
 const { logEvent, logHubTurn, logError, appendLog } = require("./lib/log");
 const {
@@ -1091,6 +1092,88 @@ async function handleApi(config, req, res) {
         ? 400
         : 500;
       return send(res, status, { error: msg });
+    }
+  }
+
+  // --- Enterprise Server connect (silent box; URL + shared token) ---
+  // Spec: docs/2026-10-03-enterprise-server-mvp-spec.md. Remotes are
+  // per-product opt-in only; empty selection valid; Ask Enterprise agent is
+  // provisioned at connect; weekly KS cron is disabled while connected.
+  if (url.pathname === "/api/enterprise/status" && req.method === "GET") {
+    const conn = enterpriseClient.loadConnection(config.hub);
+    const registry = loadRegistry(config.hub);
+    const eligible = enterpriseClient.eligibleProducts(registry);
+    const selected = conn ? conn.selected_products || [] : [];
+    return send(res, 200, {
+      connected: Boolean(conn),
+      url: conn ? conn.url : "",
+      hub_id: conn ? conn.hub_id : "",
+      connected_at: conn ? conn.connected_at : "",
+      inference_url: conn ? conn.inference_url || "" : "",
+      ask_enterprise_slug: enterpriseClient.ASK_ENTERPRISE_SLUG,
+      // Products with a non-empty remote (picker candidates) + selection.
+      products: eligible.map((p) => ({
+        slug: p.slug,
+        name: p.name,
+        projects: p.projects,
+        selected: selected.includes(p.slug),
+      })),
+    });
+  }
+
+  if (url.pathname === "/api/enterprise/connect" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const conn = await enterpriseClient.connect(config.hub, {
+        url: body.url,
+        token: body.token,
+        products: Array.isArray(body.products) ? body.products : [],
+      });
+      didChangeState();
+      return send(res, 200, {
+        ok: true,
+        hub_id: conn.hub_id,
+        inference_url: conn.inference_url,
+        selected_products: conn.selected_products,
+        ask_enterprise: enterpriseClient.ASK_ENTERPRISE_SLUG,
+        weekly_ks: "disabled while connected (enterprise daily job owns compile)",
+      });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "connect failed" });
+    }
+  }
+
+  if (url.pathname === "/api/enterprise/remotes" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const conn = await enterpriseClient.updateRemotes(
+        config.hub,
+        Array.isArray(body.products) ? body.products : [],
+      );
+      return send(res, 200, {
+        ok: true,
+        selected_products: conn.selected_products,
+      });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "remotes update failed" });
+    }
+  }
+
+  if (url.pathname === "/api/enterprise/sync-company" && req.method === "POST") {
+    try {
+      const result = await enterpriseClient.pushCompany(config.hub);
+      return send(res, 200, { ok: true, ...result });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "company sync failed" });
+    }
+  }
+
+  if (url.pathname === "/api/enterprise/disconnect" && req.method === "POST") {
+    try {
+      await enterpriseClient.disconnect(config.hub);
+      return send(res, 200, { ok: true });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "disconnect failed" });
     }
   }
 
