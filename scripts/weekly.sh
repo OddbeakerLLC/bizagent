@@ -27,6 +27,13 @@ if [ "$ENABLED" != "true" ]; then
   exit 0
 fi
 
+# Enterprise lock (spec 2026-10-03, decision 4): while connected to the
+# Enterprise Server, the weekly KS refresh is disabled on this hub.
+if grep -qs '"connected"[[:space:]]*:[[:space:]]*true' "$HUB/.bizagent/enterprise-server.json" 2>/dev/null; then
+  echo "weekly: connected to Enterprise Server — weekly KS refresh disabled"
+  exit 0
+fi
+
 # --- 2. orphan cleanup -----------------------------------------------------
 STACK="$HUB/knowledge-stack"
 if [ ! -d "$STACK" ]; then

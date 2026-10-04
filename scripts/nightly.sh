@@ -213,3 +213,10 @@ PY
     echo "  tip: git remote add origin <private-url>  OR set hub.remote in registry.json"
   fi
 fi
+
+# --- enterprise company sync (no-op when not connected) --------------------
+# While connected to the Enterprise Server, push the company/ tree so the
+# box's daily compile includes this hub's company knowledge (spec §8).
+if [ -x "$HUB/scripts/enterprise-sync.sh" ]; then
+  bash "$HUB/scripts/enterprise-sync.sh" || echo "nightly: enterprise-sync failed (continuing)"
+fi
