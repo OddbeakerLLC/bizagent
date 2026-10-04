@@ -38,6 +38,7 @@ const {
   classifyProviderError,
   formatProviderFailureMessage,
 } = require('./provider-errors');
+const ollamaFallback = require('./ollama-fallback');
 const {
   clearThinking,
   recordThinking,
@@ -288,6 +289,14 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   const classified = classifyProviderError(combined);
   const kind = classified ? classified.kind : 'error';
   if (shouldSkipDuplicateAgentError(hub, slug, exitCode, kind)) return;
+
+  // Hub-only Ollama fallback: paid provider reachable but refused (credits /
+  // auth / model). Background — classifies, checks Ollama, activates the
+  // launch-time override, and tells the operator what to fix. Never for
+  // product agents, never a network outage.
+  try {
+    ollamaFallback.maybeTriggerFallback(hub, { slug, text: combined });
+  } catch (_err) { /* ignore */ }
 
   const errorMsg = formatProviderFailureMessage({
     slug,
@@ -1159,6 +1168,25 @@ function launchHubCold(config, ctx) {
   } = ctx;
   const { hub } = config;
 
+  // Ollama fallback (hub-only): while the flag is active, retry this hub turn
+  // against local Ollama. Launch-time override only — registry.json / cli.json
+  // are never rewritten as the new default.
+  let effectiveModel = hubModel || '';
+  let effectiveCliName = hubCliName || '';
+  const fbOverride = ollamaFallback.hubLaunchOverride(hub);
+  if (fbOverride) {
+    effectiveCliName = fbOverride.provider;
+    effectiveModel = fbOverride.model;
+    try {
+      logEvent(hub, {
+        event: 'hub_ollama_fallback_launch',
+        provider: fbOverride.provider,
+        model: fbOverride.model,
+        conversation_id: conversationId || '',
+      });
+    } catch (_e) { /* ignore */ }
+  }
+
   // Build turn prompt first (creates reserved body file when conversation_id present).
   let promptFile;
   try {
@@ -1195,7 +1223,7 @@ function launchHubCold(config, ctx) {
   // Prefer settings.hub_agent.cliName (via config.hubCliName); empty falls back to .cli / default.
   let cliSettings;
   try {
-    cliSettings = getCliSettings(hub, cliJson, config, hubCliName || '', hubModel || '');
+    cliSettings = getCliSettings(hub, cliJson, config, effectiveCliName, effectiveModel);
   } catch (err) {
     fs.rmSync(lock, { recursive: true, force: true });
     try { fs.unlinkSync(promptFile); } catch (_e) { /* ignore */ }
@@ -1228,7 +1256,7 @@ function launchHubCold(config, ctx) {
     slug: 'hub',
     turn: path.basename(promptFile),
     cmd: cmdPreview,
-    model: hubModel || 'default',
+    model: effectiveModel || 'default',
     cwd: path.relative(hub, runtimeCwd) || runtimeCwd,
     env_file_found: !!envLoad.found,
     env_keys_applied: envLoad.applied || 0,

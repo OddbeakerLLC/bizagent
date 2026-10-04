@@ -46,6 +46,7 @@ const {
   ensureHubRuntimePrompt,
 } = require(path.join(libRoot, 'hub-memory'));
 const { logEvent } = require(path.join(libRoot, 'log'));
+const ollamaFallback = require(path.join(libRoot, 'ollama-fallback'));
 const { postLaunchAck } = require(path.join(libRoot, 'conversations'));
 const {
   onHubCliExit,
@@ -172,8 +173,23 @@ function runTurn() {
     }
 
     let cliSettings;
+    // Ollama fallback (hub-only): launch-time override while the flag is
+    // active — registry.json / cli.json are never rewritten.
+    let effectiveModel = hubModel || '';
+    let effectiveCliName = hubCliName || '';
+    const fbOverride = ollamaFallback.hubLaunchOverride(HUB);
+    if (fbOverride) {
+      effectiveCliName = fbOverride.provider;
+      effectiveModel = fbOverride.model;
+      logEvent(HUB, {
+        event: 'hub_ollama_fallback_launch',
+        provider: fbOverride.provider,
+        model: fbOverride.model,
+        via: 'warm_daemon',
+      });
+    }
     try {
-      cliSettings = getCliSettings(HUB, cliJson, config, hubCliName || '', hubModel || '');
+      cliSettings = getCliSettings(HUB, cliJson, config, effectiveCliName, effectiveModel);
     } catch (err) {
       try { fs.unlinkSync(promptFile); } catch (_e) { /* ignore */ }
       logEvent(HUB, {
@@ -200,7 +216,7 @@ function runTurn() {
       conversation_id: conversationId || '',
       turn: path.basename(promptFile),
       cmd: cmdPreview,
-      model: hubModel || 'default',
+      model: effectiveModel || 'default',
       has_xai_key: !!(process.env.XAI_API_KEY && process.env.XAI_API_KEY.length > 0),
       env_file_found: !!envInfo.found,
       via: 'warm_daemon',
