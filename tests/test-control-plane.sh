@@ -3481,4 +3481,74 @@ grep -q "activeSlugKey" "$SERVER" \
 grep -q "clearDispatchState" "$SERVER" \
   || fail "model-change stop does not release dispatch markers"
 
+# Fleet thinking viewer: drawer link + auth SSE over dispatch-*.log only.
+grep -q 'id="thinkingBtn"' "$ROOT/control-plane/public/index.html" \
+  || fail "drawer missing Thinking... link"
+grep -q '>Thinking...</a>' "$ROOT/control-plane/public/index.html" \
+  || fail "drawer Thinking link label is not exactly Thinking..."
+grep -q "openThinkingWindow" "$ROOT/control-plane/public/app.js" \
+  || fail "drawer does not open thinking window"
+grep -q "window.open" "$ROOT/control-plane/public/app.js" \
+  || fail "thinking window does not use window.open"
+grep -q "/api/fleet-thinking/stream" "$SERVER" \
+  || fail "server missing fleet thinking SSE"
+grep -q "listDispatchLogs" "$SERVER" \
+  || fail "fleet thinking stream does not rescan dispatch logs"
+grep -q "listDispatchLogs" "$ROOT/control-plane/lib/fleet-thinking.js" \
+  || fail "fleet thinking module missing"
+# Must not shell out and must not mix stderr / other logs.
+if grep -q 'viewlog' "$ROOT/control-plane/lib/fleet-thinking.js"; then
+  fail "fleet thinking shells out"
+fi
+if grep -q 'execFile' "$ROOT/control-plane/lib/fleet-thinking.js"; then
+  fail "fleet thinking shells out"
+fi
+if grep -q 'stderr' "$ROOT/control-plane/lib/fleet-thinking.js"; then
+  fail "fleet thinking module reads stderr"
+fi
+if grep -Eq 'structured\.log|nightly\.log|control-plane\.log' "$ROOT/control-plane/lib/fleet-thinking.js"; then
+  fail "fleet thinking module mixes non-thinking logs"
+fi
+node - "$ROOT" <<'NODE' || fail "fleet thinking unit checks failed"
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const {
+  listDispatchLogs,
+  readSince,
+  resolveDispatchLog,
+  tailOffset,
+} = require(path.join(process.argv[2], 'control-plane/lib/fleet-thinking'));
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-think-'));
+const logs = path.join(hub, 'logs');
+fs.mkdirSync(logs);
+fs.writeFileSync(path.join(logs, 'dispatch-hub.log'), 'hub-think\n');
+fs.writeFileSync(path.join(logs, 'dispatch-bizagent.log'), '');
+fs.writeFileSync(path.join(logs, 'dispatch-boxy.stderr'), 'nope\n');
+fs.writeFileSync(path.join(logs, 'structured.log'), '{"event":"x"}\n');
+fs.writeFileSync(path.join(logs, 'nightly.log'), 'night\n');
+fs.writeFileSync(path.join(logs, 'control-plane.log'), 'cp\n');
+fs.writeFileSync(path.join(logs, 'not-dispatch.log'), 'nope\n');
+const listed = listDispatchLogs(hub).map((f) => f.name);
+if (listed.join(',') !== 'dispatch-hub.log') {
+  console.error('expected only non-empty dispatch-*.log', listed);
+  process.exit(1);
+}
+if (resolveDispatchLog(hub, 'dispatch-hub.stderr')) process.exit(2);
+if (resolveDispatchLog(hub, '../dispatch-hub.log')) process.exit(3);
+if (resolveDispatchLog(hub, 'structured.log')) process.exit(4);
+const file = path.join(logs, 'dispatch-hub.log');
+const first = readSince(file, 0);
+if (first.text !== 'hub-think\n' || first.offset !== Buffer.byteLength('hub-think\n')) process.exit(5);
+fs.writeFileSync(file, 'rot\n');
+const rotated = readSince(file, first.offset);
+if (!rotated.rotated || rotated.text !== 'rot\n' || rotated.offset !== 4) {
+  console.error('rotation', rotated);
+  process.exit(6);
+}
+if (tailOffset(10, 48) !== 0 || tailOffset(100, 48) !== 52) process.exit(7);
+const burst = readSince(file, 0, 2);
+if (burst.text !== 'ro' || burst.offset !== 2) process.exit(8);
+NODE
+
 echo "  ok: control-plane"
