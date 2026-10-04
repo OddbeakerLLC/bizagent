@@ -355,6 +355,14 @@ if [[ "$ENABLED" != "true" ]]; then
   exit 0
 fi
 
+# Enterprise lock (spec 2026-10-03, decision 4): while this hub is connected
+# to the Enterprise Server, the enterprise daily job owns the company KS
+# compile — the weekly refresh must not run here.
+if grep -qs '"connected"[[:space:]]*:[[:space:]]*true' "$HUB/.bizagent/enterprise-server.json" 2>/dev/null; then
+  log "connected to Enterprise Server — weekly KS refresh disabled (enterprise daily job owns compile)"
+  exit 0
+fi
+
 # Run the existing weekly.sh for orphan cleanup
 log "Running weekly.sh for orphan cleanup..."
 "$HUB/scripts/weekly.sh" 2>&1 || err "weekly.sh had errors (continuing)"
