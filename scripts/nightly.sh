@@ -82,6 +82,17 @@ else
   echo "nightly: defer.sh missing — skip reconcile"
 fi
 
+# --- 0c. refresh journal search index --------------------------------------
+# Keyword FTS over hub + product journals (docs/2026-10-05-journal-search-mvp-spec.md).
+# Incremental + idempotent; stale-on-query also rebuilds before searches.
+if [ -x "$HUB/scripts/journal-index.sh" ]; then
+  echo "nightly: refreshing journal search index..."
+  bash "$HUB/scripts/journal-index.sh" --hub "$HUB" \
+    || echo "nightly: journal index rebuild failed (continuing)"
+else
+  echo "nightly: journal-index.sh missing — skip"
+fi
+
 # --- 1. route -------------------------------------------------------------
 "$HUB/scripts/router.sh"
 

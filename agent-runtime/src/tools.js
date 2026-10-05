@@ -196,6 +196,40 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'journal_search',
+      description:
+        'Search dated journal files (FTS keyword search, no embeddings). Product agents: your product journals only. Hub: all products (optional product_slug filter). Use for historical recall ("what did we decide/learn about X?") instead of grepping; then read_file a specific hit if needed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Keyword query (plain text works)',
+          },
+          product_slug: {
+            type: 'string',
+            description: 'Limit to one registry product slug (hub scope only; ignored in product scope)',
+          },
+          since: {
+            type: 'string',
+            description: 'Inclusive YYYY-MM-DD lower bound on journal date',
+          },
+          until: {
+            type: 'string',
+            description: 'Inclusive YYYY-MM-DD upper bound on journal date',
+          },
+          limit: {
+            type: 'number',
+            description: 'Max hits (default 8, clamp 1-20)',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'hire_helper',
       description:
         'Hire a cheap in-turn helper for bounded read-only work (research, search, summarize, test-extract). Returns text; you review and act. Helpers cannot write, mail, or hire. If the pool is full or hire fails, do the work yourself.',
@@ -589,6 +623,11 @@ async function executeToolCall(toolCall) {
     case 'fetch_url':
       result = await fetchUrlTool(args.url);
       break;
+    case 'journal_search': {
+      const { journalSearchTool } = require('./journal-search');
+      result = await journalSearchTool(args);
+      break;
+    }
     case 'hire_helper': {
       const { hireHelper } = require('./helpers');
       result = await hireHelper(args);
