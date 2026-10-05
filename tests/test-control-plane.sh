@@ -3480,75 +3480,150 @@ grep -q "activeSlugKey" "$SERVER" \
   || fail "tick does not push board on live-slug change"
 grep -q "clearDispatchState" "$SERVER" \
   || fail "model-change stop does not release dispatch markers"
+grep -q "syncProductsRail" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing desktop products-rail open sync"
+grep -q "::details-content" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing desktop details-content override for products rail"
 
-# Fleet thinking viewer: drawer link + auth SSE over dispatch-*.log only.
-grep -q 'id="thinkingBtn"' "$ROOT/control-plane/public/index.html" \
+# Fleet thinking viewer: drawer link + dispatch-*.log SSE (stdout only).
+grep -q "/api/logs/stream" "$SERVER" \
+  || fail "server missing /api/logs/stream thinking-logs endpoint"
+grep -q "streamThinkingLogs" "$SERVER" \
+  || fail "server does not wire streamThinkingLogs"
+grep -q "thinkingLogsBtn" "$ROOT/control-plane/public/index.html" \
   || fail "drawer missing Thinking... link"
-grep -q '>Thinking...</a>' "$ROOT/control-plane/public/index.html" \
-  || fail "drawer Thinking link label is not exactly Thinking..."
-grep -q "openThinkingWindow" "$ROOT/control-plane/public/app.js" \
-  || fail "drawer does not open thinking window"
-grep -q "window.open" "$ROOT/control-plane/public/app.js" \
-  || fail "thinking window does not use window.open"
-grep -q "/api/fleet-thinking/stream" "$SERVER" \
-  || fail "server missing fleet thinking SSE"
-grep -q "listDispatchLogs" "$SERVER" \
-  || fail "fleet thinking stream does not rescan dispatch logs"
-grep -q "listDispatchLogs" "$ROOT/control-plane/lib/fleet-thinking.js" \
-  || fail "fleet thinking module missing"
-# Must not shell out and must not mix stderr / other logs.
-if grep -q 'viewlog' "$ROOT/control-plane/lib/fleet-thinking.js"; then
-  fail "fleet thinking shells out"
-fi
-if grep -q 'execFile' "$ROOT/control-plane/lib/fleet-thinking.js"; then
-  fail "fleet thinking shells out"
-fi
-if grep -q 'stderr' "$ROOT/control-plane/lib/fleet-thinking.js"; then
-  fail "fleet thinking module reads stderr"
-fi
-if grep -Eq 'structured\.log|nightly\.log|control-plane\.log' "$ROOT/control-plane/lib/fleet-thinking.js"; then
-  fail "fleet thinking module mixes non-thinking logs"
-fi
-node - "$ROOT" <<'NODE' || fail "fleet thinking unit checks failed"
+grep -q "Thinking..." "$ROOT/control-plane/public/index.html" \
+  || fail "drawer Thinking... label missing"
+grep -q "openThinkingLogsTab" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing named Thinking logs tab open"
+[ -f "$ROOT/control-plane/public/logs.html" ] || fail "logs.html missing"
+[ -f "$ROOT/control-plane/public/logs.js" ] || fail "logs.js missing"
+[ -f "$ROOT/control-plane/lib/thinking-logs.js" ] || fail "thinking-logs module missing"
+grep -q "THINKING_LOG_RE" "$ROOT/control-plane/lib/thinking-logs.js" \
+  || fail "thinking-logs missing THINKING_LOG_RE"
+! grep -E "name: '\\*\\.stderr'|structured\\.log" "$ROOT/control-plane/lib/thinking-logs.js" \
+  || fail "thinking-logs should not select stderr or structured.log"
+grep -q "logs-pane" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing thinking logs pane"
+grep -q "logs-chrome" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing sticky thinking logs chrome"
+grep -q '—— ${label} ——' "$ROOT/control-plane/public/logs.js" \
+  || fail "logs UI missing speaker header for All view"
+grep -q "lastSpeaker" "$ROOT/control-plane/public/logs.js" \
+  || fail "logs UI missing speaker-change tracking"
+
+if ! node - "$ROOT" <<'NODE'
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
-  listDispatchLogs,
-  readSince,
-  resolveDispatchLog,
-  tailOffset,
-} = require(path.join(process.argv[2], 'control-plane/lib/fleet-thinking'));
-const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-think-'));
+  ALL_TAIL_LINES,
+  CATCHUP_BYTES,
+  filesMatchingFilter,
+  initialOffset,
+  listThinkingLogFiles,
+  normalizeFilter,
+  parseThinkingLogName,
+  readChunk,
+  startOffsetForFilter,
+  tailLineOffset,
+} = require(path.join(process.argv[2], 'control-plane/lib/thinking-logs'));
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'ba-tlogs-'));
 const logs = path.join(hub, 'logs');
 fs.mkdirSync(logs);
-fs.writeFileSync(path.join(logs, 'dispatch-hub.log'), 'hub-think\n');
-fs.writeFileSync(path.join(logs, 'dispatch-bizagent.log'), '');
-fs.writeFileSync(path.join(logs, 'dispatch-boxy.stderr'), 'nope\n');
-fs.writeFileSync(path.join(logs, 'structured.log'), '{"event":"x"}\n');
-fs.writeFileSync(path.join(logs, 'nightly.log'), 'night\n');
+fs.writeFileSync(path.join(logs, 'dispatch-hub.log'), 'hub thinks\n');
+fs.writeFileSync(path.join(logs, 'dispatch-alpha.log'), 'alpha thinks\n');
+fs.writeFileSync(path.join(logs, 'dispatch-alpha.stderr'), 'alpha err\n');
+fs.writeFileSync(path.join(logs, 'structured.log'), '{"no":true}\n');
 fs.writeFileSync(path.join(logs, 'control-plane.log'), 'cp\n');
-fs.writeFileSync(path.join(logs, 'not-dispatch.log'), 'nope\n');
-const listed = listDispatchLogs(hub).map((f) => f.name);
-if (listed.join(',') !== 'dispatch-hub.log') {
-  console.error('expected only non-empty dispatch-*.log', listed);
+fs.writeFileSync(path.join(logs, 'nightly.log'), 'cron\n');
+fs.mkdirSync(path.join(logs, 'dispatch-sneaky.log')); // not a file
+
+const listed = listThinkingLogFiles(hub);
+const names = listed.map((f) => f.name).sort();
+if (names.join(',') !== 'dispatch-alpha.log,dispatch-hub.log') {
+  console.error('listed wrong', names);
   process.exit(1);
 }
-if (resolveDispatchLog(hub, 'dispatch-hub.stderr')) process.exit(2);
-if (resolveDispatchLog(hub, '../dispatch-hub.log')) process.exit(3);
-if (resolveDispatchLog(hub, 'structured.log')) process.exit(4);
-const file = path.join(logs, 'dispatch-hub.log');
-const first = readSince(file, 0);
-if (first.text !== 'hub-think\n' || first.offset !== Buffer.byteLength('hub-think\n')) process.exit(5);
-fs.writeFileSync(file, 'rot\n');
-const rotated = readSince(file, first.offset);
-if (!rotated.rotated || rotated.text !== 'rot\n' || rotated.offset !== 4) {
-  console.error('rotation', rotated);
+if (listed.some((f) => f.name.endsWith('.stderr') || f.name === 'structured.log')) {
+  console.error('non-thinking files leaked', names);
+  process.exit(2);
+}
+if (normalizeFilter('../etc/passwd') !== null) {
+  console.error('pathy filter accepted');
+  process.exit(3);
+}
+if (normalizeFilter('all') !== 'all' || normalizeFilter('hub') !== 'hub') {
+  console.error('normalizeFilter failed');
+  process.exit(4);
+}
+const hubOnly = filesMatchingFilter(listed, 'hub');
+if (hubOnly.length !== 1 || hubOnly[0].slug !== 'hub') {
+  console.error('hub filter failed', hubOnly);
+  process.exit(5);
+}
+if (parseThinkingLogName('dispatch-foo.stderr') || parseThinkingLogName('structured.log')) {
+  console.error('parse should reject non-thinking names');
   process.exit(6);
 }
-if (tailOffset(10, 48) !== 0 || tailOffset(100, 48) !== 52) process.exit(7);
-const burst = readSince(file, 0, 2);
-if (burst.text !== 'ro' || burst.offset !== 2) process.exit(8);
+const big = Buffer.alloc(40 * 1024, 'x');
+const bigPath = path.join(logs, 'dispatch-big.log');
+fs.writeFileSync(bigPath, big);
+const off = initialOffset(big.length);
+if (off !== big.length - 32 * 1024) {
+  console.error('initialOffset wrong', off);
+  process.exit(7);
+}
+const chunk = readChunk(bigPath, off, 64 * 1024);
+if (!chunk.text || chunk.text.length !== 32 * 1024) {
+  console.error('readChunk tail wrong', chunk.text && chunk.text.length);
+  process.exit(8);
+}
+const rotated = readChunk(path.join(logs, 'dispatch-hub.log'), 99999, 1024);
+if (!rotated.rotated || rotated.offset !== rotated.text.length) {
+  console.error('rotation reset failed', rotated);
+  process.exit(9);
+}
+const linesPath = path.join(logs, 'dispatch-lines.log');
+const lines = Array.from({ length: 25 }, (_, i) => `line-${i + 1}`).join('\n') + '\n';
+fs.writeFileSync(linesPath, lines);
+const tailOff = tailLineOffset(linesPath, 20);
+const tailText = fs.readFileSync(linesPath).slice(tailOff).toString('utf8');
+const tailCount = tailText.replace(/\n$/, '').split('\n').length;
+if (tailCount !== 20 || !tailText.startsWith('line-6\n')) {
+  console.error('tailLineOffset last-20 failed', tailCount, JSON.stringify(tailText.slice(0, 40)));
+  process.exit(10);
+}
+if (ALL_TAIL_LINES !== 20) {
+  console.error('ALL_TAIL_LINES should be 20', ALL_TAIL_LINES);
+  process.exit(11);
+}
+if (startOffsetForFilter('hub', linesPath, fs.statSync(linesPath).size) !== 0) {
+  console.error('single-agent small log must start at byte 0');
+  process.exit(12);
+}
+if (startOffsetForFilter('hub', linesPath, 0) !== tailOff) {
+  console.error('single-agent unknown size must tail last-20, not byte 0');
+  process.exit(16);
+}
+if (startOffsetForFilter('all', linesPath, 0) !== tailOff) {
+  console.error('all filter must start at last-20 offset');
+  process.exit(13);
+}
+const singleOff = startOffsetForFilter('hub', bigPath, big.length);
+if (singleOff !== initialOffset(big.length)) {
+  console.error('single-agent large log must start at last INITIAL_BYTES', singleOff);
+  process.exit(14);
+}
+if (CATCHUP_BYTES > 512 * 1024) {
+  console.error('CATCHUP_BYTES too large for the thinking page', CATCHUP_BYTES);
+  process.exit(15);
+}
 NODE
+then
+  fail "thinking-logs unit checks failed"
+fi
+
 
 echo "  ok: control-plane"

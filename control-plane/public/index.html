@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>BizAgent</title>
-  <link rel="stylesheet" href="/styles.css?v=20260930-ol-numbers">
+  <link rel="stylesheet" href="/styles.css?v=20261002-thinking-tail">
 </head>
 <body>
   <div id="healthBanner" class="health-banner" hidden></div>
@@ -36,7 +36,7 @@
         <div class="auth-controls nav-drawer-controls">
           <span id="authStatus" class="auth-status">Checking session...</span>
           <a id="libraryBtn" href="/library.html" class="nav-drawer-link" hidden title="Browse plans, specs, and other docs written for you">Library</a>
-          <a id="thinkingBtn" href="/thinking.html" class="nav-drawer-link" hidden title="Live agent thinking (stdout only)">Thinking...</a>
+          <a id="thinkingLogsBtn" href="/logs.html" class="nav-drawer-link" hidden title="Live-tail what agents are thinking (dispatch logs)">Thinking...</a>
           <a id="companyFilesBtn" href="#company" class="nav-drawer-link" hidden title="Upload files to company/ for the Knowledge Stack">Company</a>
           <a id="ttsToggle" href="#tts" class="nav-drawer-link tts-toggle" hidden title="Text-to-speech for hub replies (off)" role="switch" aria-checked="false" aria-pressed="false"><span class="nav-drawer-link-label">TTS</span></a>
           <a id="editDisplayName" href="#name" class="nav-drawer-link" hidden title="Change your display name">Name</a>
@@ -140,6 +140,6 @@
 
   <script src="/enterprise/enterprise-panel.js" onerror="/* enterprise optional */"></script>
   <script src="/markdown.js?v=20260930-ol-numbers"></script>
-  <script src="/app.js?v=20261004-health"></script>
+  <script src="/app.js?v=20261005-thinking-reconcile"></script>
 </body>
 </html>
