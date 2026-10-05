@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#172033">
   <title>BizAgent Thinking</title>
-  <link rel="stylesheet" href="/styles.css?v=20261001-thinking-logs-force">
+  <link rel="stylesheet" href="/styles.css?v=20261002-thinking-tail">
 </head>
 <body class="logs-page">
   <main class="logs-app" id="logsApp">
@@ -22,7 +23,10 @@
           <button id="logsClear" type="button" class="btn-secondary">Clear</button>
         </div>
       </header>
-      <div id="logsFilters" class="logs-filters" role="tablist" aria-label="Thinking log filters"></div>
+      <div class="logs-filters">
+        <label class="logs-filter-label" for="logsFilterSelect">Agent</label>
+        <select id="logsFilterSelect" aria-label="Thinking log filter"></select>
+      </div>
     </div>
 
     <div id="logsAuthGate" class="logs-auth-gate" hidden>
@@ -32,12 +36,12 @@
 
     <div class="logs-page-body" id="logsMain">
       <p class="company-help logs-help">
-        One agent: full log, live. All: last 20 lines each, then new output with a speaker header when the writer changes.
+        Live tail only (last 32 KB per agent, or last 20 lines in All) so large dispatch logs cannot freeze the tab.
       </p>
-      <pre id="logsPane" class="logs-pane" aria-live="polite"></pre>
+      <pre id="logsPane" class="logs-pane"></pre>
       <p id="logsStatus" class="modal-status auth-status" hidden></p>
     </div>
   </main>
-  <script src="/logs.js?v=20261001-thinking-logs-force"></script>
+  <script src="/logs.js?v=20261002-thinking-tail"></script>
 </body>
 </html>
