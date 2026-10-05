@@ -6,6 +6,7 @@ const FILTER_ALL = 'all';
 let logsSource = null;
 let logsFilter = FILTER_ALL;
 let logsFiles = [];
+let logsAgents = [];
 let logsFollow = true;
 let logsUserPaused = false;
 let lastSpeaker = '';
@@ -55,18 +56,56 @@ function scrollLogsToBottom() {
 }
 
 function maybeAutoscroll() {
-  scrollLogsToBottom();
+  if (!logsFollow || logsUserPaused) return;
+  const pane = paneEl();
+  if (!pane) return;
+  pane.scrollTop = pane.scrollHeight;
+}
+
+function agentRecord(slug) {
+  return (logsAgents || []).find((a) => a && a.slug === slug) || null;
 }
 
 function speakerLabel(slug, name) {
-  if (slug === 'hub') return 'Hub';
+  const rec = agentRecord(slug);
+  if (rec) {
+    const agentName = rec.agentName || rec.agent_name || rec.name || slug;
+    const productName = rec.name || (slug === 'hub' ? 'BizAgent' : slug);
+    if (agentName && productName) return `${agentName}: ${productName}`;
+    return agentName || productName || slug;
+  }
+  if (slug === 'hub') return 'Agent PTL: BizAgent';
   return slug || name || 'agent';
+}
+
+const MAX_PANE_CHARS = 256 * 1024;
+
+function trimPane() {
+  const pane = paneEl();
+  if (!pane) return;
+  let extra = pane.textContent.length - MAX_PANE_CHARS;
+  while (extra > 0 && pane.firstChild) {
+    const first = pane.firstChild;
+    const firstLen = (first.textContent || '').length;
+    if (firstLen <= extra) {
+      pane.removeChild(first);
+      extra -= firstLen;
+      continue;
+    }
+    if (first.nodeType === Node.TEXT_NODE) {
+      first.textContent = first.textContent.slice(extra);
+    } else {
+      pane.removeChild(first);
+    }
+    extra = 0;
+  }
 }
 
 function appendText(text) {
   const pane = paneEl();
   if (!pane || !text) return;
   pane.appendChild(document.createTextNode(text));
+  trimPane();
   maybeAutoscroll();
 }
 
@@ -76,7 +115,7 @@ function appendSpeakerHeader(slug, name) {
   const span = document.createElement('span');
   span.className = 'logs-header';
   const label = speakerLabel(slug, name);
-  span.textContent = `\n—— This is ${label} ——\n`;
+  span.textContent = `\n—— ${label} ——\n`;
   pane.appendChild(span);
   maybeAutoscroll();
 }
@@ -103,8 +142,7 @@ function closeLogsStream() {
 
 function fileLabel(file) {
   if (!file) return '';
-  if (file.slug === 'hub') return 'Hub';
-  return file.slug || file.name;
+  return speakerLabel(file.slug, file.name);
 }
 
 function uniqueSlugs(files) {
@@ -125,25 +163,26 @@ function uniqueSlugs(files) {
 }
 
 function renderFilters() {
-  const root = document.getElementById('logsFilters');
-  if (!root) return;
-  root.textContent = '';
-  const chips = [{ id: FILTER_ALL, label: 'All' }].concat(
+  const sel = document.getElementById('logsFilterSelect');
+  if (!sel) return;
+  const options = [{ id: FILTER_ALL, label: 'All' }].concat(
     uniqueSlugs(logsFiles).map((f) => ({ id: f.slug, label: fileLabel(f) })),
   );
-  if (logsFilter !== FILTER_ALL && !chips.some((c) => c.id === logsFilter)) {
-    chips.push({ id: logsFilter, label: logsFilter });
+  if (logsFilter !== FILTER_ALL && !options.some((c) => c.id === logsFilter)) {
+    options.push({ id: logsFilter, label: speakerLabel(logsFilter, logsFilter) });
   }
-  for (const chip of chips) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'logs-chip' + (chip.id === logsFilter ? ' active' : '');
-    btn.textContent = chip.label;
-    btn.setAttribute('role', 'tab');
-    btn.setAttribute('aria-selected', chip.id === logsFilter ? 'true' : 'false');
-    btn.addEventListener('click', () => setLogsFilter(chip.id));
-    root.appendChild(btn);
+  const prev = sel.value;
+  sel.textContent = '';
+  for (const item of options) {
+    const opt = document.createElement('option');
+    opt.value = item.id;
+    opt.textContent = item.label;
+    sel.appendChild(opt);
   }
+  const next = options.some((c) => c.id === logsFilter)
+    ? logsFilter
+    : (options.some((c) => c.id === prev) ? prev : FILTER_ALL);
+  sel.value = next;
 }
 
 function setLogsFilter(next) {
@@ -189,6 +228,11 @@ function openLogsStream() {
 }
 
 function bindLogsPage() {
+  const sel = document.getElementById('logsFilterSelect');
+  if (sel && !sel.dataset.bound) {
+    sel.dataset.bound = '1';
+    sel.addEventListener('change', () => setLogsFilter(sel.value));
+  }
   const follow = document.getElementById('logsFollow');
   if (follow) {
     follow.checked = true;
@@ -232,6 +276,9 @@ async function boot() {
       showAuthGate(true);
       return;
     }
+    let state = null;
+    try { state = await res.json(); } catch (_err) { state = null; }
+    logsAgents = Array.isArray(state && state.agents) ? state.agents : [];
     showAuthGate(false);
     bindLogsPage();
   } catch (_err) {

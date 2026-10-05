@@ -3507,7 +3507,7 @@ grep -q "logs-pane" "$ROOT/control-plane/public/styles.css" \
   || fail "styles missing thinking logs pane"
 grep -q "logs-chrome" "$ROOT/control-plane/public/styles.css" \
   || fail "styles missing sticky thinking logs chrome"
-grep -q "This is" "$ROOT/control-plane/public/logs.js" \
+grep -q '—— ${label} ——' "$ROOT/control-plane/public/logs.js" \
   || fail "logs UI missing speaker header for All view"
 grep -q "lastSpeaker" "$ROOT/control-plane/public/logs.js" \
   || fail "logs UI missing speaker-change tracking"
@@ -3518,6 +3518,7 @@ const os = require('os');
 const path = require('path');
 const {
   ALL_TAIL_LINES,
+  CATCHUP_BYTES,
   filesMatchingFilter,
   initialOffset,
   listThinkingLogFiles,
@@ -3598,13 +3599,26 @@ if (ALL_TAIL_LINES !== 20) {
   console.error('ALL_TAIL_LINES should be 20', ALL_TAIL_LINES);
   process.exit(11);
 }
-if (startOffsetForFilter('hub', linesPath, 0) !== 0) {
-  console.error('single-agent filter must start at byte 0');
+if (startOffsetForFilter('hub', linesPath, fs.statSync(linesPath).size) !== 0) {
+  console.error('single-agent small log must start at byte 0');
   process.exit(12);
+}
+if (startOffsetForFilter('hub', linesPath, 0) !== tailOff) {
+  console.error('single-agent unknown size must tail last-20, not byte 0');
+  process.exit(16);
 }
 if (startOffsetForFilter('all', linesPath, 0) !== tailOff) {
   console.error('all filter must start at last-20 offset');
   process.exit(13);
+}
+const singleOff = startOffsetForFilter('hub', bigPath, big.length);
+if (singleOff !== initialOffset(big.length)) {
+  console.error('single-agent large log must start at last INITIAL_BYTES', singleOff);
+  process.exit(14);
+}
+if (CATCHUP_BYTES > 512 * 1024) {
+  console.error('CATCHUP_BYTES too large for the thinking page', CATCHUP_BYTES);
+  process.exit(15);
 }
 NODE
 then

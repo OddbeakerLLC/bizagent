@@ -11,7 +11,8 @@ const path = require("path");
 const THINKING_LOG_RE = /^dispatch-([A-Za-z0-9._-]+)\.log$/;
 const INITIAL_BYTES = 32 * 1024;
 const MAX_BURST_BYTES = 64 * 1024;
-const CATCHUP_BYTES = 8 * 1024 * 1024;
+/** Per-tick catch-up cap. Must stay small — an 8 MiB dump freezes the thinking page. */
+const CATCHUP_BYTES = 256 * 1024;
 const ALL_TAIL_LINES = 20;
 const TAIL_WINDOW_BYTES = 64 * 1024;
 const POLL_MS = 500;
@@ -148,9 +149,12 @@ function tailLineOffset(filePath, maxLines) {
   return st.size - window;
 }
 
-function startOffsetForFilter(filter, filePath, _size) {
+function startOffsetForFilter(filter, filePath, size) {
   if (filter === "all") return tailLineOffset(filePath, ALL_TAIL_LINES);
-  return 0;
+  const n = Number(size);
+  if (Number.isFinite(n) && n > 0) return initialOffset(n);
+  // Unknown size: last N lines, never byte 0 of a multi-megabyte dispatch log.
+  return tailLineOffset(filePath, ALL_TAIL_LINES);
 }
 
 /**

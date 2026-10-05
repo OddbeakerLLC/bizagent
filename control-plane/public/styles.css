@@ -381,28 +381,28 @@ body.logs-page {
 }
 .logs-filters {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
   padding: 8px 16px 10px;
+  min-width: 0;
 }
-.logs-chip {
-  min-height: 32px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  border: 1px solid #334155;
-  background: #1e293b;
+.logs-filter-label {
+  flex: 0 0 auto;
+  font-size: 13px;
   color: #cbd5e1;
+  white-space: nowrap;
+}
+.logs-filters select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  background: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  border-radius: 6px;
   font-size: 13px;
   font-weight: 600;
-}
-.logs-chip.active,
-.logs-chip[aria-selected="true"] {
-  background: #1d4ed8;
-  border-color: #60a5fa;
-  color: #ffffff;
-}
-.logs-chip:hover {
-  border-color: #93c5fd;
+  padding: 6px 10px;
 }
 .logs-pane {
   flex: 1;
