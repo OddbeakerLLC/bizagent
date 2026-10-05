@@ -148,12 +148,7 @@ const {
   getThinking,
   readThinking,
 } = require("./lib/thinking");
-const {
-  listDispatchLogs,
-  readSince,
-  resolveDispatchLog,
-  tailOffset,
-} = require("./lib/fleet-thinking");
+const { streamThinkingLogs } = require("./lib/thinking-logs");
 const { renderPlantUml } = require("./lib/plantuml");
 
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -829,75 +824,6 @@ async function handleApi(config, req, res) {
     return null; // keep open
   }
 
-  // --- Fleet thinking viewer (all dispatch-*.log stdout; not stderr/other logs) ---
-  if (url.pathname === "/api/fleet-thinking/stream" && req.method === "GET") {
-    const agentFilter = (url.searchParams.get("agent") || "").trim();
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    });
-    const sendEvent = (obj) => {
-      try { res.write(`data: ${JSON.stringify(obj)}\\n\\n`); } catch (_err) { /* client gone */ }
-    };
-    if (agentFilter && agentFilter !== "all" && agentFilter !== "hub" && !/^[A-Za-z0-9._-]+$/.test(agentFilter)) {
-      sendEvent({ error: "invalid agent filter" });
-      try { res.end(); } catch (_err) { /* ignore */ }
-      return null;
-    }
-    // name -> { offset, headed }
-    const cursors = new Map();
-    const scan = () => {
-      const files = listDispatchLogs(config.hub).filter((f) => {
-        if (!agentFilter || agentFilter === "all") return true;
-        return f.slug === agentFilter;
-      });
-      const live = new Set(files.map((f) => f.name));
-      for (const name of cursors.keys()) {
-        if (!live.has(name)) cursors.delete(name);
-      }
-      const chunks = [];
-      for (const f of files) {
-        if (!resolveDispatchLog(config.hub, f.name)) continue;
-        let cur = cursors.get(f.name);
-        if (!cur) {
-          cur = { offset: tailOffset(f.size), headed: false };
-          cursors.set(f.name, cur);
-        }
-        const got = readSince(f.file, cur.offset);
-        cur.offset = got.offset;
-        if (got.rotated) cur.headed = false;
-        if (!got.text) continue;
-        // Header once per file appearance (and again after rotation), not every burst.
-        const header = cur.headed ? "" : `==> ${f.name} <==\\n`;
-        cur.headed = true;
-        chunks.push(`${header}${got.text}`);
-      }
-      return { files, text: chunks.join("") };
-    };
-    const first = scan();
-    sendEvent({
-      hello: true,
-      agents: listDispatchLogs(config.hub).map((f) => f.slug),
-      text: first.text,
-    });
-    let lastAgents = "";
-    const iv = setInterval(() => {
-      const next = scan();
-      const agents = listDispatchLogs(config.hub).map((f) => f.slug);
-      const agentKey = agents.join("\\n");
-      if (next.text) {
-        lastAgents = agentKey;
-        sendEvent({ text: next.text, agents });
-      } else if (agentKey !== lastAgents) {
-        lastAgents = agentKey;
-        sendEvent({ agents });
-      }
-    }, 700);
-    req.on("close", () => clearInterval(iv));
-    return null;
-  }
-
   // --- Live "thinking" log (streams an in-flight turn's dispatch stdout) ---
   if (url.pathname === "/api/thinking/stream" && req.method === "GET") {
     const convId = (url.searchParams.get("conv") || "").trim();
@@ -1005,6 +931,10 @@ async function handleApi(config, req, res) {
     return send(res, 200, { ok: true, killed, slug: slug || null });
   }
 
+  // --- Fleet thinking logs (dispatch-*.log only; live-tail like viewlog all, stdout) ---
+  if (url.pathname === "/api/logs/stream" && req.method === "GET") {
+    return streamThinkingLogs(config.hub, req, res, url.searchParams.get("filter"));
+  }
 
   // --- Hard-stop a specific agent turn (click running status light) ---
   const agentStopMatch = url.pathname.match(/^\/api\/agent\/([^/]+)\/stop$/);

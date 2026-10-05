@@ -106,8 +106,8 @@ function setAuthenticated(isAuthenticated, message) {
   if (companyBtn) companyBtn.hidden = !isAuthenticated;
   const libraryBtn = document.getElementById('libraryBtn');
   if (libraryBtn) libraryBtn.hidden = !isAuthenticated;
-  const thinkingBtn = document.getElementById('thinkingBtn');
-  if (thinkingBtn) thinkingBtn.hidden = !isAuthenticated;
+  const thinkingLogsBtn = document.getElementById('thinkingLogsBtn');
+  if (thinkingLogsBtn) thinkingLogsBtn.hidden = !isAuthenticated;
   const ttsBtn = document.getElementById('ttsToggle');
   if (ttsBtn) ttsBtn.hidden = !isAuthenticated;
   if (!isAuthenticated) {
@@ -2588,46 +2588,7 @@ async function boot() {
   }
 }
 
-// --- Thinking (named window; fleet agent stdout only) ---
-const THINKING_WINDOW_NAME = 'bizagent-thinking';
 
-function openThinkingWindow() {
-  const url = '/thinking.html';
-  try {
-    const w = window.open(url, THINKING_WINDOW_NAME);
-    if (w) {
-      try { w.focus(); } catch (_err) { /* ignore */ }
-      return w;
-    }
-  } catch (_err) {
-    /* popup blocked — fall through to a new tab, then this tab */
-  }
-  try {
-    const a = document.createElement('a');
-    a.href = url;
-    a.target = '_blank';
-    a.rel = 'noopener';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    return null;
-  } catch (_err2) {
-    /* fall through */
-  }
-  if (typeof location !== 'undefined') location.assign(url);
-  return null;
-}
-
-function bindThinkingDrawer() {
-  const openBtn = document.getElementById('thinkingBtn');
-  if (openBtn && openBtn.dataset.bound !== '1') {
-    openBtn.dataset.bound = '1';
-    openBtn.addEventListener('click', (event) => {
-      if (event && typeof event.preventDefault === 'function') event.preventDefault();
-      openThinkingWindow();
-    });
-  }
-}
 
 // --- Library (named browser tab; full-page repo accordion) ---
 const LIBRARY_WINDOW_NAME = 'bizagent-library';
@@ -2673,6 +2634,35 @@ function bindLibraryPage() {
     };
     window.addEventListener('hashchange', maybeOpenFromHash);
     maybeOpenFromHash();
+  }
+}
+
+// --- Thinking logs (named browser tab; live-tail dispatch-*.log) ---
+const THINKING_LOGS_WINDOW_NAME = 'bizagent-thinking';
+
+function openThinkingLogsTab() {
+  const url = '/logs.html';
+  try {
+    const w = window.open(url, THINKING_LOGS_WINDOW_NAME);
+    if (w) {
+      try { w.focus(); } catch (_err) { /* ignore */ }
+      return w;
+    }
+  } catch (_err) {
+    /* popup blocked — fall through */
+  }
+  if (typeof location !== 'undefined') location.assign(url);
+  return null;
+}
+
+function bindThinkingLogsPage() {
+  const openBtn = document.getElementById('thinkingLogsBtn');
+  if (openBtn && openBtn.dataset.bound !== '1') {
+    openBtn.dataset.bound = '1';
+    openBtn.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      openThinkingLogsTab();
+    });
   }
 }
 
@@ -2957,7 +2947,7 @@ document.getElementById('logout').addEventListener('click', async (event) => {
 });
 bindCompanyModal();
 bindLibraryPage();
-bindThinkingDrawer();
+bindThinkingLogsPage();
 bindNavDrawer();
 bindTtsToggle();
 bindComposerAttachments();
