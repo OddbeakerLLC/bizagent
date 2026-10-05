@@ -17,6 +17,8 @@ Before any project change or exploratory file listing/search:
 
 Skip deep project reads only for pure status/ack work fully answered by the inbox message.
 
+**Historical recall:** for "what did we decide / learn / try about X?" questions, call the `journal_search` tool before grepping the tree. It returns 5–10 dated snippets from journals (product agents: your product's journals only; the hub searches all products). Do not paste whole journals into the prompt — use a snippet, then `read_file` the specific hit if one is the answer. Keep reading the latest 1–2 journal files for *current* context.
+
 ## Scope
 
 You own **only** the paths listed below for **{{PRODUCT_NAME}}** (from `registry.json`).
