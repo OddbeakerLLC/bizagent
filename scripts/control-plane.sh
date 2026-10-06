@@ -56,6 +56,7 @@ UNITDIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
 find_pids() {
   local dir pid hub_val hub_norm i has_serve
+  local proc_cwd proc_hub proc_hub_norm
   local -a args
   for dir in /proc/[0-9]*; do
     pid="${dir#/proc/}"
@@ -85,11 +86,26 @@ find_pids() {
       fi
     done
     [ "$has_serve" -eq 1 ] || continue
-    [ -n "$hub_val" ] || continue
 
-    hub_norm="$(normalize_path "$hub_val" 2>/dev/null || printf '%s\n' "$hub_val")"
-    if [ "$hub_norm" = "$HUB" ] || [ "$hub_val" = "$HUB" ]; then
-      printf '%s\n' "$pid"
+    hub_norm=""
+    if [ -n "$hub_val" ]; then
+      hub_norm="$(normalize_path "$hub_val" 2>/dev/null || printf '%s\n' "$hub_val")"
+      if [ "$hub_norm" = "$HUB" ] || [ "$hub_val" = "$HUB" ]; then
+        printf '%s\n' "$pid"
+        continue
+      fi
+    else
+      # Started without --hub (BIZAGENT_HUB env or default root): match by
+      # process cwd or environment so stop/status/restart cannot miss it and
+      # leave an old-code control plane running through an upgrade.
+      proc_cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+      proc_hub="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null \
+        | sed -n 's/^BIZAGENT_HUB=//p' | head -n 1)"
+      proc_hub_norm=""
+      [ -z "$proc_hub" ] || proc_hub_norm="$(normalize_path "$proc_hub" 2>/dev/null || printf '%s\n' "$proc_hub")"
+      if [ "$proc_cwd" = "$HUB" ] || [ "$proc_hub" = "$HUB" ] || [ "$proc_hub_norm" = "$HUB" ]; then
+        printf '%s\n' "$pid"
+      fi
     fi
   done
 }
@@ -281,7 +297,9 @@ case "${1:-}" in
       exit 0
     fi
     rm -f "$PID_FILE"
-    exit 0
+    # Non-zero when not running so scripts (upgrade/factory-reset verification)
+    # can tell "down" from "running" without parsing output.
+    exit 1
     ;;
   restart)
     stop_server
