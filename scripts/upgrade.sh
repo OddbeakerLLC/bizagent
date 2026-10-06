@@ -207,7 +207,39 @@ else
 fi
 
 log "upgrade: invoking factory-reset.sh ${args[*]}"
-bash "$REPAIR" "${args[@]}"
+# Pre-repair control-plane pid (empty when down) — used to verify a real
+# restart happened when repair reports a problem.
+OLD_CP_PID="$(bash "$HUB/scripts/control-plane.sh" status "$HUB" 2>/dev/null \
+  | sed -n 's/.*running: pid \([0-9][0-9]*\).*/\1/p' | head -n 1)" || true
+if ! bash "$REPAIR" "${args[@]}"; then
+  # Repair hard-fails when the control plane did not restart cleanly. The
+  # framework files are already restored at that point; the usual cause is a
+  # boot crash on deps that arrived with the upgrade's package.json. Install
+  # deps, restart, and re-verify before giving up — never report success over
+  # a hub whose turns would loop.
+  log "upgrade: repair reported a control-plane problem — installing npm deps and retrying the restart"
+  if command -v npm >/dev/null 2>&1; then
+    [[ -f "$HUB/package.json" ]] && (cd "$HUB" && npm install --silent) || true
+    [[ -f "$HUB/agent-runtime/package.json" ]] && (cd "$HUB/agent-runtime" && npm install --silent) || true
+  fi
+  if [[ "$NO_RESTART" -eq 1 ]]; then
+    log "ERROR: repair failed and --no-restart was set — framework files are restored but the control plane was not verified."
+    log "  Restart manually:  bash $HUB/scripts/control-plane.sh restart $HUB"
+    exit 1
+  fi
+  bash "$HUB/scripts/control-plane.sh" restart "$HUB" >>"$HUB/logs/upgrade-restart.log" 2>&1 || true
+  sleep 2
+  NEW_CP_PID="$(bash "$HUB/scripts/control-plane.sh" status "$HUB" 2>/dev/null \
+    | sed -n 's/.*running: pid \([0-9][0-9]*\).*/\1/p' | head -n 1)" || true
+  if [[ -n "$NEW_CP_PID" && -z "$OLD_CP_PID" || -n "$NEW_CP_PID" && "$NEW_CP_PID" != "$OLD_CP_PID" ]]; then
+    log "upgrade: control plane recovered after npm install + restart (pid $NEW_CP_PID)"
+  else
+    log "ERROR: control plane is not running new code after upgrade — agent turns may loop or not dispatch."
+    log "  Check: $HUB/logs/control-plane-server.log and $HUB/logs/factory-reset-*.log"
+    log "  Restart manually:  bash $HUB/scripts/control-plane.sh restart $HUB"
+    exit 1
+  fi
+fi
 
 # Refresh npm deps when package.json landed (best-effort; do not fail upgrade).
 if command -v npm >/dev/null 2>&1; then
@@ -225,6 +257,19 @@ if command -v npm >/dev/null 2>&1; then
   fi
   chmod +x "$HUB/scripts/"*.sh "$HUB/scripts/bizagent-agent" \
     "$HUB/agent-runtime/bin/bizagent-agent" 2>/dev/null || true
+fi
+
+# A hub whose agent runtime cannot load its deps fails every agent turn
+# instantly; pending mail is then redispatched forever (turn loop). node_modules
+# is preserved by the restore, so this should not happen — but if it does, say
+# so loudly instead of printing a green "done".
+if [[ -f "$HUB/agent-runtime/src/index.js" ]] && command -v node >/dev/null 2>&1; then
+  if (cd "$HUB/agent-runtime" && node -e "require('openai'); require('commander')" >/dev/null 2>&1); then
+    log "upgrade: agent runtime deps ok"
+  else
+    log "upgrade: ERROR — agent runtime deps missing; every agent turn would fail and redispatch forever."
+    log "upgrade: fix before use:  cd $HUB/agent-runtime && npm install"
+  fi
 fi
 
 # Optional: install oddbeaker-tts when missing (never clobber BIZAGENT_TTS_VOICE).
