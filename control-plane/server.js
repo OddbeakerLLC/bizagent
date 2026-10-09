@@ -58,6 +58,7 @@ function wsBroadcastConv(id, conv) {
 const {
   agentsFromRegistry,
   loadHubEnv,
+  loadRegistry,
   loadRuntimeConfig,
   readJson,
   refreshRuntimeConfig,
@@ -88,12 +89,15 @@ const {
   readUserInboxMessages,
   setActiveConversation,
   shouldStartNewConversation,
+  STATUS_ERROR_KIND,
   writeHubInboxMessage,
 } = require("./lib/conversations");
 const {
+  clearDispatchState,
   dispatchPendingAgents,
   drainHubTurnSafety,
   isAgentActive,
+  stopAgentTurn,
 } = require("./lib/dispatcher");
 const {
   listCompanyFiles,
@@ -103,9 +107,15 @@ const {
   MAX_UPLOAD_BYTES,
 } = require("./lib/company-files");
 const {
+  contentTypeForExt,
   ensureLibrary,
+  extOf,
+  getLibraryBrowseFile,
   getLibraryEntry,
+  getLibraryRepoTree,
   listLibrary,
+  listLibraryRepos,
+  resolveBrowseFile,
   resolveLibraryFile,
   MAX_BYTES: LIBRARY_MAX_BYTES,
 } = require("./lib/library");
@@ -119,9 +129,27 @@ const {
   setOnConversationMutated,
 } = require("./lib/hub-turn-safety");
 const { ensureHubRuntimePrompt } = require("./lib/hub-memory");
+const {
+  ttsHealth,
+  ttsSynthesize,
+  ttsFetchAudio,
+  rewriteAudioUrl,
+} = require("./lib/tts-proxy");
 const { agentMailStatus, routeOutboxes } = require("./lib/mail");
+const enterpriseClient = require("./lib/enterprise-server-client");
 const { getProfile, setProfile } = require("./lib/profile");
+const health = require("./lib/health");
+const safeMode = require("./lib/safe-mode");
+const logCaps = require("./lib/log-caps");
+const ollamaFallback = require("./lib/ollama-fallback");
 const { logEvent, logHubTurn, logError, appendLog } = require("./lib/log");
+const {
+  clearThinking,
+  getThinking,
+  readThinking,
+} = require("./lib/thinking");
+const { streamThinkingLogs } = require("./lib/thinking-logs");
+const { renderPlantUml } = require("./lib/plantuml");
 
 const PUBLIC_DIR = path.join(__dirname, "public");
 
@@ -201,8 +229,15 @@ function serveStatic(req, res) {
     ".css": "text/css",
     ".js": "application/javascript",
   };
+  // HTML entrypoints: no-store so cache-bust query on css/js is always seen.
+  // Assets: short no-cache revalidate (ETag-less stream; browsers revalidate).
+  const cacheControl =
+    ext === ".html"
+      ? "no-store"
+      : "no-cache, must-revalidate";
   res.writeHead(200, {
     "Content-Type": types[ext] || "application/octet-stream",
+    "Cache-Control": cacheControl,
   });
   fs.createReadStream(file).pipe(res);
   return true;
@@ -275,6 +310,7 @@ function attachEnterprisePlugin(config) {
 }
 
 const { providerEntries, resolveProviderName, getRuntimeDef } = require("./lib/cli-config");
+const { listProviderModels, providerHasApiKey } = require("./lib/provider-models");
 
 function listCliNames(cliJson) {
   return Object.keys(providerEntries(cliJson));
@@ -324,11 +360,15 @@ function buildCliModelsPayload(config) {
   const runtime = getRuntimeDef(cliJson);
   const runtimeOk = isCliInstalled(runtime.executable, config.hub);
 
-  // Show all catalog providers when runtime is installed. Always include
-  // currently-configured hub/product providers so the dialog can edit them.
+  // Key-gated picker: only providers with a saved API key (plus keyless /
+  // optional-key providers like Ollama). An agent's currently configured
+  // provider stays editable because the UI unshifts the saved selection
+  // into the dropdown.
   const keep = new Set();
   if (runtimeOk) {
-    for (const name of allNames) keep.add(name);
+    for (const name of allNames) {
+      if (providerHasApiKey(config.hub, providers[name])) keep.add(name);
+    }
   }
   const hubAgent =
     (config.registry &&
@@ -337,14 +377,19 @@ function buildCliModelsPayload(config) {
     {};
   const hubProv =
     hubAgent.provider || hubAgent.cliName || hubAgent.cli || "";
+  const configured = [];
   if (hubProv) {
-    keep.add(resolveProviderName(String(hubProv), cliJson) || String(hubProv));
+    configured.push(resolveProviderName(String(hubProv), cliJson) || String(hubProv));
   }
   for (const product of (config.registry && config.registry.products) || []) {
     const n = product && (product.provider || product.cliName || product.cli);
     if (n) {
-      keep.add(resolveProviderName(String(n), cliJson) || String(n));
+      configured.push(resolveProviderName(String(n), cliJson) || String(n));
     }
+  }
+  // Runtime missing: keep the dialog usable with configured providers.
+  if (!runtimeOk) {
+    for (const n of configured) keep.add(n);
   }
 
   const clis = allNames.filter((n) => keep.has(n));
@@ -366,7 +411,9 @@ function buildCliModelsPayload(config) {
 
   const cliModels = {};
   const labels = {};
-  for (const name of clis) {
+  // Static curated lists ship for every known provider (UI fallback), even
+  // ones key-gated out of the dropdown above.
+  for (const name of allNames) {
     const entry = providers[name] || cliJson[name] || {};
     labels[name] = entry.label || name;
     if (Array.isArray(byCli[name]) && byCli[name].length > 0) {
@@ -427,9 +474,13 @@ function currentState(config, session) {
     ...agentsFromRegistry(config.registry, config.hub),
   ]).map((agent) => {
     const isHub = agent.slug === "hub";
-    // Display effective launch values (empty product fields inherit hub/default).
+    // Display effective launch values. Products inherit agent_default only —
+    // never hub model (that is not what product launches use). When neither
+    // product model nor agent_default is set, show "(unset)" so the roster
+    // never claims a model that will not actually run.
     const provider = agent.provider || agent.cliName || hubCli || "";
-    const model = agent.model || (isHub ? hubModel : agentDefault || hubModel) || "";
+    let model = agent.model || (isHub ? hubModel : agentDefault) || "";
+    if (!model && !isHub) model = "(unset)";
     return {
       ...agent,
       provider,
@@ -628,6 +679,28 @@ async function handleApi(config, req, res) {
   const didChangeState = () => { try { pushState(config); } catch (_) {} };
   const didChangeActiveConv = () => { try { pushActiveConv(config); } catch (_) {} };
 
+  // --- Health (public, no auth): drives the console banner + external monitors. ---
+  if (url.pathname === "/api/health" && req.method === "GET") {
+    const file = path.join(config.hub, "logs", "health.json");
+    let report = null;
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+      // Fresh enough (2 min) → serve as-is; else re-check inline (cheap).
+      if (raw && raw.ts && Date.now() - Date.parse(raw.ts) < 2 * 60 * 1000) report = raw;
+    } catch (_err) { /* absent/corrupt */ }
+    if (!report) {
+      try { report = health.runHealthCheck(config.hub, { mitigate: false }); } catch (_err) { report = null; }
+    }
+    return send(res, 200, {
+      ok: report ? report.level === "ok" : false,
+      level: report ? report.level : "unknown",
+      safe_mode: safeMode.isSafeMode(config.hub),
+      provider_fallback_active: ollamaFallback.isFallbackActive(config.hub),
+      checks: report ? report.checks : [],
+      ts: report ? report.ts : new Date().toISOString(),
+    });
+  }
+
   if (url.pathname === "/api/setup" && req.method === "POST") {
     const provider = authProvider(config);
     const already =
@@ -693,6 +766,17 @@ async function handleApi(config, req, res) {
 
   if (!requireAuth(config, req, res)) return null;
 
+  // Boot safe-mode: only login + banner + health JSON get through; everything
+  // else is refused with the health payload so the UI can block with a banner.
+  if (safeMode.isSafeMode(config.hub) && !safeMode.routeAllowedInSafeMode(url.pathname)) {
+    return send(res, 503, {
+      error: "hub in safe mode (health emergency) — only login and health are served",
+      safe_mode: true,
+      level: "emergency",
+      provider_fallback_active: ollamaFallback.isFallbackActive(config.hub),
+    });
+  }
+
   if (pluginRoute) {
     try {
       return await pluginRoute.handler(req, res, config);
@@ -738,6 +822,178 @@ async function handleApi(config, req, res) {
     addStateClient(res);
     req.on("close", () => removeStateClient(res));
     return null; // keep open
+  }
+
+  // --- Live "thinking" log (streams an in-flight turn's dispatch stdout) ---
+  if (url.pathname === "/api/thinking/stream" && req.method === "GET") {
+    const convId = (url.searchParams.get("conv") || "").trim();
+    // Pin to the hub's own entry so the chat pane always streams dispatch-hub.log.
+    // Agent logs stream only for agent-bound acks (no hub entry for this conv) —
+    // an agent dispatch bound to the active conversation must never steal the
+    // hub chat's stream on (re)connect.
+    const thinking = convId
+      ? (getThinking(config.hub, convId, "hub") || getThinking(config.hub, convId))
+      : null;
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+    const sendEvent = (obj) => {
+      try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (_err) { /* client gone */ }
+    };
+    if (!thinking || !thinking.logFile) {
+      sendEvent({ done: true });
+      try { res.end(); } catch (_err) { /* ignore */ }
+      return null;
+    }
+    const { slug, logFile } = thinking;
+    // Start at the turn boundary so only the current turn's output is shown.
+    // Guard against a stale entry (missing/invalid logByteOffset): never replay
+    // prior-turn output — fall back to the current end of the log instead.
+    let offset = Number(thinking.logByteOffset);
+    if (!Number.isFinite(offset) || offset < 0) {
+      offset = fs.existsSync(logFile) ? fs.statSync(logFile).size : 0;
+    }
+    const sendTail = () => {
+      try {
+        if (!fs.existsSync(logFile)) return;
+        const stat = fs.statSync(logFile);
+        if (stat.size > offset) {
+          const length = stat.size - offset;
+          const buffer = Buffer.alloc(length);
+          const fd = fs.openSync(logFile, "r");
+          fs.readSync(fd, buffer, 0, length, offset);
+          fs.closeSync(fd);
+          offset = stat.size;
+          const text = buffer.toString("utf8");
+          if (text) sendEvent({ text });
+        }
+      } catch (_err) { /* ignore */ }
+    };
+    sendTail();
+    // Stream stays open while the process is alive (pid-based), not while the
+    // lease is unexpired. Silent-but-alive → explicit stall line, not blank.
+    let lastChange = Date.now();
+    let lastStall = 0;
+    const STALL_MS = 15000;
+    const iv = setInterval(() => {
+      if (!isAgentActive(config.hub, slug, config.lockLeaseSecs)) {
+        clearInterval(iv);
+        // Clear only this stream's slug — sibling slug entries for the same
+        // conversation (e.g. a delegated agent still running) must survive.
+        clearThinking(config.hub, convId, slug);
+        sendEvent({ done: true });
+        try { res.end(); } catch (_err) { /* ignore */ }
+        return;
+      }
+      const before = offset;
+      sendTail();
+      if (offset > before) {
+        lastChange = Date.now();
+      } else if (Date.now() - lastChange >= STALL_MS && Date.now() - lastStall >= 10000) {
+        lastStall = Date.now();
+        sendEvent({ stall: true, silent_for: Math.round((Date.now() - lastChange) / 1000) });
+      }
+    }, 500);
+    req.on("close", () => clearInterval(iv));
+    return null;
+  }
+
+  // --- Hard-stop an in-flight turn (operator pressed Escape) ---
+  if (url.pathname === "/api/thinking/stop" && req.method === "POST") {
+    const body = await parseBody(req);
+    const convId = (body.conversationId || "").trim();
+    // Same pinned resolution as the stream: hub entry first, agent-bound fallback.
+    const thinking = convId
+      ? (getThinking(config.hub, convId, "hub") || getThinking(config.hub, convId))
+      : null;
+    // Prefer thinking.slug; if the thinking entry is missing/stale, still stop
+    // whatever is actually running (hub first, else any active product agent
+    // bound to this conversation is handled via agent light — Escape targets hub).
+    let slug = thinking && thinking.slug ? thinking.slug : "";
+    if (!slug) {
+      if (isAgentActive(config.hub, "hub", config.lockLeaseSecs)) slug = "hub";
+    }
+    let killed = false;
+    if (slug) {
+      try {
+        killed = !!(await stopAgentTurn(config.hub, slug));
+      } catch (_err) {
+        killed = false;
+      }
+    }
+    if (convId) {
+      // Clear only the stopped slug — never wipe sibling slug entries.
+      if (slug) clearThinking(config.hub, convId, slug);
+      try {
+        appendMessage(
+          config.hub,
+          convId,
+          "status",
+          slug
+            ? `Stopped by operator (Escape${slug !== "hub" ? `: ${slug}` : ""}).`
+            : "Stopped by operator (Escape) — no in-flight turn found.",
+          { kind: STATUS_ERROR_KIND },
+        );
+      } catch (_err) { /* ignore */ }
+      try { pushConv(config, convId); } catch (_err) { /* ignore */ }
+    }
+    didChangeState();
+    return send(res, 200, { ok: true, killed, slug: slug || null });
+  }
+
+  // --- Fleet thinking logs (dispatch-*.log only; live-tail like viewlog all, stdout) ---
+  if (url.pathname === "/api/logs/stream" && req.method === "GET") {
+    return streamThinkingLogs(config.hub, req, res, url.searchParams.get("filter"));
+  }
+
+  // --- Hard-stop a specific agent turn (click running status light) ---
+  const agentStopMatch = url.pathname.match(/^\/api\/agent\/([^/]+)\/stop$/);
+  if (agentStopMatch && req.method === "POST") {
+    const slug = decodeURIComponent(agentStopMatch[1] || "").trim();
+    if (!slug) return send(res, 400, { error: "missing agent slug" });
+    let killed = false;
+    try {
+      killed = !!(await stopAgentTurn(config.hub, slug));
+    } catch (_err) {
+      killed = false;
+    }
+    // Status line: prefer active conversation; also clear any thinking entry for this slug.
+    try {
+      const active = readJson(activeConversationFile(config.hub), null);
+      let convId = active && active.id;
+      // If thinking is recorded under a different conv for this slug, clear it too.
+      try {
+        const all = readThinking(config.hub);
+        for (const [cid, entry] of Object.entries(all || {})) {
+          // entry: per-slug map { [slug]: {...} } (legacy flat { slug, ... } tolerated)
+          const slugs = entry && entry.slug && !entry[entry.slug]
+            ? [entry.slug]
+            : Object.keys(entry || {});
+          if (slugs.includes(slug)) {
+            clearThinking(config.hub, cid, slug);
+            if (!convId) convId = cid;
+          }
+        }
+      } catch (_err) { /* ignore */ }
+      if (convId) {
+        const thinking = getThinking(config.hub, convId);
+        if (thinking && thinking.slug === slug) clearThinking(config.hub, convId, slug);
+        try {
+          appendMessage(
+            config.hub,
+            convId,
+            "status",
+            `Stopped by operator (agent light: ${slug}).`,
+            { kind: STATUS_ERROR_KIND },
+          );
+        } catch (_err) { /* ignore */ }
+        try { pushConv(config, convId); } catch (_err) { /* ignore */ }
+      }
+    } catch (_err) { /* ignore */ }
+    didChangeState();
+    return send(res, 200, { ok: true, killed, slug });
   }
 
   if (url.pathname === "/api/observability" && req.method === "GET") {
@@ -893,7 +1149,91 @@ async function handleApi(config, req, res) {
     }
   }
 
+  // --- Enterprise Server connect (silent box; URL + shared token) ---
+  // Spec: docs/2026-10-03-enterprise-server-mvp-spec.md. Remotes are
+  // per-product opt-in only; empty selection valid; Ask Enterprise agent is
+  // provisioned at connect; weekly KS cron is disabled while connected.
+  if (url.pathname === "/api/enterprise/status" && req.method === "GET") {
+    const conn = enterpriseClient.loadConnection(config.hub);
+    const registry = loadRegistry(config.hub);
+    const eligible = enterpriseClient.eligibleProducts(registry);
+    const selected = conn ? conn.selected_products || [] : [];
+    return send(res, 200, {
+      connected: Boolean(conn),
+      url: conn ? conn.url : "",
+      hub_id: conn ? conn.hub_id : "",
+      connected_at: conn ? conn.connected_at : "",
+      inference_url: conn ? conn.inference_url || "" : "",
+      ask_enterprise_slug: enterpriseClient.ASK_ENTERPRISE_SLUG,
+      // Products with a non-empty remote (picker candidates) + selection.
+      products: eligible.map((p) => ({
+        slug: p.slug,
+        name: p.name,
+        projects: p.projects,
+        selected: selected.includes(p.slug),
+      })),
+    });
+  }
+
+  if (url.pathname === "/api/enterprise/connect" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const conn = await enterpriseClient.connect(config.hub, {
+        url: body.url,
+        token: body.token,
+        products: Array.isArray(body.products) ? body.products : [],
+      });
+      didChangeState();
+      return send(res, 200, {
+        ok: true,
+        hub_id: conn.hub_id,
+        inference_url: conn.inference_url,
+        selected_products: conn.selected_products,
+        ask_enterprise: enterpriseClient.ASK_ENTERPRISE_SLUG,
+        weekly_ks: "disabled while connected (enterprise daily job owns compile)",
+      });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "connect failed" });
+    }
+  }
+
+  if (url.pathname === "/api/enterprise/remotes" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const conn = await enterpriseClient.updateRemotes(
+        config.hub,
+        Array.isArray(body.products) ? body.products : [],
+      );
+      return send(res, 200, {
+        ok: true,
+        selected_products: conn.selected_products,
+      });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "remotes update failed" });
+    }
+  }
+
+  if (url.pathname === "/api/enterprise/sync-company" && req.method === "POST") {
+    try {
+      const result = await enterpriseClient.pushCompany(config.hub);
+      return send(res, 200, { ok: true, ...result });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "company sync failed" });
+    }
+  }
+
+  if (url.pathname === "/api/enterprise/disconnect" && req.method === "POST") {
+    try {
+      await enterpriseClient.disconnect(config.hub);
+      return send(res, 200, { ok: true });
+    } catch (err) {
+      return send(res, 400, { error: err.message || "disconnect failed" });
+    }
+  }
+
   // --- Library (operator-facing plans/specs; browser viewer) ---
+  // Filesystem walk of hub docs/company/reports + registry project repos.
+  // No library/manifest.json.
   if (url.pathname === "/api/library" && req.method === "GET") {
     try {
       ensureLibrary(config.hub);
@@ -906,36 +1246,297 @@ async function handleApi(config, req, res) {
     }
   }
 
+  // Accordion entries: Hub (filtered) + registry project repos (product metadata for nested UI).
+  if (url.pathname === "/api/library/repos" && req.method === "GET") {
+    try {
+      ensureLibrary(config.hub);
+      return send(res, 200, listLibraryRepos(config.hub, config.registry));
+    } catch (err) {
+      return send(res, 400, { error: err.message || "list repos failed" });
+    }
+  }
+
+  // Filtered viewable-file tree for one repo (dirs + .md/.puml/.svg/.png …).
+  if (url.pathname === "/api/library/tree" && req.method === "GET") {
+    try {
+      const repoId = (url.searchParams.get("repo") || "").trim();
+      if (!repoId) return send(res, 400, { error: "repo required" });
+      return send(res, 200, getLibraryRepoTree(config.hub, config.registry, repoId));
+    } catch (err) {
+      const msg = err.message || "tree failed";
+      const status = /not found/i.test(msg) ? 404 : 400;
+      return send(res, status, { error: msg });
+    }
+  }
+
   if (url.pathname === "/api/library/file" && req.method === "GET") {
     try {
-      const id = (url.searchParams.get("id") || url.searchParams.get("path") || "").trim();
-      if (!id) return send(res, 400, { error: "id required" });
+      const id = (url.searchParams.get("id") || "").trim();
+      const repoId = (url.searchParams.get("repo") || "").trim();
+      const relPath = (url.searchParams.get("path") || "").trim();
       const wantDownload =
         url.searchParams.get("download") === "1" ||
         url.searchParams.get("download") === "true";
-      const doc = getLibraryEntry(config.hub, id);
-      if (wantDownload) {
-        const { abs } = resolveLibraryFile(config.hub, doc.path);
-        const raw = fs.readFileSync(abs);
-        const filename = path.basename(doc.path || "document.md");
-        res.writeHead(200, {
-          "Content-Type": "text/markdown; charset=utf-8",
+      const wantRaw =
+        url.searchParams.get("raw") === "1" ||
+        url.searchParams.get("raw") === "true";
+      const wantSource =
+        url.searchParams.get("source") === "1" ||
+        url.searchParams.get("source") === "true";
+      const wantRender =
+        url.searchParams.get("render") === "1" ||
+        url.searchParams.get("render") === "true" ||
+        url.searchParams.get("format") === "svg" ||
+        url.searchParams.get("format") === "png";
+      const safeName = (name) => String(name || "file").replace(/"/g, "");
+
+      // Path-based browse (repo tree) takes precedence when repo+path given.
+      if (repoId && relPath) {
+        const resolved = resolveBrowseFile(config.hub, config.registry, repoId, relPath);
+        const { abs, rel, ext: fileExt } = resolved;
+        const filename = path.basename(rel || "document.md");
+        const doc = getLibraryBrowseFile(config.hub, config.registry, repoId, relPath);
+        // Never leak absolute paths to the client.
+        delete doc.abs;
+
+        if (wantSource && doc.source_path) {
+          const src = resolveBrowseFile(
+            config.hub,
+            config.registry,
+            repoId,
+            doc.source_path,
+          );
+          const raw = fs.readFileSync(src.abs);
+          const srcName = path.basename(doc.source_path);
+          const headers = {
+            "Content-Type": contentTypeForExt(extOf(srcName)),
+            "Content-Length": raw.length,
+            "Cache-Control": "no-store",
+          };
+          if (wantDownload) {
+            headers["Content-Disposition"] = `attachment; filename="${safeName(srcName)}"`;
+          }
+          res.writeHead(200, headers);
+          res.end(raw);
+          return null;
+        }
+
+        if (wantRender && (fileExt === ".puml" || fileExt === ".plantuml")) {
+          const fmt = url.searchParams.get("format") === "png" ? "png" : "svg";
+          const source = fs.readFileSync(abs, "utf8");
+          const rendered = renderPlantUml(source, fmt);
+          const stem = filename.replace(/\.(puml|plantuml)$/i, "");
+          if (fmt === "png") {
+            const buf = Buffer.isBuffer(rendered) ? rendered : Buffer.from(rendered);
+            const headers = {
+              "Content-Type": "image/png",
+              "Content-Length": buf.length,
+              "Cache-Control": "no-store",
+            };
+            if (wantDownload) {
+              headers["Content-Disposition"] = `attachment; filename="${safeName(stem)}.png"`;
+            }
+            res.writeHead(200, headers);
+            res.end(buf);
+            return null;
+          }
+          const svg = String(rendered || "");
+          const buf = Buffer.from(svg, "utf8");
+          if (wantDownload || wantRaw) {
+            const headers = {
+              "Content-Type": "image/svg+xml; charset=utf-8",
+              "Content-Length": buf.length,
+              "Cache-Control": "no-store",
+            };
+            if (wantDownload) {
+              headers["Content-Disposition"] = `attachment; filename="${safeName(stem)}.svg"`;
+            }
+            res.writeHead(200, headers);
+            res.end(buf);
+            return null;
+          }
+          return send(res, 200, {
+            ...doc,
+            kind: "plantuml",
+            rendered_format: "svg",
+            svg,
+          });
+        }
+
+        if (wantDownload || wantRaw) {
+          const raw = fs.readFileSync(abs);
+          const headers = {
+            "Content-Type": contentTypeForExt(fileExt),
+            "Content-Length": raw.length,
+            "Cache-Control": "no-store",
+          };
+          if (wantDownload) {
+            headers["Content-Disposition"] = `attachment; filename="${safeName(filename)}"`;
+          }
+          res.writeHead(200, headers);
+          res.end(raw);
+          return null;
+        }
+        return send(res, 200, doc);
+      }
+
+      // Legacy id/path lookup (old deep links / downloads). Resolves under
+      // docs|company|reports (and legacy library/) without manifest.json.
+      const legacyId = id || (relPath && !repoId ? relPath : "");
+      if (!legacyId) return send(res, 400, { error: "id or repo+path required" });
+      const doc = getLibraryEntry(config.hub, legacyId);
+      const { abs } = resolveLibraryFile(config.hub, doc.path);
+      const filename = path.basename(doc.path || "document.md");
+      const fileExt = extOf(doc.path);
+
+      // Companion .puml source for a diagram entry (download / view source).
+      if (wantSource && doc.source_path) {
+        const src = resolveLibraryFile(config.hub, doc.source_path);
+        if (!fs.existsSync(src.abs)) {
+          return send(res, 404, { error: "source file missing" });
+        }
+        const raw = fs.readFileSync(src.abs);
+        const srcName = path.basename(doc.source_path);
+        const headers = {
+          "Content-Type": contentTypeForExt(extOf(srcName)),
           "Content-Length": raw.length,
-          "Content-Disposition": `attachment; filename="${filename.replace(/"/g, "")}"`,
           "Cache-Control": "no-store",
+        };
+        if (wantDownload) {
+          headers["Content-Disposition"] = `attachment; filename="${safeName(srcName)}"`;
+        }
+        res.writeHead(200, headers);
+        res.end(raw);
+        return null;
+      }
+
+      // On-demand PlantUML render when entry is still .puml (no stored SVG).
+      if (wantRender && (fileExt === ".puml" || fileExt === ".plantuml")) {
+        const fmt = url.searchParams.get("format") === "png" ? "png" : "svg";
+        const source = fs.readFileSync(abs, "utf8");
+        const rendered = renderPlantUml(source, fmt);
+        const stem = filename.replace(/\.(puml|plantuml)$/i, "");
+        if (fmt === "png") {
+          const buf = Buffer.isBuffer(rendered) ? rendered : Buffer.from(rendered);
+          const headers = {
+            "Content-Type": "image/png",
+            "Content-Length": buf.length,
+            "Cache-Control": "no-store",
+          };
+          if (wantDownload) {
+            headers["Content-Disposition"] = `attachment; filename="${safeName(stem)}.png"`;
+          }
+          res.writeHead(200, headers);
+          res.end(buf);
+          return null;
+        }
+        const svg = String(rendered || "");
+        const buf = Buffer.from(svg, "utf8");
+        if (wantDownload || wantRaw) {
+          const headers = {
+            "Content-Type": "image/svg+xml; charset=utf-8",
+            "Content-Length": buf.length,
+            "Cache-Control": "no-store",
+          };
+          if (wantDownload) {
+            headers["Content-Disposition"] = `attachment; filename="${safeName(stem)}.svg"`;
+          }
+          res.writeHead(200, headers);
+          res.end(buf);
+          return null;
+        }
+        return send(res, 200, {
+          ...doc,
+          kind: "plantuml",
+          rendered_format: "svg",
+          svg,
         });
+      }
+
+      // Binary/raw bytes with correct Content-Type (svg/png/md/puml).
+      if (wantDownload || wantRaw) {
+        const raw = fs.readFileSync(abs);
+        const headers = {
+          "Content-Type": contentTypeForExt(fileExt),
+          "Content-Length": raw.length,
+          "Cache-Control": "no-store",
+        };
+        if (wantDownload) {
+          headers["Content-Disposition"] = `attachment; filename="${safeName(filename)}"`;
+        }
+        res.writeHead(200, headers);
         res.end(raw);
         return null;
       }
       return send(res, 200, doc);
     } catch (err) {
       const msg = err.message || "not found";
-      const status = /not found|missing/i.test(msg) ? 404 : 400;
+      const status = /not found|missing/i.test(msg)
+        ? 404
+        : /PlantUML|not installed/i.test(msg)
+          ? 422
+          : 400;
       return send(res, status, { error: msg });
     }
   }
 
   // POST /api/library removed — library is write-via-hub/agents only.
+
+  // --- Console TTS proxy → local oddbeaker-tts (Kokoro, default :9201) ---
+  // Browser falls back to speechSynthesis when available=false / synthesize fails.
+  if (url.pathname === "/api/tts/health" && req.method === "GET") {
+    const health = await ttsHealth();
+    return send(res, 200, health);
+  }
+
+  if (url.pathname === "/api/tts/synthesize" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const result = await ttsSynthesize({
+        text: body.text,
+        voice: body.voice,
+        speed: body.speed,
+        raw: !!body.raw,
+      });
+      const audioPath = rewriteAudioUrl(result.audio_url);
+      return send(res, 200, {
+        ...result,
+        audio_url: audioPath,
+        engine: "oddbeaker-tts",
+      });
+    } catch (err) {
+      const code = err && err.code;
+      if (code === "bad_request") return send(res, 400, { error: err.message });
+      const status =
+        code === "upstream" && err.status >= 400 && err.status < 600
+          ? err.status
+          : 502;
+      return send(res, status, {
+        error: err.message || "TTS unavailable",
+        available: false,
+      });
+    }
+  }
+
+  const ttsAudioMatch = url.pathname.match(/^\/api\/tts\/audio\/([^/]+)$/);
+  if (ttsAudioMatch && req.method === "GET") {
+    try {
+      const filename = decodeURIComponent(ttsAudioMatch[1] || "");
+      const audio = await ttsFetchAudio(filename);
+      res.writeHead(200, {
+        "Content-Type": audio.contentType || "audio/wav",
+        "Cache-Control": "private, max-age=3600",
+        "Content-Length": audio.buffer.length,
+      });
+      res.end(audio.buffer);
+      return null;
+    } catch (err) {
+      const code = err && err.code;
+      if (code === "bad_request") return send(res, 400, { error: err.message });
+      if (code === "not_found") return send(res, 404, { error: err.message });
+      return send(res, 502, { error: err.message || "TTS audio unavailable" });
+    }
+  }
 
   // --- Chat uploads drop zone (.bizagent/uploads/ or company/) ---
   if (url.pathname === "/api/uploads" && req.method === "POST") {
@@ -1007,6 +1608,20 @@ async function handleApi(config, req, res) {
     return send(res, 200, buildCliModelsPayload(config));
   }
 
+  // Live models list for one provider. Fetched server-side with the saved
+  // key so the key never reaches the browser; falls back to the provider's
+  // curated cli.json list with ok:false + error when no endpoint answers.
+  if (url.pathname === "/api/provider-models" && req.method === "GET") {
+    const provider = (url.searchParams.get("provider") || "").trim();
+    if (!provider) return send(res, 400, { error: "provider is required" });
+    const result = await listProviderModels({
+      hub: config.hub,
+      cliJson: config._cliJson,
+      provider,
+    });
+    return send(res, 200, result);
+  }
+
   // Update agent provider/model in registry.json
   const agentConfigMatch = url.pathname.match(
     /^\/api\/agent\/([^/]+)\/config$/,
@@ -1015,16 +1630,50 @@ async function handleApi(config, req, res) {
     const slug = decodeURIComponent(agentConfigMatch[1]);
     try {
       const body = await parseBody(req);
+      // Previous values so a no-op PUT does not stop a running turn.
+      let oldProvider = "";
+      let oldModel = "";
+      try {
+        const reg = loadRegistry(config.hub);
+        if (slug === "hub") {
+          const ha = (reg.settings && reg.settings.hub_agent) || {};
+          oldProvider = ha.provider || ha.cliName || "";
+          oldModel = ha.model || "";
+        } else {
+          const prod = (reg.products || []).find((p) => p && p.slug === slug);
+          if (prod) {
+            oldProvider = prod.provider || prod.cliName || "";
+            oldModel = prod.model || "";
+          }
+        }
+      } catch (_err) { /* compare against empty */ }
       const result = updateAgentConfig(config.hub, slug, {
         provider: body.provider || body.cliName,
         cliName: body.cliName || body.provider,
         model: body.model,
       });
+      // A roster provider/model change on a running slug must stop the
+      // in-flight turn (same path as the agent-light stop) so the next
+      // dispatch uses the new provider/model once — never leave the old
+      // provider running.
+      let stopped = false;
+      const changed =
+        (result && (result.provider || "") !== oldProvider) ||
+        (result && (result.model || "") !== oldModel);
+      if (changed && isAgentActive(config.hub, slug, config.lockLeaseSecs)) {
+        try {
+          await stopAgentTurn(config.hub, slug);
+          stopped = true;
+          // Release the stop-hold markers: still-pending mail is
+          // re-dispatched on the next tick with the new provider/model.
+          try { clearDispatchState(config.hub, slug); } catch (_e) { /* ignore */ }
+        } catch (_err) { stopped = false; }
+      }
       // Force in-process registry reload even if mtime granularity is coarse.
       config._registryMtimeMs = 0;
       refreshRuntimeConfig(config);
       didChangeState();
-      return send(res, 200, { ok: true, ...result });
+      return send(res, 200, { ok: true, stopped, ...result });
     } catch (err) {
       const msg = err.message || "failed to update agent config";
       const status =
@@ -1143,25 +1792,51 @@ async function handleApi(config, req, res) {
   return send(res, 404, { error: "not found" });
 }
 
+/** Sorted live-slug key (hub + product agents) for board change detection. */
+function activeSlugKey(config) {
+  const lease = config.lockLeaseSecs;
+  const out = [];
+  try {
+    if (isAgentActive(config.hub, "hub", lease)) out.push("hub");
+    const agentsDir = path.join(config.hub, "agents");
+    for (const slug of fs.readdirSync(agentsDir)) {
+      if (slug === "hub") continue;
+      if (isAgentActive(config.hub, slug, lease)) out.push(slug);
+    }
+  } catch (_err) { /* no agents dir */ }
+  return out.sort().join(",");
+}
+
 function runTick(config) {
   const start = Date.now();
   refreshRuntimeConfig(config);
   maybeReloadEnterprise(config);
-  const routed = routeOutboxes(config.hub);
-  const relayed = syncUserInbox(config); // numeric for hadWork (compat)
+  // Heartbeat for the out-of-process probe (cheap single small write).
+  try {
+    const hbDir = path.join(config.hub, ".bizagent");
+    fs.mkdirSync(hbDir, { recursive: true });
+    fs.writeFileSync(path.join(hbDir, "control-plane.heartbeat"), `${Date.now()}\n`, "utf8");
+  } catch (_err) { /* disk trouble — the probe will flag it */ }
+  // Snapshot live slugs so a lock drop / cli_exit between ticks pushes the
+  // board (amber clears without a page refresh), not only hadWork ticks.
+  const activeBefore = activeSlugKey(config);
+  const safeModeActive = safeMode.isSafeMode(config.hub);
+  const routed = safeModeActive ? { delivered: 0, quarantined: 0, warnings: 0 } : routeOutboxes(config.hub);
+  const relayed = safeModeActive ? 0 : syncUserInbox(config); // numeric for hadWork (compat)
   // Backup: if hub CLI exited without the shell safety hook, finish the turn.
   // Safety may route+relay or hard-fail AFTER syncUserInbox — push those ids next.
-  const safetyResults = drainHubTurnSafety(config) || [];
+  const safetyResults = safeModeActive ? [] : (drainHubTurnSafety(config) || []);
   const safetyIds = conversationIdsFromSafetyResults(safetyResults);
   for (const id of safetyIds) {
     try { pushConv(config, id); } catch (_) {}
   }
-  const dispatched = dispatchPendingAgents(config) || {};
+  const dispatched = safeModeActive ? {} : (dispatchPendingAgents(config) || {});
   const launched = Number(dispatched.launched || 0);
   // Launch-ack (and any other same-tick conv mutation) — push by disk stamp.
   // Also covers EXIT-hook child process that mutated conv JSON without broadcast.
   const stampPushed = pushConversationsChangedOnDisk(config);
 
+  const activeChanged = activeBefore !== activeSlugKey(config);
   const hadWork =
     (routed.delivered || 0) > 0 ||
     (routed.quarantined || 0) > 0 ||
@@ -1169,7 +1844,8 @@ function runTick(config) {
     relayed > 0 ||
     launched > 0 ||
     safetyIds.length > 0 ||
-    stampPushed > 0;
+    stampPushed > 0 ||
+    activeChanged;
 
   if (hadWork) {
     logEvent(config.hub, {
@@ -1344,6 +2020,25 @@ function start(hubInput) {
     refreshRuntimeConfig(config);
     runTick(config);
   }, pollMs);
+  // --- In-process watchdog (survival instinct layer 1, every ~45s). ---
+  // Cheap statfs/os checks + health files + emergency mitigation. The
+  // out-of-process timer (scripts/install-health-timer.sh) covers the case
+  // where this process cannot start at all.
+  const healthTick = () => {
+    try {
+      const report = health.runHealthCheck(config.hub, { mitigate: true });
+      if (report && report.level !== "ok") {
+        console.warn(`${new Date().toISOString()} health: ${report.level} — see logs/health.json`);
+      }
+      // Paid-provider probe while the Ollama fallback flag is active: a
+      // successful probe clears `provider_fallback_active` (banner + health).
+      if (ollamaFallback.isFallbackActive(config.hub)) {
+        ollamaFallback.probePaidProvider(config.hub).catch(() => {});
+      }
+    } catch (_err) { /* never kill the tick loop over health */ }
+  };
+  healthTick();
+  setInterval(healthTick, 45 * 1000);
   server.listen(config.port, config.host, () => {
     const bindUrl = `http://${config.host}:${config.port}`;
     const openUrl = config.host === '0.0.0.0' ? `http://localhost:${config.port}` : bindUrl;

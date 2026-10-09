@@ -22,6 +22,7 @@ let lastAgentsList = [];
 let thinkingSource = null;
 let thinkingConv = null;
 let thinkingAck = null; // identity (created_at) of the launch-ack currently streamed
+let thinkingDone = null; // { conv, ack, at } — suppress immediate reopen after done
 
 // UI polling gate for push test. Polling for /api/state and conversation history is OFF by default.
 // WS subscribe/push is the preferred and only driver when this flag is off (default).
@@ -52,6 +53,45 @@ function conversationPollStamp(conv) {
   return `${conv && conv.updated_at ? conv.updated_at : ''}\0${messages.length}\0${lastPart}`;
 }
 
+function setNavDrawerOpen(open) {
+  const drawer = document.getElementById('navDrawer');
+  const backdrop = document.getElementById('navDrawerBackdrop');
+  const toggle = document.getElementById('navDrawerToggle');
+  if (!drawer || !backdrop || !toggle) return;
+  const next = !!open;
+  drawer.hidden = !next;
+  backdrop.hidden = !next;
+  toggle.setAttribute('aria-expanded', next ? 'true' : 'false');
+  toggle.setAttribute('aria-label', next ? 'Close menu' : 'Open menu');
+  document.body.classList.toggle('nav-drawer-open', next);
+}
+
+function bindNavDrawer() {
+  const toggle = document.getElementById('navDrawerToggle');
+  const closeBtn = document.getElementById('navDrawerClose');
+  const backdrop = document.getElementById('navDrawerBackdrop');
+  const drawer = document.getElementById('navDrawer');
+  if (!toggle || toggle.dataset.bound === '1') return;
+  toggle.dataset.bound = '1';
+  toggle.addEventListener('click', () => {
+    const drawerEl = document.getElementById('navDrawer');
+    setNavDrawerOpen(!!(drawerEl && drawerEl.hidden));
+  });
+  if (closeBtn) closeBtn.addEventListener('click', () => setNavDrawerOpen(false));
+  if (backdrop) backdrop.addEventListener('click', () => setNavDrawerOpen(false));
+  if (drawer) {
+    drawer.addEventListener('click', (event) => {
+      const target = event.target;
+      if (!target || !target.closest) return;
+      if (target.closest('#ttsToggle')) return;
+      if (target.closest('a.nav-drawer-link, button')) setNavDrawerOpen(false);
+    });
+  }
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') setNavDrawerOpen(false);
+  });
+}
+
 function setAuthStatus(message, kind = 'neutral') {
   const status = document.getElementById('authStatus');
   status.textContent = message;
@@ -66,6 +106,8 @@ function setAuthenticated(isAuthenticated, message) {
   if (companyBtn) companyBtn.hidden = !isAuthenticated;
   const libraryBtn = document.getElementById('libraryBtn');
   if (libraryBtn) libraryBtn.hidden = !isAuthenticated;
+  const thinkingLogsBtn = document.getElementById('thinkingLogsBtn');
+  if (thinkingLogsBtn) thinkingLogsBtn.hidden = !isAuthenticated;
   const ttsBtn = document.getElementById('ttsToggle');
   if (ttsBtn) ttsBtn.hidden = !isAuthenticated;
   if (!isAuthenticated) {
@@ -169,6 +211,114 @@ const expandedAgentSlugs = new Set();
 let pendingAgentConfig = null; // { slug, agentName, provider, model }
 let cliModelsCache = null; // { clis/providers, cliModels, labels, defaultModel }
 
+// Live model lists are fetched per provider through the control plane
+// (server-side saved key). Short cache so reopening the modal is instant.
+const MODEL_CUSTOM_VALUE = '__custom__';
+const LIVE_MODELS_TTL_MS = 60000;
+let liveModelsCache = {}; // provider -> { fetchedAt, payload }
+let modelListLoading = false; // true while a live list request is in flight
+
+function resetModelCustomInput() {
+  const input = document.getElementById('modalModelCustom');
+  if (input) input.value = '';
+}
+
+function setModelCustomInput(visible, focus) {
+  const input = document.getElementById('modalModelCustom');
+  if (!input) return;
+  input.hidden = !visible;
+  if (visible && focus) input.focus();
+}
+
+async function fetchProviderModels(provider, force = false) {
+  if (!provider) return null;
+  const cached = liveModelsCache[provider];
+  if (!force && cached && Date.now() - cached.fetchedAt < LIVE_MODELS_TTL_MS) {
+    return cached.payload;
+  }
+  const payload = await api('/api/provider-models?provider=' + encodeURIComponent(provider));
+  liveModelsCache[provider] = { fetchedAt: Date.now(), payload };
+  return payload;
+}
+
+function formatPrice(n) {
+  if (n == null || !Number.isFinite(n)) return null;
+  const v = n >= 100 ? n.toFixed(0) : n >= 1 ? n.toFixed(2) : Number(n.toPrecision(3));
+  return '$' + v;
+}
+
+// Dropdown label: real display name from the provider API, plus cost when
+// the API reports pricing (omitted gracefully otherwise).
+function modelOptionLabel(model) {
+  let label = (model && (model.name || model.id)) || '';
+  const pricing = model && model.pricing;
+  if (pricing && (pricing.input != null || pricing.output != null)) {
+    const inP = formatPrice(pricing.input);
+    const outP = formatPrice(pricing.output);
+    const cost = inP && outP
+      ? (inP + ' in / ' + outP + ' out per 1M tokens')
+      : (inP || outP) + ' per 1M tokens';
+    label = label + ' — ' + cost;
+  }
+  return label;
+}
+
+// Experiment (2026-09-04): render the model dropdown sorted descending —
+// Z→A, case-insensitive, by display name. Applies to every list path (live
+// provider lists and the static cli.json fallback). Flip the constant to
+// false to restore the provider's natural order.
+const MODEL_SORT_DESCENDING = true;
+
+function modelSortName(model) {
+  return String((model && (model.name || model.id)) || '');
+}
+
+function compareModelsDescending(a, b) {
+  return modelSortName(b).localeCompare(modelSortName(a), undefined, { sensitivity: 'base' });
+}
+
+// Placeholder option while the live list loads (or as an empty state).
+function setModelSelectMessage(text) {
+  const select = document.getElementById('modalModelSelect');
+  if (!select) return;
+  select.innerHTML = '';
+  const opt = document.createElement('option');
+  opt.value = '';
+  opt.textContent = text;
+  select.appendChild(opt);
+  setModelCustomInput(false);
+}
+
+function fillModelSelect(models, selected) {
+  const select = document.getElementById('modalModelSelect');
+  if (!select) return;
+  select.innerHTML = '';
+  const list = (Array.isArray(models) ? models : []).filter((m) => m && m.id);
+  if (selected && !list.some((m) => m.id === selected)) {
+    // Keep the saved model selectable even if the live list changed.
+    list.unshift({ id: selected, name: selected, pricing: null });
+  }
+  if (MODEL_SORT_DESCENDING) list.sort(compareModelsDescending);
+  for (const model of list) {
+    const opt = document.createElement('option');
+    opt.value = model.id;
+    opt.textContent = modelOptionLabel(model);
+    if (model.id === selected) opt.selected = true;
+    select.appendChild(opt);
+  }
+  // Manual model entry stays available for providers without a list.
+  const custom = document.createElement('option');
+  custom.value = MODEL_CUSTOM_VALUE;
+  custom.textContent = 'Custom model…';
+  select.appendChild(custom);
+  if (list.length === 0) {
+    select.value = MODEL_CUSTOM_VALUE;
+    setModelCustomInput(true);
+  } else {
+    setModelCustomInput(select.value === MODEL_CUSTOM_VALUE);
+  }
+}
+
 async function loadCliModels(force = false) {
   if (!force && cliModelsCache) return cliModelsCache;
   const data = await api('/api/cli-models');
@@ -208,18 +358,43 @@ function fillSelect(select, options, selected, labels) {
   }
 }
 
-function refreshModelOptionsForCli() {
-  if (!pendingAgentConfig || !cliModelsCache) return;
+async function refreshModelOptionsForCli() {
   const cliSelect = document.getElementById('modalCliSelect');
-  const modelSelect = document.getElementById('modalModelSelect');
-  if (!cliSelect || !modelSelect) return;
+  if (!pendingAgentConfig || !cliSelect) return;
   const provider = cliSelect.value;
-  const models = (cliModelsCache.cliModels && cliModelsCache.cliModels[provider]) || [];
-  // Prefer current model if still valid for this provider; otherwise first model.
-  const preferred =
-    models.includes(pendingAgentConfig.model) ? pendingAgentConfig.model
-      : (models[0] || pendingAgentConfig.model || '');
-  fillSelect(modelSelect, models, preferred);
+  const status = document.getElementById('modalStatus');
+  const currentModel = pendingAgentConfig.model || '';
+  modelListLoading = true;
+  setModelSelectMessage('Loading models…');
+  let payload = null;
+  try {
+    payload = await fetchProviderModels(provider);
+  } catch (_err) {
+    payload = null; // fall back to the static curated list below
+  }
+  modelListLoading = false;
+  // Modal/provider changed while we were loading — don't clobber it.
+  if (!pendingAgentConfig || !cliSelect.isConnected || cliSelect.value !== provider) return;
+  let models = payload && Array.isArray(payload.models) ? payload.models : [];
+  let source = payload ? String(payload.source || '') : '';
+  if (models.length === 0) {
+    // Fallback: curated static list from cli.json (ships with providers).
+    const staticModels = (cliModelsCache && cliModelsCache.cliModels
+      && cliModelsCache.cliModels[provider]) || [];
+    models = staticModels.map((id) => ({ id, name: id, pricing: null }));
+    if (staticModels.length) source = 'fallback';
+  }
+  fillModelSelect(models, currentModel);
+  if (status) {
+    if (source === 'fallback') {
+      status.hidden = false;
+      status.textContent = 'Live model list unavailable — showing the saved list; pick Custom model… to type one.';
+      status.dataset.kind = 'warn';
+    } else if (source === 'live') {
+      status.hidden = true;
+      status.textContent = '';
+    }
+  }
 }
 
 async function showAgentConfigModal(agent) {
@@ -257,7 +432,9 @@ async function showAgentConfigModal(agent) {
 
   const clis = (cliModelsCache && (cliModelsCache.providers || cliModelsCache.clis)) || [];
   fillSelect(cliSelect, clis, pendingAgentConfig.provider, cliModelsCache && cliModelsCache.labels);
-  refreshModelOptionsForCli();
+  resetModelCustomInput();
+  // Fire-and-forget: the modal opens immediately with a Loading… placeholder.
+  refreshModelOptionsForCli().catch(() => {});
   modal.hidden = false;
   cliSelect.focus();
 }
@@ -266,6 +443,9 @@ function hideAgentConfigModal() {
   const modal = document.getElementById('configModal');
   if (modal) modal.hidden = true;
   pendingAgentConfig = null;
+  modelListLoading = false;
+  setModelCustomInput(false);
+  resetModelCustomInput();
   const status = document.getElementById('modalStatus');
   if (status) {
     status.hidden = true;
@@ -280,7 +460,25 @@ async function saveAgentConfigModal() {
   const status = document.getElementById('modalStatus');
   const saveBtn = document.getElementById('modalSave');
   const provider = cliSelect ? cliSelect.value.trim() : '';
-  const model = modelSelect ? modelSelect.value.trim() : '';
+  let model = '';
+  if (modelSelect && modelSelect.value === MODEL_CUSTOM_VALUE) {
+    const customInput = document.getElementById('modalModelCustom');
+    model = customInput ? customInput.value.trim() : '';
+    if (!model) {
+      if (status) {
+        status.hidden = false;
+        status.textContent = 'Enter a custom model id';
+        status.dataset.kind = 'warn';
+      }
+      return;
+    }
+  } else {
+    model = modelSelect ? modelSelect.value.trim() : '';
+    if (!model && modelListLoading && pendingAgentConfig.model) {
+      // List still loading — keep the agent's current model.
+      model = pendingAgentConfig.model;
+    }
+  }
 
   if (!provider) {
     if (status) {
@@ -326,6 +524,13 @@ function bindAgentConfigModal() {
   const modalCancel = document.getElementById('modalCancel');
   const modalSave = document.getElementById('modalSave');
   const cliSelect = document.getElementById('modalCliSelect');
+  const modelSelect = document.getElementById('modalModelSelect');
+  if (modelSelect) {
+    modelSelect.addEventListener('change', () => {
+      const isCustom = modelSelect.value === MODEL_CUSTOM_VALUE;
+      setModelCustomInput(isCustom, isCustom);
+    });
+  }
   if (modalClose) modalClose.addEventListener('click', close);
   if (modalCancel) modalCancel.addEventListener('click', close);
   if (modalSave) modalSave.addEventListener('click', () => { saveAgentConfigModal(); });
@@ -729,8 +934,11 @@ function updateTtsToggleUi() {
   const btn = document.getElementById('ttsToggle');
   if (!btn || !btn.classList) return;
   btn.classList.toggle('active', ttsEnabled);
+  const label = btn.querySelector('.nav-drawer-link-label');
+  if (label) label.textContent = ttsEnabled ? 'TTS ✓' : 'TTS';
   if (typeof btn.setAttribute === 'function') {
     btn.setAttribute('aria-pressed', ttsEnabled ? 'true' : 'false');
+    btn.setAttribute('aria-checked', ttsEnabled ? 'true' : 'false');
   }
   if (ttsUnavailableReason) {
     btn.title = ttsUnavailableReason;
@@ -1062,7 +1270,29 @@ function cleanLineForSpeech(line) {
 }
 
 /**
- * Drop paths, filenames, SHAs, and other dense tokens that sound awful in TTS.
+ * Convert a filesystem path into a speakable word form (speak path only).
+ * "/workspace/viewlog.sh" → "workspace viewlog dot sh"; "~/a/b" → "home a b".
+ * On-screen markdown is never passed through this — TTS string only.
+ */
+function pathToSpeech(path) {
+  return String(path || '')
+    .split(/[\/\\]+/)
+    .filter((s) => s && s !== '.' && s !== '..')
+    .map((seg) => {
+      if (seg === '~') return 'home';
+      if (/^~[\w.-]+$/.test(seg)) return `${seg.slice(1)} home`;
+      if (/^[A-Za-z]:$/.test(seg)) return `${seg[0]} drive`;
+      // Dot-separated filename/extension → "dot" (viewlog.sh → "viewlog dot sh").
+      if (seg.includes('.')) return seg.split('.').filter(Boolean).join(' dot ');
+      return seg;
+    })
+    .join(' ')
+    .trim();
+}
+
+/**
+ * Drop filenames, SHAs, and other dense tokens that sound awful in TTS.
+ * Paths are spoken (via pathToSpeech) rather than dropped.
  * Used by hub-reply summary mode (not the lighter buildSpokenText path).
  */
 function scrubDenseSpeechTokens(text) {
@@ -1072,11 +1302,16 @@ function scrubDenseSpeechTokens(text) {
   t = t.replace(/(\d+(?:,\d{3})*(?:\.\d+)?)\s*~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, '$1 to $2');
   t = t.replace(/~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, 'about $1');
   t = t.replace(/\babout\s+about\b/gi, 'about');
+  // Speak-only: slash-separated alternatives "keep/delete" → "keep or delete".
+  // Guarded so multi-segment paths (/a/b, a/b/c, ~/x) still hit the path wipes below.
+  t = t.replace(/\band\/or\b/gi, 'and or');
+  t = t.replace(/(^|[^\/])\b([A-Za-z]+)\/([A-Za-z]+)\b(?!\/)/g, '$1$2 or $3');
   // Absolute / home / relative multi-segment paths (with or without trailing slash).
   // Home paths require "/" after ~ or ~user so bare "~280" is not treated as a path.
-  t = t.replace(/(?:(?:~[\w.-]*)\/|\/|\.{1,2}\/)(?:[\w.-]+\/)*[\w.-]+\/?/g, ' ');
-  t = t.replace(/\b(?:[\w.-]+\/){1,}[\w.-]*\/?/g, ' ');
-  t = t.replace(/\b[A-Za-z]:\\[^\s]+/g, ' ');
+  // Speak paths instead of dropping them (on-screen markdown unchanged).
+  t = t.replace(/(?:(?:~[\w.-]*)\/|\/|\.{1,2}\/)(?:[\w.-]+\/)*[\w.-]+\/?/g, (m) => ` ${pathToSpeech(m)} `);
+  t = t.replace(/\b(?:[\w.-]+\/){1,}[\w.-]*\/?/g, (m) => ` ${pathToSpeech(m)} `);
+  t = t.replace(/\b[A-Za-z]:\\[^\s]+/g, (m) => ` ${pathToSpeech(m)} `);
   // Bare filenames with common extensions
   t = t.replace(
     /\b[\w.-]+\.(?:js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|kt|md|markdown|txt|json|jsonc|ya?ml|toml|ini|env|sh|bash|zsh|ps1|css|scss|html?|vue|svelte|wasm|lock|wav|mp3|png|jpe?g|gif|svg|webp|ico|puml|sql|proto|gradle|xml|csv|tsv|log|diff|patch)\b/gi,
@@ -1155,6 +1390,10 @@ function pronounceForSpeech(text) {
   t = t.replace(/~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, 'about $1');
   t = t.replace(/\babout\s+about\b/gi, 'about');
 
+  // Slash-separated alternatives (speak-only): "keep/delete" → "keep or delete".
+  t = t.replace(/\band\/or\b/gi, 'and or');
+  t = t.replace(/(^|[^\/])\b([A-Za-z]+)\/([A-Za-z]+)\b(?!\/)/g, '$1$2 or $3');
+
   // 1) digit.digit → point (repeat for 3.1.4-style version chains)
   t = t.replace(/(\d)\.(\d)/g, '$1 point $2');
   // Collapse accidental double spaces from chained replaces
@@ -1191,6 +1430,46 @@ function ensureSpokenSentence(sentence) {
   if (!s) return '';
   if (!/[.!?]$/.test(s)) s = `${s.replace(/[,:;\-–—]+$/g, '').trim()}.`;
   return s.replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
+ * Extract a TTS summary marker from a hub reply (speak path only).
+ * Preferred: fenced markdown ```tts … ``` (info string "tts").
+ * Legacy: <tts-summary>…</tts-summary>.
+ * Captures up to two complete sentences from the marker body. Returns null
+ * when absent. Renderer keeps the inner prose and drops only the fence/tags.
+ */
+function extractTtsSummaryTag(text) {
+  const raw = String(text || '');
+  if (!raw) return null;
+  let inner = null;
+  // Prefer markdown fence: ```tts / ``` tts (optional trailing info).
+  const fence = raw.match(/(?:^|\n)```\s*tts\b[^\n]*\n([\s\S]*?)\n```[ \t]*(?=\n|$)/i);
+  if (fence) {
+    inner = fence[1];
+  } else {
+    const tag = raw.match(/<tts-summary\b[^>]*>([\s\S]*?)<\/tts-summary>/i);
+    if (tag) inner = tag[1];
+  }
+  if (inner == null) return null;
+  let body = cleanLineForSpeech(String(inner || '').replace(/\n+/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Drop a residual label if a model nested TLDR inside the marker.
+  body = body.replace(/^(?:\*\*\s*)?(?:TL\s*;\s*DR|TLDR)(?:\s*\*\*)?\s*:\s*/i, '').trim();
+  if (!body) return null;
+
+  const sentences = splitSpeechSentences(body)
+    .map((s) => scrubDenseSpeechTokens(s))
+    .map((s) => s.replace(/^\W+/, '').trim())
+    .filter((s) => s && s.length > 1)
+    .slice(0, 2)
+    .map((s) => ensureSpokenSentence(s))
+    .filter(Boolean);
+  if (!sentences.length) return null;
+  let result = sentences.join(' ').replace(/\.{2,}/g, '.').replace(/\s{2,}/g, ' ').trim();
+  if (!result) return null;
+  return result;
 }
 
 /**
@@ -1231,18 +1510,26 @@ function extractLabeledTldr(text) {
 }
 
 /**
- * Hub-reply TTS summary: prefer a leading labeled two-sentence TLDR when
- * present; otherwise the first two complete sentences of the cleaned prose
- * lead (label optional — hub often opens with an unlabeled summary). Never a
- * mid-sentence clip or full multi-paragraph body dump.
- * Full markdown stays on screen. Returns null when nothing usable remains
- * (caller uses minimal fallback — short acks may stay silent/fallback).
+ * Hub-reply TTS summary: prefer ```tts fence (or legacy <tts-summary>), then a
+ * leading labeled two-sentence TLDR, otherwise the first two complete sentences
+ * of the cleaned prose lead. Never a mid-sentence clip or full multi-paragraph
+ * body dump. Full markdown stays on screen (fence/tags unwrapped by renderer).
+ * Returns null when nothing usable remains (caller uses minimal fallback —
+ * short acks may stay silent/fallback).
  */
 function buildSpokenSummary(text) {
+  const tagged = extractTtsSummaryTag(text);
+  if (tagged) return tagged;
+
   const tldr = extractLabeledTldr(text);
   if (tldr) return tldr;
 
-  const blocks = String(text || '').split(/\n{2,}/);
+  // Ignore TTS markers if present so fallback prose is not polluted by fence lines.
+  const stripped = String(text || '')
+    .replace(/(?:^|\n)```\s*tts\b[^\n]*\n[\s\S]*?\n```[ \t]*(?=\n|$)/gi, '\n')
+    .replace(/<tts-summary\b[^>]*>[\s\S]*?<\/tts-summary>/gi, ' ')
+    .replace(/<\/?tts-summary\b[^>]*>/gi, ' ');
+  const blocks = stripped.split(/\n{2,}/);
   const proseChunks = [];
   let inCodeBlock = false;
   let hadCode = false;
@@ -1585,12 +1872,13 @@ function speakViaBrowserTts(spokenText, gen) {
  * @param {string} text raw or already-built spoken text
  * @param {{ raw?: boolean, summary?: boolean }} [opts]
  *   raw=true skips preprocess (confirmation phrases).
- *   summary=true (hub replies) speaks a leading labeled TLDR (up to two
- *   complete sentences, label not spoken) when present; otherwise the first
- *   two complete lead sentences (label optional) — never a mid-sentence clip
- *   and never the full multi-paragraph body. Short single-sentence acks stay
- *   one sentence. On summary failure uses TTS_REPLY_FALLBACK (or silence if
- *   even that is empty) — never dumps the full reply.
+ *   summary=true (hub replies) speaks ```tts fence contents when present
+ *   (legacy <tts-summary> still accepted), else a leading labeled TLDR (up to
+ *   two complete sentences, label not spoken), else the first two complete
+ *   lead sentences — never a mid-sentence clip and never the full
+ *   multi-paragraph body. Short single-sentence acks stay one sentence. On
+ *   summary failure uses TTS_REPLY_FALLBACK (or silence if even that is empty)
+ *   — never dumps the full reply.
  * @returns {boolean} true if a speak attempt was started (may finish async)
  */
 function speakTtsText(text, opts) {
@@ -1686,8 +1974,9 @@ function speakTtsText(text, opts) {
 }
 
 function speakHubReply(text) {
-  // Hub replies: full markdown stays in the console UI; TTS gets labeled TLDR
-  // (≤2 sentences) when present, else first two complete lead sentences.
+  // Hub replies: full markdown stays in the console UI; TTS gets
+  // ```tts fence body (or legacy <tts-summary>) when present, else labeled
+  // TLDR (≤2 sentences), else first two complete lead sentences.
   logTtsDebug('speakHubReply', { chars: String(text || '').length, mode: 'summary' });
   speakTtsText(text, { summary: true });
 }
@@ -1820,7 +2109,8 @@ function bindTtsToggle() {
   const btn = document.getElementById('ttsToggle');
   if (!btn || btn.dataset.bound === '1') return;
   btn.dataset.bound = '1';
-  btn.addEventListener('click', () => {
+  btn.addEventListener('click', (event) => {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
     // Toggle OFF: stop. Toggle ON: enable + speak confirmation in this gesture.
     setTtsEnabled(!ttsEnabled, { prime: true });
   });
@@ -1921,6 +2211,7 @@ function closeThinkingStream() {
   thinkingSource = null;
   thinkingConv = null;
   thinkingAck = null;
+  hideThinkingStall();
 }
 
 function thinkingLogEl() {
@@ -1931,6 +2222,24 @@ function thinkingActive() {
   return !!thinkingSource && !!thinkingConv;
 }
 
+function showThinkingStall(secs) {
+  let line = document.querySelector('[data-thinking-stall="1"]');
+  if (!line) {
+    const log = thinkingLogEl();
+    if (!log || !log.parentNode) return;
+    line = document.createElement('div');
+    line.className = 'thinking-stall';
+    line.setAttribute('data-thinking-stall', '1');
+    log.parentNode.appendChild(line);
+  }
+  line.textContent = `[running — no output for ${secs}s]`;
+}
+
+function hideThinkingStall() {
+  const line = document.querySelector('[data-thinking-stall="1"]');
+  if (line) line.remove();
+}
+
 function openThinkingStream(convId) {
   if (!convId) return;
   const log = thinkingLogEl();
@@ -1938,15 +2247,25 @@ function openThinkingStream(convId) {
   // Reopen whenever the conversation OR the launch-ack (turn) changes, so the
   // stream always starts at the new turn's log offset — never old thinking.
   const ack = log.getAttribute('data-thinking-ack') || '';
+  // A done for this exact ack already arrived — do not busy-reopen while the
+  // (still visible) launch-ack waits for its reply.
+  if (ack && thinkingDone && thinkingDone.conv === convId && thinkingDone.ack === ack
+      && Date.now() - thinkingDone.at < 30000) {
+    closeThinkingStream();
+    return;
+  }
+  if (!ack) thinkingDone = null;
   if (thinkingConv === convId && thinkingAck === ack) return;
   closeThinkingStream();
   thinkingConv = convId;
   thinkingAck = ack;
+  hideThinkingStall();
   thinkingSource = new EventSource(`/api/thinking/stream?conv=${encodeURIComponent(convId)}`);
   thinkingSource.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (_) { return; }
     if (msg && msg.done) {
+      thinkingDone = { conv: convId, ack, at: Date.now() };
       closeThinkingStream();
       // Turn ended server-side — soft-refresh messages so a stripped launch-ack /
       // real reply replaces Thinking… if the push was missed.
@@ -1958,7 +2277,13 @@ function openThinkingStream(convId) {
       }
       return;
     }
+    if (msg && msg.stall) {
+      // Process alive but log silent — explicit line instead of blank pane.
+      showThinkingStall(Number(msg.silent_for) || 0);
+      return;
+    }
     if (msg && msg.text) {
+      hideThinkingStall();
       const el = thinkingLogEl();
       if (!el) { closeThinkingStream(); return; }
       el.textContent += msg.text;
@@ -2128,8 +2453,25 @@ async function loadConversation(id) {
   stopTtsSpeech();
   if (switching) {
     logTtsDebug('loadConversation switch', id);
+    animateConversationSwitch();
   }
   renderMessages(messages);
+}
+
+// --- Conversation-switch transition (subtle, ~250ms) ---
+// Dropdown switches render instantly; this makes the change perceptible
+// without adding any delay. CSS disables it under prefers-reduced-motion.
+function animateConversationSwitch() {
+  const panel = document.getElementById('messages');
+  if (!panel) return;
+  panel.classList.remove('conv-switching');
+  void panel.offsetWidth; // restart the animation on rapid switches
+  panel.classList.add('conv-switching');
+  panel.addEventListener('animationend', (ev) => {
+    if (ev.target === panel && ev.animationName === 'convSwitchIn') {
+      panel.classList.remove('conv-switching');
+    }
+  }, { once: true });
 }
 
 async function refreshStatus() {
@@ -2204,11 +2546,24 @@ async function setup() {
   }
 }
 
+function syncProductsRail() {
+  const drawer = document.querySelector('.rail-drawer');
+  if (!drawer || typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+  const desktop = window.matchMedia('(min-width: 761px)');
+  const apply = () => {
+    if (desktop.matches) drawer.open = true;
+  };
+  apply();
+  if (typeof desktop.addEventListener === 'function') desktop.addEventListener('change', apply);
+  else if (typeof desktop.addListener === 'function') desktop.addListener(apply);
+}
+
 async function boot() {
   let sessionActive = false;
   try {
     setAuthStatus('Checking session...', 'pending');
     bindAgentConfigModal();
+    syncProductsRail();
     await refreshStatus();
     sessionActive = true;
     const named = await ensureDisplayName();
@@ -2233,6 +2588,8 @@ async function boot() {
   }
 }
 
+
+
 // --- Library (named browser tab; full-page repo accordion) ---
 const LIBRARY_WINDOW_NAME = 'bizagent-library';
 
@@ -2256,7 +2613,10 @@ function bindLibraryPage() {
   const openBtn = document.getElementById('libraryBtn');
   if (openBtn && openBtn.dataset.bound !== '1') {
     openBtn.dataset.bound = '1';
-    openBtn.addEventListener('click', () => openLibraryTab());
+    openBtn.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      openLibraryTab();
+    });
   }
   // Deep-link: #/library still opens the named Library tab once.
   if (typeof window !== 'undefined' && !window.__bizagentLibraryHashBound) {
@@ -2274,6 +2634,35 @@ function bindLibraryPage() {
     };
     window.addEventListener('hashchange', maybeOpenFromHash);
     maybeOpenFromHash();
+  }
+}
+
+// --- Thinking logs (named browser tab; live-tail dispatch-*.log) ---
+const THINKING_LOGS_WINDOW_NAME = 'bizagent-thinking';
+
+function openThinkingLogsTab() {
+  const url = '/logs.html';
+  try {
+    const w = window.open(url, THINKING_LOGS_WINDOW_NAME);
+    if (w) {
+      try { w.focus(); } catch (_err) { /* ignore */ }
+      return w;
+    }
+  } catch (_err) {
+    /* popup blocked — fall through */
+  }
+  if (typeof location !== 'undefined') location.assign(url);
+  return null;
+}
+
+function bindThinkingLogsPage() {
+  const openBtn = document.getElementById('thinkingLogsBtn');
+  if (openBtn && openBtn.dataset.bound !== '1') {
+    openBtn.dataset.bound = '1';
+    openBtn.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      openThinkingLogsTab();
+    });
   }
 }
 
@@ -2326,6 +2715,14 @@ function renderAttachChips() {
     name.className = 'attach-chip-name';
     name.textContent = `${file.name} (${formatBytes(file.size || 0)})`;
     name.title = file.name;
+    if (file.type && String(file.type).startsWith('image/')) {
+      // Pasted/attached image preview chip.
+      const thumb = document.createElement('img');
+      thumb.className = 'attach-chip-thumb';
+      thumb.alt = '';
+      try { thumb.src = URL.createObjectURL(file); } catch (_e) { /* preview optional */ }
+      chip.appendChild(thumb);
+    }
     const rm = document.createElement('button');
     rm.type = 'button';
     rm.className = 'attach-chip-remove';
@@ -2375,6 +2772,52 @@ function bindComposerAttachments() {
       pendingAttachFiles.push(f);
     }
     input.value = '';
+    renderAttachChips();
+  });
+}
+
+// --- Clipboard image paste (vision) ---
+// Ctrl/Cmd+V of a screenshot (or any image on the clipboard) drops it into
+// the composer attachment list; it then rides the normal upload pipeline
+// (.bizagent/uploads/) and the runtime attaches it to the model as vision
+// content. Plain-text paste is untouched.
+function pastedImageName(type) {
+  const ext = (String(type).split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'png';
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `pasted-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.${ext}`;
+}
+
+function clipboardImageFiles(clipboardData) {
+  const out = [];
+  if (!clipboardData || !clipboardData.items) return out;
+  const seen = new Set();
+  for (const item of clipboardData.items) {
+    if (!item || item.kind !== 'file') continue;
+    const type = String(item.type || '');
+    if (!type.startsWith('image/')) continue;
+    const blob = item.getAsFile && item.getAsFile();
+    if (!blob) continue;
+    const sig = `${type}|${blob.size}`;
+    if (seen.has(sig)) continue; // some browsers report the same image twice
+    seen.add(sig);
+    out.push({ blob, type, name: pastedImageName(type) });
+  }
+  return out;
+}
+
+function bindComposerPaste() {
+  const input = document.getElementById('messageInput');
+  if (!input || input.dataset.pasteBound === '1') return;
+  input.dataset.pasteBound = '1';
+  input.addEventListener('paste', (event) => {
+    const images = clipboardImageFiles(event.clipboardData);
+    if (images.length === 0) return; // no image on the clipboard — text paste
+    event.preventDefault();
+    for (const img of images) {
+      if (pendingAttachFiles.length >= 8) break;
+      pendingAttachFiles.push(new File([img.blob], img.name, { type: img.type }));
+    }
     renderAttachChips();
   });
 }
@@ -2469,7 +2912,10 @@ function bindCompanyModal() {
   if (!modal || modal.dataset.bound === '1') return;
   modal.dataset.bound = '1';
   const openBtn = document.getElementById('companyFilesBtn');
-  if (openBtn) openBtn.addEventListener('click', () => showCompanyModal());
+  if (openBtn) openBtn.addEventListener('click', (event) => {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+    showCompanyModal();
+  });
   const close = () => hideCompanyModal();
   const closeBtn = document.getElementById('companyModalClose');
   const doneBtn = document.getElementById('companyModalDone');
@@ -2494,14 +2940,18 @@ document.getElementById('login').addEventListener('click', () => {
   if (needsSetup) setup();
   else login();
 });
-document.getElementById('logout').addEventListener('click', async () => {
+document.getElementById('logout').addEventListener('click', async (event) => {
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
   await api('/api/logout', { method: 'POST', body: '{}' }).catch(() => {});
   setAuthenticated(false, 'Signed out');
 });
 bindCompanyModal();
 bindLibraryPage();
+bindThinkingLogsPage();
+bindNavDrawer();
 bindTtsToggle();
 bindComposerAttachments();
+bindComposerPaste();
 document.getElementById('newConversation').addEventListener('click', async () => {
   if (!displayName) {
     showNamePanel(true);
@@ -2527,7 +2977,10 @@ document.getElementById('deleteConversation').addEventListener('click', async ()
   await loadConversations();
 });
 document.getElementById('conversationSelect').addEventListener('change', (event) => loadConversation(event.target.value));
-document.getElementById('editDisplayName').addEventListener('click', () => showNamePanel(false));
+document.getElementById('editDisplayName').addEventListener('click', (event) => {
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
+  showNamePanel(false);
+});
 document.getElementById('saveDisplayName').addEventListener('click', async () => {
   const ok = await saveDisplayName();
   if (ok && !currentConversation) await loadConversations();
@@ -2743,5 +3196,47 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// --- Health banner (survival instinct): red = cannot run / disk critical;
+// yellow = heading there or provider fallback active. Persisted by the server
+// state itself — the banner stays until the check is green again. ---
+function renderHealthBanner(h) {
+  const el = document.getElementById('healthBanner');
+  if (!el) return;
+  const level = (h && h.level) || 'unknown';
+  const safeMode = !!h.safe_mode;
+  const fallback = !!h.provider_fallback_active;
+  const bad = (h.checks || []).filter((c) => c.level && c.level !== 'ok');
+  const red = safeMode || level === 'critical' || level === 'emergency';
+  const yellow = !red && (level === 'warn' || fallback || level === 'unknown');
+  if (!red && !yellow) {
+    el.hidden = true;
+    el.innerHTML = '';
+    return;
+  }
+  el.hidden = false;
+  el.className = `health-banner ${red ? 'health-banner-red' : 'health-banner-yellow'}`;
+  const title = safeMode
+    ? 'Hub is in safe mode (health emergency) — agents paused, only login and health are served'
+    : red
+      ? `Hub health: ${level} — agent runs may fail`
+      : fallback
+        ? 'Paid LLM provider refused; hub turns running on local Ollama (provider_fallback_active)'
+        : `Hub health: ${level}`;
+  const details = bad.slice(0, 4).map((c) => `${c.name}: ${c.detail}`).join(' · ');
+  el.innerHTML =
+    `<strong>${title}</strong>` +
+    (details ? `<span class="health-banner-detail">${details}</span>` : '') +
+    (safeMode ? `<span class="health-banner-detail">Current health: ${level}. The hub will exit safe mode automatically once health is back to ok.</span>` : '') +
+    (fallback && !safeMode ? '<span class="health-banner-detail">Fix the paid provider (top up / new key) to restore normal turns.</span>' : '');
+}
+async function pollHealthBanner() {
+  try {
+    const res = await fetch('/api/health', { cache: 'no-store' });
+    if (!res.ok) return;
+    renderHealthBanner(await res.json());
+  } catch (_err) { /* server down — banner state unchanged */ }
+}
+pollHealthBanner();
+setInterval(pollHealthBanner, 30000);
 
 boot();
