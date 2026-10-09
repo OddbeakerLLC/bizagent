@@ -331,6 +331,16 @@ grep -q "Number.isFinite(offset)" "$ROOT/control-plane/server.js" \
   || fail "thinking stream does not guard against stale/missing logByteOffset"
 grep -q "clearThinking" "$ROOT/control-plane/lib/hub-turn-safety.js" \
   || fail "hub turn completion does not clear stale thinking entry"
+# Thinking stream pin (2026-10-09): hub chat streams only dispatch-hub.log; an
+# agent dispatch bound to the active conversation must not steal the stream.
+grep -q 'getThinking(config.hub, convId, "hub")' "$ROOT/control-plane/server.js" \
+  || fail "thinking stream does not pin the hub slug"
+grep -q "clearThinking(config.hub, convId, slug)" "$ROOT/control-plane/server.js" \
+  || fail "thinking stream/stop must clear only its own slug entry"
+grep -q "clearThinking(hub, turn.conversationId, 'hub')" "$ROOT/control-plane/lib/hub-turn-safety.js" \
+  || fail "hub turn exit must clear only the hub slug entry"
+grep -q "pruneThinking" "$ROOT/control-plane/lib/thinking.js" \
+  || fail "thinking.json missing stale-entry pruning"
 # PlantUML: Library file path only (no topbar scratch button /api/plantuml/render).
 grep -q "renderPlantUml" "$ROOT/control-plane/lib/plantuml.js" \
   || fail "missing PlantUML render module"
@@ -3440,7 +3450,7 @@ const path = require('path');
 const root = process.argv[2];
 const hub = process.argv[3];
 const {
-  recordThinking, getThinking, clearThinking, readThinking,
+  recordThinking, getThinking, clearThinking, readThinking, pruneThinking,
 } = require(path.join(root, 'control-plane/lib/thinking'));
 const conv = '2026-09-07-test-conv';
 recordThinking(hub, conv, 'alpha', '/tmp/a.log', 10);
@@ -3464,6 +3474,35 @@ fs.writeFileSync(path.join(hub, '.bizagent', 'thinking.json'), JSON.stringify({
 }, null, 2));
 const legacy = getThinking(hub, conv);
 if (!legacy || legacy.slug !== 'gamma' || legacy.logFile !== '/tmp/g.log') { console.error('legacy entry not normalized', legacy); process.exit(7); }
+// Pinned slug lookup: hub chat must stream dispatch-hub.log even when an agent
+// dispatch was recorded more recently against the same conversation.
+recordThinking(hub, conv, 'hub', '/tmp/hub.log', 1);
+recordThinking(hub, conv, 'worker', '/tmp/worker.log', 2);
+const pinned = getThinking(hub, conv, 'hub');
+if (!pinned || pinned.slug !== 'hub' || pinned.logFile !== '/tmp/hub.log') { console.error('pinned hub lookup failed', pinned); process.exit(8); }
+const missing = getThinking(hub, conv, 'no-such-slug');
+if (missing !== null) { console.error('pinned lookup must not fall back to latest slug', missing); process.exit(9); }
+// Pruning: stale/ended turns drop; fresh entries and sibling slugs survive.
+const stale = '2026-09-16T00:00:00.000Z';
+fs.writeFileSync(path.join(hub, '.bizagent', 'thinking.json'), JSON.stringify({
+  '2026-09-16-system-old': { hub: { logFile: '/tmp/o.log', logByteOffset: 5552989, startedAt: stale } },
+  [conv]: {
+    hub: { logFile: '/tmp/hub.log', logByteOffset: 1, startedAt: stale },
+    worker: { logFile: '/tmp/worker.log', logByteOffset: 2, startedAt: new Date().toISOString() },
+  },
+}, null, 2));
+pruneThinking(hub);
+const pruned = readThinking(hub);
+if (pruned['2026-09-16-system-old']) { console.error('stale conversation must be pruned'); process.exit(10); }
+if (!pruned[conv] || pruned[conv].hub || !pruned[conv].worker) { console.error('prune must drop only stale slug entries', pruned[conv]); process.exit(11); }
+// recordThinking prunes on write too.
+fs.writeFileSync(path.join(hub, '.bizagent', 'thinking.json'), JSON.stringify({
+  junk: { hub: { logFile: '/tmp/j.log', logByteOffset: 0, startedAt: stale } },
+}, null, 2));
+recordThinking(hub, conv, 'hub', '/tmp/hub.log', 3);
+const afterRecord = readThinking(hub);
+if (afterRecord.junk) { console.error('recordThinking must prune stale entries', afterRecord); process.exit(12); }
+if (!afterRecord[conv] || !afterRecord[conv].hub) { console.error('recordThinking must keep the new entry', afterRecord[conv]); process.exit(13); }
 NODE
 then
   fail "thinking per-slug unit checks failed"

@@ -55,6 +55,35 @@ function entryBySlug(raw) {
   return raw;
 }
 
+// In-flight turns are short-lived (warm hub turns cap at ~10min); any entry
+// older than this is a turn that ended without its entry being cleared.
+const DEFAULT_THINKING_TTL_MS = 6 * 60 * 60 * 1000;
+
+function thinkingTtlMs() {
+  const raw = Number(process.env.BIZAGENT_THINKING_TTL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_THINKING_TTL_MS;
+}
+
+/** Drop ended/stale slug entries (and now-empty conversations) from a data map. */
+function pruneData(data, maxAgeMs) {
+  const ttl = Number.isFinite(maxAgeMs) && maxAgeMs > 0 ? maxAgeMs : thinkingTtlMs();
+  const cutoff = Date.now() - ttl;
+  let changed = false;
+  for (const convId of Object.keys(data)) {
+    const per = entryBySlug(data[convId]);
+    const kept = {};
+    for (const [slug, entry] of Object.entries(per)) {
+      const started = Date.parse(String((entry || {}).startedAt || ''));
+      // Missing/unparseable startedAt cannot prove the turn is live → stale.
+      if (!Number.isFinite(started) || started < cutoff) { changed = true; continue; }
+      kept[slug] = entry;
+    }
+    if (Object.keys(kept).length) data[convId] = kept;
+    else delete data[convId];
+  }
+  return changed;
+}
+
 function latestSlug(per) {
   const keys = Object.keys(per);
   if (!keys.length) return '';
@@ -76,6 +105,8 @@ function latestSlug(per) {
 function recordThinking(hub, conversationId, slug, logFile, logByteOffset) {
   if (!conversationId || !slug) return;
   const data = readThinking(hub);
+  // Prune ended/stale turns on every write so thinking.json cannot grow forever.
+  pruneData(data);
   const per = entryBySlug(data[conversationId]);
   per[slug] = {
     logFile: String(logFile || ''),
@@ -110,13 +141,17 @@ function clearThinking(hub, conversationId, slug) {
 
 /**
  * Look up a recorded thinking entry.
- * @param {string} [slug] - when omitted, the most recently recorded slug wins.
+ * @param {string} [slug] - when given, ONLY that slug's entry is returned
+ *   (pinned lookup: no fallback to the most recent slug); when omitted, the
+ *   most recently recorded slug wins.
  * @returns {?{ slug: string, logFile: string, logByteOffset: number, startedAt: string }}
  */
 function getThinking(hub, conversationId, slug) {
   const data = readThinking(hub);
   const per = entryBySlug(data[conversationId]);
-  const key = slug && per[slug] ? slug : latestSlug(per);
+  let key = '';
+  if (slug) key = per[slug] ? slug : '';
+  else key = latestSlug(per);
   if (!key || !per[key]) return null;
   return {
     slug: key,
@@ -126,9 +161,22 @@ function getThinking(hub, conversationId, slug) {
   };
 }
 
+/**
+ * Prune ended/stale turns: slug entries older than the TTL (default 6h,
+ * BIZAGENT_THINKING_TTL_MS override) and conversations left empty by pruning.
+ * @returns {boolean} true when the file changed.
+ */
+function pruneThinking(hub, maxAgeMs) {
+  const data = readThinking(hub);
+  const changed = pruneData(data, maxAgeMs);
+  if (changed) writeThinking(hub, data);
+  return changed;
+}
+
 module.exports = {
   clearThinking,
   getThinking,
+  pruneThinking,
   recordThinking,
   readThinking,
   thinkingFile,
