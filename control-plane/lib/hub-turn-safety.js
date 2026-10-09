@@ -642,10 +642,12 @@ function onHubCliExit(hub, turn) {
   const start = Date.now();
   const result = ensureHubUserReply(hub, turn || {});
 
-  // Turn is over — drop any stale in-flight thinking entry so a later stream
-  // for the same conversation can never replay this (or an older) turn's output.
+  // Turn is over — drop the hub's stale in-flight thinking entry so a later
+  // stream for the same conversation can never replay this (or an older) turn's
+  // output. Only the hub slug: a delegated agent's entry for this conversation
+  // may still be live and must not be clobbered.
   if (turn && turn.conversationId) {
-    try { clearThinking(hub, turn.conversationId); } catch (_err) { /* best-effort */ }
+    try { clearThinking(hub, turn.conversationId, 'hub'); } catch (_err) { /* best-effort */ }
   }
 
   logEvent(hub, {

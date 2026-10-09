@@ -827,7 +827,13 @@ async function handleApi(config, req, res) {
   // --- Live "thinking" log (streams an in-flight turn's dispatch stdout) ---
   if (url.pathname === "/api/thinking/stream" && req.method === "GET") {
     const convId = (url.searchParams.get("conv") || "").trim();
-    const thinking = convId ? getThinking(config.hub, convId) : null;
+    // Pin to the hub's own entry so the chat pane always streams dispatch-hub.log.
+    // Agent logs stream only for agent-bound acks (no hub entry for this conv) —
+    // an agent dispatch bound to the active conversation must never steal the
+    // hub chat's stream on (re)connect.
+    const thinking = convId
+      ? (getThinking(config.hub, convId, "hub") || getThinking(config.hub, convId))
+      : null;
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -874,7 +880,9 @@ async function handleApi(config, req, res) {
     const iv = setInterval(() => {
       if (!isAgentActive(config.hub, slug, config.lockLeaseSecs)) {
         clearInterval(iv);
-        clearThinking(config.hub, convId);
+        // Clear only this stream's slug — sibling slug entries for the same
+        // conversation (e.g. a delegated agent still running) must survive.
+        clearThinking(config.hub, convId, slug);
         sendEvent({ done: true });
         try { res.end(); } catch (_err) { /* ignore */ }
         return;
@@ -896,7 +904,10 @@ async function handleApi(config, req, res) {
   if (url.pathname === "/api/thinking/stop" && req.method === "POST") {
     const body = await parseBody(req);
     const convId = (body.conversationId || "").trim();
-    const thinking = convId ? getThinking(config.hub, convId) : null;
+    // Same pinned resolution as the stream: hub entry first, agent-bound fallback.
+    const thinking = convId
+      ? (getThinking(config.hub, convId, "hub") || getThinking(config.hub, convId))
+      : null;
     // Prefer thinking.slug; if the thinking entry is missing/stale, still stop
     // whatever is actually running (hub first, else any active product agent
     // bound to this conversation is handled via agent light — Escape targets hub).
@@ -913,7 +924,8 @@ async function handleApi(config, req, res) {
       }
     }
     if (convId) {
-      clearThinking(config.hub, convId);
+      // Clear only the stopped slug — never wipe sibling slug entries.
+      if (slug) clearThinking(config.hub, convId, slug);
       try {
         appendMessage(
           config.hub,
@@ -967,7 +979,7 @@ async function handleApi(config, req, res) {
       } catch (_err) { /* ignore */ }
       if (convId) {
         const thinking = getThinking(config.hub, convId);
-        if (thinking && thinking.slug === slug) clearThinking(config.hub, convId);
+        if (thinking && thinking.slug === slug) clearThinking(config.hub, convId, slug);
         try {
           appendMessage(
             config.hub,
