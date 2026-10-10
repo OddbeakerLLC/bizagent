@@ -84,4 +84,28 @@ grep -q 'agent-standing' "$TMP/hub/agents/alpha/agent.md" \
 ls "$TMP/hub/.bizagent/backups"/factory-reset-repair-* >/dev/null 2>&1 \
   || fail "no repair backup directory"
 
+# Ops .gitignore: repair must restore the OPS_HUB_GITIGNORE section (the fake
+# hub and the framework source both start without a .gitignore).
+grep -q 'OPS_HUB_GITIGNORE' "$TMP/hub/.gitignore" \
+  || fail "repair did not restore ops .gitignore section"
+grep -q '!registry.json' "$TMP/hub/.gitignore" \
+  || fail "ops .gitignore section missing registry override"
+# Idempotent: a second repair must not duplicate the section. (The first
+# repair's rsync --delete removed the stub control-plane.sh — restore it so
+# the CP probe in the second run works.)
+cat >"$TMP/hub/scripts/control-plane.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "stub control-plane $*"
+exit 0
+STUB
+chmod +x "$TMP/hub/scripts/control-plane.sh"
+bash "$TMP/hub/scripts/factory-reset.sh" repair \
+  --hub "$TMP/hub" \
+  --source "$TMP/fw" \
+  --yes \
+  --no-restart \
+  || fail "second repair failed in sandbox"
+[[ "$(grep -c 'OPS_HUB_GITIGNORE' "$TMP/hub/.gitignore")" -eq 1 ]] \
+  || fail "repair duplicated OPS_HUB_GITIGNORE section"
+
 echo "  ok: factory-reset"

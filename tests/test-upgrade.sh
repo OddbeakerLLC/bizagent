@@ -69,6 +69,12 @@ grep -q 'agent' "$TMP/hub/agents/alpha/agent.md" || fail "upgrade clobbered agen
 # Must not leave a framework cli.json if source had one — live keep wins
 grep -q 'KEEP_CLI' "$TMP/hub/cli.json" || fail "cli.json lost after upgrade"
 [[ -d "$TMP/hub/.bizagent/backups" ]] || fail "upgrade/repair did not create backups"
+# Ops .gitignore: upgrade (via factory-reset repair) must restore the
+# OPS_HUB_GITIGNORE section when the hub lacks it (source has a base .gitignore).
+grep -q 'OPS_HUB_GITIGNORE' "$TMP/hub/.gitignore" \
+  || fail "upgrade did not restore ops .gitignore section"
+grep -q '!registry.json' "$TMP/hub/.gitignore" \
+  || fail "ops .gitignore section missing registry override"
 # registry auto_update still false
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["settings"].get("auto_update") is False' \
   "$TMP/hub/registry.json" || fail "registry settings.auto_update changed unexpectedly"

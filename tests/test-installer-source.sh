@@ -145,3 +145,14 @@ grep -q 'BIZAGENT_TTS_VOICE' "$ROOT/.bizagent/env.example" \
 grep -q 'install-oddbeaker-tts' "$ROOT/README.md" \
   || fail "README missing install-oddbeaker-tts docs"
 
+# Nesting guard: refuse to install inside an existing hub (nested clone bug —
+# running install.sh from inside a hub with a relative BIZAGENT_DIR created
+# <hub>/bizagent/, a full nested clone).
+grep -q 'Refusing to install inside an existing bizagent hub' "$ROOT/install.sh" \
+  || fail "install.sh missing nested-hub refusal message"
+grep -q 'ancestor/registry.json' "$ROOT/install.sh" \
+  || fail "install.sh nesting guard does not detect a hub by registry.json + control-plane/"
+grep -q 'ancestor/control-plane' "$ROOT/install.sh" \
+  || fail "install.sh nesting guard does not detect a hub by control-plane/"
+bash -n "$ROOT/install.sh" || fail "install.sh bash -n failed"
+
