@@ -1435,6 +1435,23 @@ BIZAGENT_SOURCE="${BIZAGENT_SOURCE:-https://github.com/OddbeakerLLC/bizagent.git
 
 choose_dir() {
   INSTALL_DIR="${BIZAGENT_DIR:-$DEFAULT_DIR}"
+
+  # Refuse to nest a fresh clone inside an existing operational hub (running
+  # install.sh from inside a hub with a relative BIZAGENT_DIR used to create
+  # <hub>/bizagent/ — a full nested clone). A hub is a git repo with
+  # registry.json + control-plane/. Installing INTO the hub dir itself is
+  # still allowed (existing-clone / reinstall paths below).
+  local nest_check="$INSTALL_DIR"
+  [[ "$nest_check" = /* ]] || nest_check="$PWD/$nest_check"
+  local ancestor="$nest_check"
+  while :; do
+    ancestor="$(dirname "$ancestor")"
+    [[ "$ancestor" = "/" || "$ancestor" = "." ]] && break
+    if [[ -d "$ancestor/.git" && -f "$ancestor/registry.json" && -d "$ancestor/control-plane" ]]; then
+      die "Refusing to install inside an existing bizagent hub: $ancestor looks like a hub (registry.json + control-plane/). Running the installer here would nest a clone inside it. Set BIZAGENT_DIR to a fresh path outside the hub."
+    fi
+  done
+
   if [[ -d "$INSTALL_DIR" ]] && [[ ! -d "$INSTALL_DIR/.git" ]]; then
     if pgrep -f "bizagent-control-plane" >/dev/null 2>&1; then
       note "Stopping running control plane..."

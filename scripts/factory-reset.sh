@@ -320,6 +320,51 @@ copy_file() {
   cp -a "$src" "$dest"
 }
 
+# Ensure the hub .gitignore carries the OPS_HUB_GITIGNORE section — the same
+# block detach-framework-remote.sh appends at install time. Repair/upgrade must
+# never leave the hub with the public .gitignore only: that would make git
+# ignore registry.json, journal/, company/, agents/ … (ops tracking rules lost).
+ensure_ops_gitignore() {
+  local gitignore="$HUB/.gitignore"
+  if grep -q 'OPS_HUB_GITIGNORE' "$gitignore" 2>/dev/null; then
+    log "  .gitignore: OPS_HUB_GITIGNORE section already present"
+    return 0
+  fi
+  if [[ ! -f "$gitignore" ]]; then
+    if [[ -f "$FRAMEWORK_SRC/.gitignore" ]]; then
+      copy_file "$FRAMEWORK_SRC/.gitignore" "$gitignore"
+      log "  .gitignore: restored public base from framework source"
+    else
+      : >"$gitignore"
+      log "  .gitignore: created (framework source had no base .gitignore)"
+    fi
+  fi
+  cat >>"$gitignore" <<'EOF'
+
+# --- OPS_HUB_GITIGNORE (restored by factory-reset.sh repair) ---
+# Operational hub tracks registry + agent standing docs + knowledge.
+# Override framework rules that ignore them for the *public* repo.
+!registry.json
+!cli.json
+!journal/
+!journal/**
+!company/
+!company/**
+!knowledge-stack/
+!knowledge-stack/**
+!library/
+!library/**
+!agents/
+!agents/**
+# Still never commit live mail or lock noise under agents/
+agents/*/.lock/
+agents/*/.dispatch.md
+agents/*/inbox/
+agents/*/outbox/
+EOF
+  log "  .gitignore: appended OPS_HUB_GITIGNORE overrides (track registry/agents/knowledge; ignore mail)"
+}
+
 do_repair() {
   log "=== factory-reset repair ==="
   log "Hub: $HUB"
@@ -363,6 +408,10 @@ do_repair() {
     log "      not expected, the source may be stale or incomplete (check --source /"
     log "      BIZAGENT_FRAMEWORK / the hub's 'framework' git remote)."
   fi
+
+  # Ops .gitignore: repair/upgrade must never leave the hub without its
+  # operational tracking rules (registry, journal, company, agents, …).
+  ensure_ops_gitignore
 
   # Ensure factory-reset itself is executable after restore
   chmod +x "$HUB/scripts/"*.sh 2>/dev/null || true
