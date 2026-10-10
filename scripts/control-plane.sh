@@ -14,8 +14,12 @@ HUB="${BIZAGENT_HUB:-$ROOT}"
 # This ensures XAI_API_KEY and BIZAGENT_* variables are available.
 load_env() {
   if [ -f "$HUB/.bizagent/env" ]; then
+    # Export assignments so KEY=val lines (e.g. BIZAGENT_TTS_VOICE) reach the node child.
+    # Matches dispatcher / agent launch (set -a; . env).
+    set -a
     # shellcheck disable=SC1091
     . "$HUB/.bizagent/env" 2>/dev/null || true
+    set +a
     echo "Loaded environment from $HUB/.bizagent/env"
   elif [ -f "$HOME/.bashrc" ]; then
     # shellcheck disable=SC1091
@@ -52,6 +56,7 @@ UNITDIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
 find_pids() {
   local dir pid hub_val hub_norm i has_serve
+  local proc_cwd proc_hub proc_hub_norm
   local -a args
   for dir in /proc/[0-9]*; do
     pid="${dir#/proc/}"
@@ -81,11 +86,26 @@ find_pids() {
       fi
     done
     [ "$has_serve" -eq 1 ] || continue
-    [ -n "$hub_val" ] || continue
 
-    hub_norm="$(normalize_path "$hub_val" 2>/dev/null || printf '%s\n' "$hub_val")"
-    if [ "$hub_norm" = "$HUB" ] || [ "$hub_val" = "$HUB" ]; then
-      printf '%s\n' "$pid"
+    hub_norm=""
+    if [ -n "$hub_val" ]; then
+      hub_norm="$(normalize_path "$hub_val" 2>/dev/null || printf '%s\n' "$hub_val")"
+      if [ "$hub_norm" = "$HUB" ] || [ "$hub_val" = "$HUB" ]; then
+        printf '%s\n' "$pid"
+        continue
+      fi
+    else
+      # Started without --hub (BIZAGENT_HUB env or default root): match by
+      # process cwd or environment so stop/status/restart cannot miss it and
+      # leave an old-code control plane running through an upgrade.
+      proc_cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+      proc_hub="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null \
+        | sed -n 's/^BIZAGENT_HUB=//p' | head -n 1)"
+      proc_hub_norm=""
+      [ -z "$proc_hub" ] || proc_hub_norm="$(normalize_path "$proc_hub" 2>/dev/null || printf '%s\n' "$proc_hub")"
+      if [ "$proc_cwd" = "$HUB" ] || [ "$proc_hub" = "$HUB" ] || [ "$proc_hub_norm" = "$HUB" ]; then
+        printf '%s\n' "$pid"
+      fi
     fi
   done
 }
@@ -168,10 +188,20 @@ start_server() {
 
   load_env
 
-  command -v node >/dev/null 2>&1 || {
-    echo "node is required to start the BizAgent control plane" >&2
-    exit 1
-  }
+  REQUIRE_NODE="$ROOT/scripts/lib/require-node.sh"
+  if [[ -f "$REQUIRE_NODE" ]]; then
+    # shellcheck disable=SC1090
+    source "$REQUIRE_NODE"
+    bizagent_require_node || {
+      echo "bizagent-control-plane: Node.js v${BIZAGENT_MIN_NODE_MAJOR:-18}+ required" >&2
+      exit 1
+    }
+  else
+    command -v node >/dev/null 2>&1 || {
+      echo "node is required to start the BizAgent control plane" >&2
+      exit 1
+    }
+  fi
   mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")"
 
   start_hub_daemon_best_effort() {
@@ -267,7 +297,9 @@ case "${1:-}" in
       exit 0
     fi
     rm -f "$PID_FILE"
-    exit 0
+    # Non-zero when not running so scripts (upgrade/factory-reset verification)
+    # can tell "down" from "running" without parsing output.
+    exit 1
     ;;
   restart)
     stop_server

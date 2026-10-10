@@ -70,7 +70,19 @@ if (!threw) {
   process.exit(3);
 }
 
-const fixed = getCliSettings(process.argv[2], catalog, hubConfig, '', '');
+// Empty model → throw (no silent omit of --model)
+threw = false;
+try {
+  getCliSettings(process.argv[2], catalog, hubConfig, '', '');
+} catch (e) {
+  threw = /Model is empty/i.test(e.message);
+}
+if (!threw) {
+  console.error('expected throw when model empty');
+  process.exit(12);
+}
+
+const fixed = getCliSettings(process.argv[2], catalog, hubConfig, '', 'grok-4.5');
 if (fixed.cli !== 'scripts/bizagent-agent') {
   console.error('expected bizagent-agent executable', fixed);
   process.exit(4);
@@ -82,6 +94,10 @@ if (fixed.promptFlag !== '-f') {
 if (!/--provider grok/.test(fixed.extraArgs || '')) {
   console.error('expected --provider grok', fixed);
   process.exit(6);
+}
+if (!/--model grok-4.5/.test(fixed.extraArgs || '')) {
+  console.error('expected --model grok-4.5', fixed);
+  process.exit(13);
 }
 
 const chatgpt = getCliSettings(process.argv[2], catalog, hubConfig, 'chatgpt', 'gpt-4o');
@@ -279,6 +295,94 @@ grep -q "Working. Stand by" "$ROOT/control-plane/lib/conversations.js" \
   || fail "launch-ack text is not 'Working. Stand by...'"
 ! grep -q "PTL on it" "$ROOT/control-plane/lib/conversations.js" \
   || fail "stale 'PTL on it' launch-ack text still present"
+
+# --- Approved Web UI + Installer plan (2026-08-14) ---
+# 1. Live thinking log: stream in place of the static launch-ack.
+grep -q "/api/thinking/stream" "$ROOT/control-plane/server.js" \
+  || fail "server missing live thinking stream endpoint"
+grep -q "/api/thinking/stop" "$ROOT/control-plane/server.js" \
+  || fail "server missing thinking stop endpoint"
+grep -q "recordThinking" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher does not record in-flight thinking"
+grep -q "stopAgentTurn" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing hard-stop helper"
+grep -q "thinking-log" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing live thinking log rendering"
+grep -q "thinking-log" "$ROOT/control-plane/public/styles.css" \
+  || fail "UI missing thinking log styles"
+# 2. Products list: header + three-line rows (product name / agent name / model).
+grep -q "Products" "$ROOT/control-plane/public/index.html" \
+  || fail "rail header is not 'Products'"
+grep -q "agent-product" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing product-name line in rail rows"
+grep -q "agent-name" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing agent-name line in rail rows"
+grep -q "agent-cli-line" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing model line in rail rows"
+# Interrupt: pressing Escape hard-stops the in-flight thinking.
+grep -q "thinkingActive" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing thinking-active guard for Escape interrupt"
+grep -q "stopThinking" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing Escape stop-thinking handler"
+# Thinking preview boundary: stream must never replay prior-turn output.
+grep -q "logByteOffset" "$ROOT/control-plane/lib/thinking.js" \
+  || fail "thinking record does not store logByteOffset"
+grep -q "Number.isFinite(offset)" "$ROOT/control-plane/server.js" \
+  || fail "thinking stream does not guard against stale/missing logByteOffset"
+grep -q "clearThinking" "$ROOT/control-plane/lib/hub-turn-safety.js" \
+  || fail "hub turn completion does not clear stale thinking entry"
+# Thinking stream pin (2026-10-09): hub chat streams only dispatch-hub.log; an
+# agent dispatch bound to the active conversation must not steal the stream.
+grep -q 'getThinking(config.hub, convId, "hub")' "$ROOT/control-plane/server.js" \
+  || fail "thinking stream does not pin the hub slug"
+grep -q "clearThinking(config.hub, convId, slug)" "$ROOT/control-plane/server.js" \
+  || fail "thinking stream/stop must clear only its own slug entry"
+grep -q "clearThinking(hub, turn.conversationId, 'hub')" "$ROOT/control-plane/lib/hub-turn-safety.js" \
+  || fail "hub turn exit must clear only the hub slug entry"
+grep -q "pruneThinking" "$ROOT/control-plane/lib/thinking.js" \
+  || fail "thinking.json missing stale-entry pruning"
+# PlantUML: Library file path only (no topbar scratch button /api/plantuml/render).
+grep -q "renderPlantUml" "$ROOT/control-plane/lib/plantuml.js" \
+  || fail "missing PlantUML render module"
+grep -q "wantRender" "$ROOT/control-plane/server.js" \
+  || fail "server missing Library PlantUML ?render=1 path"
+grep -q "library-diagram\|render=1\|render:" "$ROOT/control-plane/public/library.js" \
+  || fail "Library UI missing diagram preview path"
+! grep -q "plantumlBtn" "$ROOT/control-plane/public/index.html" \
+  || fail "UI still has removed PlantUML scratch button"
+! grep -q "/api/plantuml/render" "$ROOT/control-plane/server.js" \
+  || fail "server still exposes removed /api/plantuml/render"
+# Click-to-stop: running agent status light → /api/agent/:slug/stop
+grep -q 'agentStopMatch' "$ROOT/control-plane/server.js" \
+  || fail "server missing /api/agent/:slug/stop route"
+grep -q 'stopAgentTurn' "$ROOT/control-plane/server.js" \
+  || fail "server stop route does not call stopAgentTurn"
+grep -q "async function stopAgent" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing stopAgent helper"
+grep -q "status-light.running" "$ROOT/control-plane/public/styles.css" \
+  || fail "UI missing running status-light style"
+# Operator stop must hold dispatch markers (no instant re-fire) + warm cancel.
+grep -q "suppressRedispatchAfterStop" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing suppressRedispatchAfterStop after operator stop"
+grep -q "requestWarmHubCancel" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing warm hub cancel client"
+grep -q "isProtectedStopPid" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing protected-pid guard (must not kill CP)"
+grep -q "clearDispatchStateUnlessOperatorStop" "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "dispatcher missing operator-stop-aware clearDispatchState"
+grep -qE "type: ['\"]cancel['\"]|\"type\": \"cancel\"" "$ROOT/scripts/hub-daemon.js" \
+  || fail "hub-daemon missing cancel protocol"
+grep -q "cancelInFlightTurn" "$ROOT/scripts/hub-daemon.js" \
+  || fail "hub-daemon missing cancelInFlightTurn"
+grep -q 'msg.type === .cancel.' "$ROOT/scripts/hub-daemon.js" \
+  || fail "hub-daemon missing cancel message handler"
+grep -q 'await stopAgentTurn' "$ROOT/control-plane/server.js" \
+  || fail "server stop routes must await async stopAgentTurn"
+# 4. Preview: built pages surface as clickable links opening in a new tab (no iframe).
+grep -q 'target="_blank"' "$ROOT/control-plane/public/markdown.js" \
+  || fail "UI does not open preview links in a new tab"
+! grep -q "iframe" "$ROOT/control-plane/public/app.js" \
+  || fail "UI embeds preview in an iframe (should be a plain link)"
 grep -q "getStampConversationId" "$ROOT/control-plane/lib/conversations.js" \
   || fail "missing originating-conversation stamp helper"
 grep -q "getStampConversationId" "$ROOT/control-plane/lib/mail.js" \
@@ -403,7 +507,7 @@ grep -q "dispatchedAt" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher dispatch markers are not time-limited"
 grep -q "dispatchRetrySecs" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not retry marked mail after a launch failure window"
-grep -q "Math.min(60" "$ROOT/control-plane/lib/dispatcher.js" \
+grep -qE "Math\.min\((6 \* 3600|21600)" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher can suppress failed launches for the full lock lease"
 grep -q "pendingUndispatchedMail" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not distinguish new mail from already-dispatched mail"
@@ -437,6 +541,14 @@ grep -q "control-plane" "$ROOT/scripts/bizagent-watch.sh" \
   || fail "bizagent-watch.sh is not a control-plane wrapper"
 grep -q "ensure_node" "$ROOT/install.sh" \
   || fail "installer does not ensure Node.js"
+grep -q "ensure_java" "$ROOT/install.sh" \
+  || fail "installer does not ensure Java (PlantUML)"
+grep -q "ensure_graphviz" "$ROOT/install.sh" \
+  || fail "installer does not ensure Graphviz/dot (PlantUML)"
+grep -q "ensure_plantuml" "$ROOT/install.sh" \
+  || fail "installer does not ensure PlantUML"
+grep -q "ensure_curl" "$ROOT/install.sh" \
+  || fail "installer does not ensure curl"
 grep -q "__PORT__" "$ROOT/install/bizagent-control-plane.service" \
   || fail "service template does not expose configurable port"
 grep -q "__HOST__" "$ROOT/install/bizagent-control-plane.service" \
@@ -465,7 +577,7 @@ grep -q "refreshRuntimeConfig\|refreshRegistry" "$SERVER" \
   || fail "server does not refresh config without a restart"
 grep -q "refreshRegistry" "$ROOT/control-plane/lib/config.js" \
   || fail "config does not expose a registry refresh mechanism"
-grep -q "CODESPAN" "$ROOT/control-plane/public/app.js" \
+grep -q "CODESPAN" "$ROOT/control-plane/public/markdown.js" \
   || fail "UI codespan placeholder does not use a collision-safe marker"
 grep -q "agent-detail" "$SERVER" \
   || fail "server missing /api/agent-detail endpoint"
@@ -481,8 +593,12 @@ grep -q "agent-detail" "$ROOT/control-plane/public/styles.css" \
   || fail "install/install.sh missing"
 [ -x "$ROOT/install/install.sh" ] \
   || fail "install/install.sh is not executable"
-grep -q "install-first-run" "$ROOT/install/install.sh" \
-  || fail "installer does not drop first-run inbox seed"
+grep -q "seed-first-run" "$ROOT/install/install.sh" \
+  || fail "installer does not call seed-first-run.sh"
+grep -q "seed-first-run" "$ROOT/install.sh" \
+  || fail "root install.sh does not call seed-first-run.sh"
+grep -q "install-first-run" "$ROOT/scripts/seed-first-run.sh" \
+  || fail "seed-first-run.sh does not write install-first-run inbox seed"
 
 if command -v node >/dev/null 2>&1; then
   node --check "$SERVER" || fail "server.js syntax check failed"
@@ -1141,8 +1257,8 @@ const {
   reservedReplyBodyPath,
   setOnConversationMutated,
 } = require(`${root}/control-plane/lib/hub-turn-safety`);
-const { launchHub } = require(`${root}/control-plane/lib/dispatcher`);
-const { buildHubTurnPrompt, deriveHubRuntimePrompt } = require(`${root}/control-plane/lib/hub-memory`);
+const { getHubConversationId, launchHub, launchHubCold, dispatchPendingAgents } = require(`${root}/control-plane/lib/dispatcher`);
+const { buildHubTurnPrompt, deriveHubRuntimePrompt, recoverPendingConversationIds, pickPendingConversationId } = require(`${root}/control-plane/lib/hub-memory`);
 const { routeOutboxes, writeOutboxMessage } = require(`${root}/control-plane/lib/mail`);
 
 fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
@@ -1518,11 +1634,11 @@ if (fs.existsSync(bodyPath)) {
   process.exit(35);
 }
 
-// --- write-message helper path: always routes with conversation_id ---
+// --- write-message helper path: funnels into reserved body when present ---
 const conv8 = createConversation(hub, 'WriteMsg');
 postLaunchAck(hub, conv8.id);
 const startedWm = new Date().toISOString();
-prepareReservedReplyBody(hub, conv8.id); // empty — write-message wins via outbox
+const wmReserved = prepareReservedReplyBody(hub, conv8.id); // empty — write-message funnels here
 const wm = writeOutboxMessage(hub, {
   from: 'hub',
   to: 'user',
@@ -1534,13 +1650,21 @@ if (!wm.file || !fs.existsSync(wm.file)) {
   console.error('writeOutboxMessage did not create file', wm);
   process.exit(36);
 }
-const wmRaw = fs.readFileSync(wm.file, 'utf8');
-if (!new RegExp(`conversation_id:\\s*${conv8.id}`).test(wmRaw)) {
-  console.error('write-message outbox missing conversation_id', wmRaw);
+if (wm.via !== 'reserved-body' || wm.file !== wmReserved) {
+  console.error('write-message should funnel into reserved body', wm, wmReserved);
+  process.exit(36);
+}
+const wmBody = fs.readFileSync(wm.file, 'utf8');
+if (!/write-message helper/.test(wmBody)) {
+  console.error('funneled reserved body missing content', wmBody);
   process.exit(39);
 }
-if (!/^to:\s*user\s*$/m.test(wmRaw) || !/^from:\s*hub\s*$/m.test(wmRaw)) {
-  console.error('write-message outbox bad headers', wmRaw);
+// No hub→user outbox file should exist (funnel avoided dual path)
+const outboxWm = fs.existsSync(path.join(hub, 'outbox'))
+  ? fs.readdirSync(path.join(hub, 'outbox')).filter((n) => n.endsWith('.md'))
+  : [];
+if (outboxWm.some((n) => /console-reply|write-message/i.test(n))) {
+  console.error('write-message should not also write outbox when reserved exists', outboxWm);
   process.exit(39);
 }
 const viaWm = ensureHubUserReply(hub, {
@@ -1549,8 +1673,8 @@ const viaWm = ensureHubUserReply(hub, {
   startedAt: startedWm,
   agentLog: emptyLog,
 });
-if (viaWm.action !== 'ok-existing') {
-  console.error('expected ok-existing after write-message', viaWm);
+if (viaWm.action !== 'reserved-body') {
+  console.error('expected reserved-body after funneled write-message', viaWm);
   process.exit(37);
 }
 const afterWm = getConversation(hub, conv8.id);
@@ -1558,7 +1682,7 @@ if (!afterWm.messages.some((m) => m.role === 'hub' && /write-message helper/.tes
   console.error('write-message body not relayed', afterWm.messages);
   process.exit(38);
 }
-// After relay, mail lives in user/inbox/archive with same conversation_id
+// After reserved-body finalize, mail lives in user/inbox/archive with conversation_id
 const archived = path.join(hub, 'user', 'inbox', 'archive');
 const archMail = fs.existsSync(archived)
   ? fs.readdirSync(archived).filter((n) => n.endsWith('.md'))
@@ -1569,6 +1693,162 @@ if (!archMail || !new RegExp(`conversation_id:\\s*${conv8.id}`).test(archMail)) 
   console.error('write-message archived mail missing conversation_id', archMail);
   process.exit(39);
 }
+
+// --- dual-path guard: write-message outbox already relayed → skip reserved body ---
+const convDual = createConversation(hub, 'DualPath');
+postLaunchAck(hub, convDual.id);
+const dualStarted = new Date().toISOString();
+// forceOutbox: simulate legacy dual write (outbox + reserved) without funnel
+writeOutboxMessage(hub, {
+  from: 'hub',
+  to: 'user',
+  subject: 'console reply',
+  body: 'First path via outbox only.',
+  conversationId: convDual.id,
+  forceOutbox: true,
+});
+const dualBody = prepareReservedReplyBody(hub, convDual.id);
+fs.writeFileSync(dualBody, 'Second path via reserved body — must not appear.\n');
+const dual = ensureHubUserReply(hub, {
+  conversationId: convDual.id,
+  logByteOffset: 0,
+  startedAt: dualStarted,
+  agentLog: emptyLog,
+  replyBodyFile: dualBody,
+});
+if (dual.action !== 'ok-existing') {
+  console.error('expected ok-existing when outbox already delivered', dual);
+  process.exit(70);
+}
+const dualMsgs = getConversation(hub, convDual.id).messages.filter((m) => m.role === 'hub');
+if (dualMsgs.length !== 1 || !/First path via outbox/.test(dualMsgs[0].content)) {
+  console.error('dual-path should keep only outbox reply', dualMsgs);
+  process.exit(71);
+}
+if (dualMsgs.some((m) => /Second path/.test(m.content))) {
+  console.error('reserved body must not append after outbox reply', dualMsgs);
+  process.exit(72);
+}
+if (fs.existsSync(dualBody)) {
+  console.error('reserved body should be cleared after dual-path skip');
+  process.exit(73);
+}
+
+// --- near-dupe reserved body after prior hub reply (re-fire) ---
+// Prior reply must be older than hubReplySince floor (startedAt - 2s) so the
+// reserved-body near-dupe path runs (not ok-existing from same-turn outbox).
+const convNd = createConversation(hub, 'NearDupeRes');
+appendMessage(hub, convNd.id, 'hub', 'Agent BA finished the TTS fix on public main.');
+{
+  const c = getConversation(hub, convNd.id);
+  const last = c.messages[c.messages.length - 1];
+  last.created_at = new Date(Date.now() - 30_000).toISOString();
+  fs.writeFileSync(
+    path.join(hub, '.bizagent', 'conversations', `${c.id}.json`),
+    `${JSON.stringify(c, null, 2)}\n`,
+  );
+}
+const ndStarted = new Date().toISOString();
+const ndBody = prepareReservedReplyBody(hub, convNd.id);
+fs.writeFileSync(ndBody, 'Agent BA finished the TTS fix on public main.\n');
+const nd = ensureHubUserReply(hub, {
+  conversationId: convNd.id,
+  logByteOffset: 0,
+  startedAt: ndStarted,
+  agentLog: emptyLog,
+  replyBodyFile: ndBody,
+});
+if (nd.action !== 'ok-existing' || !nd.skippedDuplicate) {
+  console.error('expected skip-near-duplicate for reserved body', nd);
+  process.exit(74);
+}
+const ndHub = getConversation(hub, convNd.id).messages.filter((m) => m.role === 'hub');
+if (ndHub.length !== 1) {
+  console.error('near-dupe reserved should not append second hub message', ndHub);
+  process.exit(75);
+}
+
+// --- dispatch hold: unarchived hub inbox mail stays marked (no re-fire) ---
+const {
+  pendingUndispatchedMail,
+  markMailDispatched,
+  clearDispatchState,
+  dispatchRetrySecs,
+} = require(path.join(root, 'control-plane/lib/dispatcher'));
+const holdInbox = path.join(hub, 'inbox');
+fs.mkdirSync(holdInbox, { recursive: true });
+const holdMail = path.join(holdInbox, '2026-07-24-operator-hold-dup.md');
+fs.writeFileSync(holdMail, `---
+from: operator
+to: hub
+date: 2026-07-24
+subject: hold
+conversation_id: ${convNd.id}
+---
+
+hold me
+`);
+const holdCfg = { lockLeaseSecs: 1800 };
+const holdRetry = dispatchRetrySecs(holdCfg);
+if (holdRetry < 60 || holdRetry > 6 * 3600) {
+  console.error('dispatchRetrySecs out of bounds', holdRetry);
+  process.exit(76);
+}
+markMailDispatched(hub, 'hub', [holdMail], holdRetry);
+const stillPending = pendingUndispatchedMail(hub, 'hub', holdRetry);
+if (stillPending.some((f) => path.basename(f) === path.basename(holdMail))) {
+  console.error('marked mail should not be pending again', stillPending);
+  process.exit(77);
+}
+// Operator stop must re-hold markers and skip clearDispatchState (≠ hard-fail).
+const {
+  suppressRedispatchAfterStop,
+  clearDispatchStateUnlessOperatorStop,
+  wasOperatorStopped,
+  isProtectedStopPid,
+} = require(path.join(root, 'control-plane/lib/dispatcher'));
+// Re-open as "still in inbox after kill" and ensure suppress holds it.
+suppressRedispatchAfterStop(hub, 'hub');
+if (!wasOperatorStopped(hub, 'hub')) {
+  console.error('expected operator-stop stamp after suppressRedispatchAfterStop');
+  process.exit(79);
+}
+const afterStop = pendingUndispatchedMail(hub, 'hub', holdRetry);
+if (afterStop.some((f) => path.basename(f) === path.basename(holdMail))) {
+  console.error('operator stop must not leave mail pending for re-dispatch', afterStop);
+  process.exit(80);
+}
+const cleared = clearDispatchStateUnlessOperatorStop(hub, 'hub');
+if (cleared !== false) {
+  console.error('clearDispatchStateUnlessOperatorStop should no-op after operator stop', cleared);
+  process.exit(81);
+}
+// Protected pid guard: never treat CP pid as killable.
+if (typeof isProtectedStopPid === 'function') {
+  if (!isProtectedStopPid(hub, process.pid)) {
+    console.error('isProtectedStopPid must protect process.pid');
+    process.exit(82);
+  }
+}
+// After archive (file gone), marker drops and new content can dispatch
+fs.unlinkSync(holdMail);
+clearDispatchState(hub, 'hub');
+fs.writeFileSync(holdMail, `---
+from: operator
+to: hub
+date: 2026-07-24
+subject: hold2
+conversation_id: ${convNd.id}
+---
+
+again
+`);
+const afterClear = pendingUndispatchedMail(hub, 'hub', holdRetry);
+if (!afterClear.some((f) => path.basename(f) === path.basename(holdMail))) {
+  console.error('fresh mail after clear should be pending', afterClear);
+  process.exit(78);
+}
+fs.unlinkSync(holdMail);
 
 // --- buildHubTurnPrompt injects reserved path for console mail ---
 // Clear leftover inbox so FIFO binds reserved path to this message (not older fixtures).
@@ -1596,6 +1876,222 @@ if (!turnBody.includes(expectedPath)) {
 if (!fs.existsSync(expectedPath)) {
   console.error('reserved body not created by buildHubTurnPrompt');
   process.exit(41);
+}
+
+// --- recover conversation_id from archive by sender (from: / filename) ---
+for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
+  if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
+}
+fs.mkdirSync(path.join(hub, 'inbox', 'archive'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { max_concurrency: 2, lock_lease_secs: 60 } },
+  products: [{ slug: 'home-control', name: 'Home Control', agent_name: 'Agent HC', projects: [] }],
+}));
+fs.writeFileSync(path.join(hub, 'inbox', 'archive', '2026-09-14-home-control-prior-report.md'), `---
+from: home-control
+to: hub
+date: 2026-09-14
+subject: prior report
+conversation_id: 2026-09-14-home-control-ae9d71
+---
+
+old
+`);
+fs.writeFileSync(path.join(hub, 'inbox', 'archive', '2026-09-10-bizagent-other.md'), `---
+from: bizagent
+to: hub
+date: 2026-09-10
+subject: other
+conversation_id: 2026-08-14-bizagent-78cf12
+---
+
+other
+`);
+const recoveredPending = path.join(hub, 'inbox', '2026-09-16-home-control-fresh-report.md');
+fs.writeFileSync(recoveredPending, `---
+from: home-control
+to: hub
+date: 2026-09-16
+subject: fresh report
+---
+
+new work
+`);
+const recoveredTurn = buildHubTurnPrompt(hub);
+const recoveredBody = fs.readFileSync(recoveredPending, 'utf8');
+if (!/^conversation_id:\s*2026-09-14-home-control-ae9d71\s*$/m.test(recoveredBody)) {
+  console.error('pending mail not stamped from same-sender archive', recoveredBody.slice(0, 400));
+  process.exit(46);
+}
+const recoveredTurnText = fs.readFileSync(recoveredTurn, 'utf8');
+if (!recoveredTurnText.includes('2026-09-14-home-control-ae9d71')) {
+  console.error('turn prompt missing recovered conversation_id');
+  process.exit(47);
+}
+fs.unlinkSync(recoveredPending);
+const filenameOnlyPending = path.join(hub, 'inbox', '2026-09-16-home-control-filename-only.md');
+fs.writeFileSync(filenameOnlyPending, `---
+to: hub
+date: 2026-09-16
+subject: filename only
+---
+
+no from header
+`);
+if (getHubConversationId(hub) !== '2026-09-14-home-control-ae9d71') {
+  console.error('getHubConversationId did not recover from filename sender');
+  process.exit(48);
+}
+if (!/^conversation_id:\s*2026-09-14-home-control-ae9d71\s*$/m.test(fs.readFileSync(filenameOnlyPending, 'utf8'))) {
+  console.error('filename-only pending mail not stamped from archive');
+  process.exit(49);
+}
+fs.unlinkSync(filenameOnlyPending);
+const keepPending = path.join(hub, 'inbox', '2026-09-16-home-control-keep.md');
+fs.writeFileSync(keepPending, `---
+from: home-control
+to: hub
+date: 2026-09-16
+subject: keep
+conversation_id: 2026-09-16-keep-abcdef
+---
+
+keep me
+`);
+recoverPendingConversationIds(hub);
+if (!/^conversation_id:\s*2026-09-16-keep-abcdef\s*$/m.test(fs.readFileSync(keepPending, 'utf8'))) {
+  console.error('recovery overwrote existing conversation_id');
+  process.exit(50);
+}
+fs.unlinkSync(keepPending);
+for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
+  if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
+}
+
+// Newest operator console mail wins over older agent reports (reserved-body bind).
+fs.writeFileSync(path.join(hub, 'inbox', '2026-09-15-home-control-old-report.md'), `---
+from: home-control
+to: hub
+date: 2026-09-15
+subject: old report
+conversation_id: 2026-09-14-home-control-ae9d71
+---
+
+old
+`);
+fs.writeFileSync(path.join(hub, 'inbox', '2026-09-16-operator-console-message-20260916020659323-65ce0f.md'), `---
+from: operator
+to: hub
+date: 2026-09-16
+subject: console message
+conversation_id: 2026-08-13-marketing-c3f516
+---
+
+Hello?
+`);
+if (pickPendingConversationId(hub) !== '2026-08-13-marketing-c3f516') {
+  console.error('operator console mail should win over older agent cid', pickPendingConversationId(hub));
+  process.exit(51);
+}
+if (getHubConversationId(hub) !== '2026-08-13-marketing-c3f516') {
+  console.error('getHubConversationId should prefer operator console mail');
+  process.exit(52);
+}
+const opTurn = buildHubTurnPrompt(hub, { conversationId: '2026-08-13-marketing-c3f516' });
+const opTurnText = fs.readFileSync(opTurn, 'utf8');
+const opReserved = reservedReplyBodyPath(hub, '2026-08-13-marketing-c3f516');
+if (!opTurnText.includes(opReserved)) {
+  console.error('turn prompt reserved body bound to wrong conversation', opTurnText.slice(0, 600));
+  process.exit(53);
+}
+const fifoTurn = buildHubTurnPrompt(hub);
+const fifoTurnText = fs.readFileSync(fifoTurn, 'utf8');
+if (!fifoTurnText.includes(opReserved)) {
+  console.error('buildHubTurnPrompt without opts should still pick operator cid', fifoTurnText.slice(0, 600));
+  process.exit(54);
+}
+for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
+  if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
+}
+
+// launchHubCold: prompt throw releases hub lock and logs hub_turn_prompt_error
+const promptErrLock = path.join(hub, '.bizagent', 'hub.lock');
+fs.mkdirSync(promptErrLock, { recursive: true });
+fs.writeFileSync(path.join(promptErrLock, 'pid'), String(process.pid));
+launchHubCold({ hub }, {
+  conversationId: '',
+  startedAt: new Date().toISOString(),
+  logOffset: 0,
+  stderrOffset: 0,
+  agentLog: path.join(hub, 'logs', 'dispatch-hub.log'),
+  agentStderr: path.join(hub, 'logs', 'dispatch-hub.stderr'),
+  runtimeCwd: hub,
+  lock: promptErrLock,
+  hubModel: '',
+  hubCliName: '',
+  cliJson: {},
+});
+if (fs.existsSync(promptErrLock)) {
+  console.error('hub_turn_prompt_error should release hub lock');
+  process.exit(55);
+}
+const structuredAfterPrompt = fs.existsSync(path.join(hub, 'logs', 'structured.log'))
+  ? fs.readFileSync(path.join(hub, 'logs', 'structured.log'), 'utf8')
+  : '';
+if (!/"event":"hub_turn_prompt_error"/.test(structuredAfterPrompt)) {
+  console.error('expected hub_turn_prompt_error log', structuredAfterPrompt.slice(-400));
+  process.exit(56);
+}
+
+// dispatchPendingAgents: launchHub throw releases hub lock and logs hub_launch_error
+const hubMemoryPath = require.resolve(`${root}/control-plane/lib/hub-memory`);
+const dispatcherPath = require.resolve(`${root}/control-plane/lib/dispatcher`);
+const hubMemoryMod = require(hubMemoryPath);
+const origEnsureHubRuntimePrompt = hubMemoryMod.ensureHubRuntimePrompt;
+hubMemoryMod.ensureHubRuntimePrompt = () => { throw new Error('forced hub launch fail'); };
+delete require.cache[dispatcherPath];
+const { dispatchPendingAgents: dispatchWithForcedLaunchFail } = require(dispatcherPath);
+fs.writeFileSync(path.join(hub, 'inbox', '2026-09-16-operator-console-message-launch-fail.md'), `---
+from: operator
+to: hub
+date: 2026-09-16
+subject: launch fail
+conversation_id: 2026-08-13-marketing-c3f516
+---
+
+ping
+`);
+const launchErrLock = path.join(hub, '.bizagent', 'hub.lock');
+let launchDispatchErr = null;
+try {
+  dispatchWithForcedLaunchFail({
+    hub,
+    registry: { products: [] },
+    hubSlots: 1,
+    agentSlots: 1,
+    lockLeaseSecs: 60,
+  });
+} catch (err) {
+  launchDispatchErr = err;
+} finally {
+  hubMemoryMod.ensureHubRuntimePrompt = origEnsureHubRuntimePrompt;
+  delete require.cache[dispatcherPath];
+}
+if (launchDispatchErr) {
+  console.error('dispatchPendingAgents should catch launchHub errors', launchDispatchErr);
+  process.exit(57);
+}
+if (fs.existsSync(launchErrLock)) {
+  console.error('hub_launch_error should release hub lock');
+  process.exit(58);
+}
+const structuredAfterLaunch = fs.readFileSync(path.join(hub, 'logs', 'structured.log'), 'utf8');
+if (!/"event":"hub_launch_error"/.test(structuredAfterLaunch)) {
+  console.error('expected hub_launch_error log', structuredAfterLaunch.slice(-400));
+  process.exit(59);
+}
+for (const name of fs.readdirSync(path.join(hub, 'inbox'))) {
+  if (name.endsWith('.md')) fs.unlinkSync(path.join(hub, 'inbox', name));
 }
 
 // --- push path: safety net mutations notify main-process hook + return pushable ids ---
@@ -1790,14 +2286,62 @@ NODE
 const root = process.argv[2];
 const fs = require('fs');
 const vm = require('vm');
-const src = fs.readFileSync(`${root}/control-plane/public/app.js`, 'utf8');
+const src = fs.readFileSync(`${root}/control-plane/public/markdown.js`, 'utf8')
+  + '\n' + fs.readFileSync(`${root}/control-plane/public/app.js`, 'utf8');
+const noop = () => {};
+const el = () => ({
+  addEventListener: noop,
+  textContent: '',
+  innerHTML: '',
+  dataset: {},
+  value: '',
+  style: {},
+  classList: { toggle: noop, add: noop, remove: noop, contains: () => false },
+  setAttribute: noop,
+  getAttribute: () => null,
+  appendChild: noop,
+  removeChild: noop,
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  title: '',
+  disabled: false,
+  checked: false,
+  focus: noop,
+  click: noop,
+});
 const sandbox = {
-  document: { getElementById: () => ({ addEventListener: () => {}, textContent: '', dataset: {}, value: '' }) },
+  document: {
+    getElementById: el,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: el,
+    addEventListener: noop,
+    body: el(),
+    documentElement: el(),
+  },
   setInterval: () => 0,
+  setTimeout: () => 0,
+  clearInterval: noop,
+  clearTimeout: noop,
+  localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  navigator: { userAgent: 'node-test' },
+  location: { hash: '', href: 'http://localhost/', pathname: '/', search: '' },
+  history: { replaceState: noop, pushState: noop },
+  speechSynthesis: undefined,
+  SpeechSynthesisUtterance: function () {},
+  Audio: function () { this.play = () => Promise.resolve(); this.pause = noop; },
+  URL: URL,
+  Blob: function () {},
   fetch: () => Promise.reject(new Error('no network in test')),
-  EventSource: function() { this.onmessage = null; this.onerror = null; this.close = () => {}; },
+  EventSource: function() { this.onmessage = null; this.onerror = null; this.close = noop; },
   console,
+  addEventListener: noop,
+  removeEventListener: noop,
 };
+sandbox.window = sandbox;
+sandbox.self = sandbox;
+sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(src, sandbox);
 const bare = sandbox.renderMarkdown('8 of 12 agents responded.');
@@ -1853,6 +2397,68 @@ if (stillCode.includes('<table>') || stillCode.includes('<img ')) {
 }
 if (!stillCode.includes('<code>![x](https://example.com/a.png)</code>')) {
   console.error('inline image syntax inside code span broken:', stillCode); process.exit(12);
+}
+
+// Nested lists (ul/ol, mixed, blank ends list).
+const nestedUl = sandbox.renderMarkdown('- parent\n  - child\n  - child2\n- sibling');
+if (!/<ul><li>parent<ul><li>child<\/li><li>child2<\/li><\/ul><\/li><li>sibling<\/li><\/ul>/.test(nestedUl)) {
+  console.error('nested ul not rendered:', nestedUl); process.exit(13);
+}
+const nestedMixed = sandbox.renderMarkdown('- a\n  1. one\n  2. two\n- b');
+if (!nestedMixed.includes('<ul><li>a<ol><li>one</li><li value="2">two</li></ol></li><li>b</li></ul>')) {
+  console.error('ul>ol nest broken:', nestedMixed); process.exit(14);
+}
+const nestedOlUl = sandbox.renderMarkdown('1. first\n   - nested\n2. second');
+if (!nestedOlUl.includes('<ol><li>first<ul><li>nested</li></ul></li><li value="2">second</li></ol>')) {
+  console.error('ol>ul nest broken:', nestedOlUl); process.exit(15);
+}
+const nestEnds = sandbox.renderMarkdown('- a\n  - b\n\nAfter');
+if (!nestEnds.includes('<p>After</p>') || nestEnds.includes('After</li>')) {
+  console.error('blank should end nested list:', nestEnds); process.exit(16);
+}
+const mixedKids = sandbox.renderMarkdown('- a\n  - b\n  1. c');
+if (!mixedKids.includes('<ul><li>a<ul><li>b</li></ul><ol><li>c</li></ol></li></ul>')) {
+  console.error('mixed nested kids broken:', mixedKids); process.exit(17);
+}
+// Loose ordered lists (blank line between items) must stay one <ol> so the
+// browser numbers 1, 2, 3 — not a fresh "1." per item.
+const looseOl = sandbox.renderMarkdown('1. one\n\n2. two\n\n3. three');
+if (looseOl !== '<ol><li>one</li><li value="2">two</li><li value="3">three</li></ol>') {
+  console.error('loose ol restarted at 1:', looseOl); process.exit(161);
+}
+const looseAllOnes = sandbox.renderMarkdown('1. one\n\n1. two\n\n1. three');
+if (looseAllOnes !== '<ol><li>one</li><li value="2">two</li><li value="3">three</li></ol>') {
+  console.error('all-1 markers should still increment:', looseAllOnes); process.exit(162);
+}
+const tightOl = sandbox.renderMarkdown('1. one\n2. two\n3. three');
+if (tightOl !== '<ol><li>one</li><li value="2">two</li><li value="3">three</li></ol>') {
+  console.error('tight ol values broken:', tightOl); process.exit(163);
+}
+const olStart = sandbox.renderMarkdown('10. ten\n11. eleven');
+if (!olStart.includes('<ol start="10">') || !olStart.includes('<li value="10">ten</li><li value="11">eleven</li>')) {
+  console.error('ol start/value broken:', olStart); process.exit(164);
+}
+
+// TTS markdown fence: ```tts keeps inner prose, not a code block; speaks ≤2 sentences.
+const ttsFence = sandbox.renderMarkdown('```tts\nSpoken one. Spoken two.\n```\n\n## Body\n\nMore detail.');
+if (ttsFence.includes('<pre>') || ttsFence.includes('```')) {
+  console.error('tts fence should not render as code/fence:', ttsFence); process.exit(18);
+}
+if (!ttsFence.includes('Spoken one. Spoken two.') || !ttsFence.includes('<h2>Body</h2>')) {
+  console.error('tts fence unwrap lost prose/body:', ttsFence); process.exit(19);
+}
+const ttsSpoken = sandbox.buildSpokenSummary('```tts\nSpoken one. Spoken two.\n```\n\n## Body\n\nMore detail that must not be spoken.');
+if (ttsSpoken !== 'Spoken one. Spoken two.') {
+  console.error('tts fence speak mismatch:', ttsSpoken); process.exit(20);
+}
+// Legacy HTML tag still unwraps + speaks.
+const legacyHtml = sandbox.renderMarkdown('<tts-summary>Legacy one. Legacy two.</tts-summary>\n\nAfter.');
+if (legacyHtml.includes('tts-summary') || !legacyHtml.includes('Legacy one. Legacy two.')) {
+  console.error('legacy tts-summary unwrap broken:', legacyHtml); process.exit(21);
+}
+const legacySpoken = sandbox.buildSpokenSummary('<tts-summary>Legacy one. Legacy two.</tts-summary>\n\nAfter.');
+if (legacySpoken !== 'Legacy one. Legacy two.') {
+  console.error('legacy tts-summary speak mismatch:', legacySpoken); process.exit(22);
 }
 NODE
   then
@@ -2072,16 +2678,15 @@ if (!fallback._hubCliFromLegacyDotCli) {
   console.error('expected _hubCliFromLegacyDotCli marker');
   process.exit(7);
 }
-// Legacy cliName "claude" maps to claude provider
-const fallbackSettings = getCliSettings(
-  hub, fallback._cliJson, fallback, fallback.hubCliName || '', fallback.hubModel || '',
-);
-if (fallbackSettings.cli !== 'scripts/bizagent-agent') {
-  console.error('fallback executable wrong:', fallbackSettings.cli);
-  process.exit(8);
+// Empty model now fails clear (a8d00b2) — no silent provider default.
+let emptyModelThrew = false;
+try {
+  getCliSettings(hub, fallback._cliJson, fallback, fallback.hubCliName || '', fallback.hubModel || '');
+} catch (err) {
+  emptyModelThrew = /Model is empty/i.test(err.message);
 }
-if (!/--provider claude/.test(fallbackSettings.extraArgs || '')) {
-  console.error('legacy claude should map to claude provider:', fallbackSettings.extraArgs);
+if (!emptyModelThrew) {
+  console.error('empty hub model must fail clear in getCliSettings');
   process.exit(9);
 }
 
@@ -2154,7 +2759,8 @@ if (/Keep that file compact\. Compress older turns/i.test(prompt)) {
   console.error('slim prompt still asks LLM to compress session');
   process.exit(3);
 }
-if (Buffer.byteLength(prompt, 'utf8') > 6000) {
+// Budget allows slim always-on prompt + compact playbooks/consult rule (~8KB).
+if (Buffer.byteLength(prompt, 'utf8') > 8500) {
   console.error('always-on hub prompt too large:', Buffer.byteLength(prompt, 'utf8'));
   process.exit(4);
 }
@@ -2189,7 +2795,7 @@ const catalog = {
 };
 const settings = getCliSettings(hub, catalog, {
   cli: 'claude', hubCliName: 'claude', hubProvider: 'grok',
-}, 'grok', '');
+}, 'grok', 'grok-4.5');
 if (settings.cli !== 'scripts/bizagent-agent') {
   console.error('expected bizagent-agent executable:', settings.cli);
   process.exit(9);
@@ -2204,7 +2810,7 @@ if (!/(^|\s)-y(\s|$)/.test(settings.extraArgs || '')) {
 }
 const viaClaude = getCliSettings(hub, catalog, {
   cli: 'grok', hubCliName: 'grok', hubProvider: 'claude',
-}, 'claude', '');
+}, 'claude', 'claude-sonnet-4-6');
 if (viaClaude.cli !== 'scripts/bizagent-agent' || viaClaude.promptFlag !== '-f') {
   console.error('claude provider should still launch bizagent-agent:', viaClaude);
   process.exit(10);
@@ -2835,5 +3441,228 @@ NODE
 then
   fail "provider credit-alert checks failed"
 fi
+
+# thinking.json: per-slug entries — slug B must not clobber slug A on the same
+# conversation (2026-09-07 Boxy/BeakerNet incident).
+if ! node - "$ROOT" "$TMP" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.argv[2];
+const hub = process.argv[3];
+const {
+  recordThinking, getThinking, clearThinking, readThinking, pruneThinking,
+} = require(path.join(root, 'control-plane/lib/thinking'));
+const conv = '2026-09-07-test-conv';
+recordThinking(hub, conv, 'alpha', '/tmp/a.log', 10);
+recordThinking(hub, conv, 'beta', '/tmp/b.log', 20);
+const both = readThinking(hub);
+const per = both[conv];
+if (!per || !per.alpha || !per.beta) { console.error('both slug entries must coexist', both); process.exit(1); }
+if (per.alpha.logFile !== '/tmp/a.log' || Number(per.alpha.logByteOffset) !== 10) { console.error('alpha entry wrong', per.alpha); process.exit(2); }
+const latest = getThinking(hub, conv);
+if (!latest || latest.slug !== 'beta') { console.error('latest slug should win', latest); process.exit(3); }
+const alpha = getThinking(hub, conv, 'alpha');
+if (!alpha || alpha.logFile !== '/tmp/a.log') { console.error('slug lookup failed', alpha); process.exit(4); }
+clearThinking(hub, conv, 'beta');
+const after = readThinking(hub);
+if (!after[conv] || !after[conv].alpha || after[conv].beta) { console.error('clearThinking(slug) must remove only that slug', after); process.exit(5); }
+clearThinking(hub, conv);
+if (readThinking(hub)[conv]) { console.error('clearThinking(conv) must drop entry'); process.exit(6); }
+// Legacy flat entry compat ({ slug, logFile, ... })
+fs.writeFileSync(path.join(hub, '.bizagent', 'thinking.json'), JSON.stringify({
+  [conv]: { slug: 'gamma', logFile: '/tmp/g.log', logByteOffset: 5, startedAt: '2026-09-07T00:00:00.000Z' },
+}, null, 2));
+const legacy = getThinking(hub, conv);
+if (!legacy || legacy.slug !== 'gamma' || legacy.logFile !== '/tmp/g.log') { console.error('legacy entry not normalized', legacy); process.exit(7); }
+// Pinned slug lookup: hub chat must stream dispatch-hub.log even when an agent
+// dispatch was recorded more recently against the same conversation.
+recordThinking(hub, conv, 'hub', '/tmp/hub.log', 1);
+recordThinking(hub, conv, 'worker', '/tmp/worker.log', 2);
+const pinned = getThinking(hub, conv, 'hub');
+if (!pinned || pinned.slug !== 'hub' || pinned.logFile !== '/tmp/hub.log') { console.error('pinned hub lookup failed', pinned); process.exit(8); }
+const missing = getThinking(hub, conv, 'no-such-slug');
+if (missing !== null) { console.error('pinned lookup must not fall back to latest slug', missing); process.exit(9); }
+// Pruning: stale/ended turns drop; fresh entries and sibling slugs survive.
+const stale = '2026-09-16T00:00:00.000Z';
+fs.writeFileSync(path.join(hub, '.bizagent', 'thinking.json'), JSON.stringify({
+  '2026-09-16-system-old': { hub: { logFile: '/tmp/o.log', logByteOffset: 5552989, startedAt: stale } },
+  [conv]: {
+    hub: { logFile: '/tmp/hub.log', logByteOffset: 1, startedAt: stale },
+    worker: { logFile: '/tmp/worker.log', logByteOffset: 2, startedAt: new Date().toISOString() },
+  },
+}, null, 2));
+pruneThinking(hub);
+const pruned = readThinking(hub);
+if (pruned['2026-09-16-system-old']) { console.error('stale conversation must be pruned'); process.exit(10); }
+if (!pruned[conv] || pruned[conv].hub || !pruned[conv].worker) { console.error('prune must drop only stale slug entries', pruned[conv]); process.exit(11); }
+// recordThinking prunes on write too.
+fs.writeFileSync(path.join(hub, '.bizagent', 'thinking.json'), JSON.stringify({
+  junk: { hub: { logFile: '/tmp/j.log', logByteOffset: 0, startedAt: stale } },
+}, null, 2));
+recordThinking(hub, conv, 'hub', '/tmp/hub.log', 3);
+const afterRecord = readThinking(hub);
+if (afterRecord.junk) { console.error('recordThinking must prune stale entries', afterRecord); process.exit(12); }
+if (!afterRecord[conv] || !afterRecord[conv].hub) { console.error('recordThinking must keep the new entry', afterRecord[conv]); process.exit(13); }
+NODE
+then
+  fail "thinking per-slug unit checks failed"
+fi
+grep -q "thinkingDone" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing thinking done-reopen guard"
+grep -q "thinking-stall" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing stall heartbeat line"
+grep -q "thinking-stall" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing thinking stall rule"
+grep -q "stall: true" "$SERVER" \
+  || fail "thinking stream missing stall heartbeat"
+grep -q "activeSlugKey" "$SERVER" \
+  || fail "tick does not push board on live-slug change"
+grep -q "clearDispatchState" "$SERVER" \
+  || fail "model-change stop does not release dispatch markers"
+grep -q "syncProductsRail" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing desktop products-rail open sync"
+grep -q "::details-content" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing desktop details-content override for products rail"
+
+# Fleet thinking viewer: drawer link + dispatch-*.log SSE (stdout only).
+grep -q "/api/logs/stream" "$SERVER" \
+  || fail "server missing /api/logs/stream thinking-logs endpoint"
+grep -q "streamThinkingLogs" "$SERVER" \
+  || fail "server does not wire streamThinkingLogs"
+grep -q "thinkingLogsBtn" "$ROOT/control-plane/public/index.html" \
+  || fail "drawer missing Thinking... link"
+grep -q "Thinking..." "$ROOT/control-plane/public/index.html" \
+  || fail "drawer Thinking... label missing"
+grep -q "openThinkingLogsTab" "$ROOT/control-plane/public/app.js" \
+  || fail "UI missing named Thinking logs tab open"
+[ -f "$ROOT/control-plane/public/logs.html" ] || fail "logs.html missing"
+[ -f "$ROOT/control-plane/public/logs.js" ] || fail "logs.js missing"
+[ -f "$ROOT/control-plane/lib/thinking-logs.js" ] || fail "thinking-logs module missing"
+grep -q "THINKING_LOG_RE" "$ROOT/control-plane/lib/thinking-logs.js" \
+  || fail "thinking-logs missing THINKING_LOG_RE"
+! grep -E "name: '\\*\\.stderr'|structured\\.log" "$ROOT/control-plane/lib/thinking-logs.js" \
+  || fail "thinking-logs should not select stderr or structured.log"
+grep -q "logs-pane" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing thinking logs pane"
+grep -q "logs-chrome" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing sticky thinking logs chrome"
+grep -q '—— ${label} ——' "$ROOT/control-plane/public/logs.js" \
+  || fail "logs UI missing speaker header for All view"
+grep -q "lastSpeaker" "$ROOT/control-plane/public/logs.js" \
+  || fail "logs UI missing speaker-change tracking"
+
+if ! node - "$ROOT" <<'NODE'
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const {
+  ALL_TAIL_LINES,
+  CATCHUP_BYTES,
+  filesMatchingFilter,
+  initialOffset,
+  listThinkingLogFiles,
+  normalizeFilter,
+  parseThinkingLogName,
+  readChunk,
+  startOffsetForFilter,
+  tailLineOffset,
+} = require(path.join(process.argv[2], 'control-plane/lib/thinking-logs'));
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'ba-tlogs-'));
+const logs = path.join(hub, 'logs');
+fs.mkdirSync(logs);
+fs.writeFileSync(path.join(logs, 'dispatch-hub.log'), 'hub thinks\n');
+fs.writeFileSync(path.join(logs, 'dispatch-alpha.log'), 'alpha thinks\n');
+fs.writeFileSync(path.join(logs, 'dispatch-alpha.stderr'), 'alpha err\n');
+fs.writeFileSync(path.join(logs, 'structured.log'), '{"no":true}\n');
+fs.writeFileSync(path.join(logs, 'control-plane.log'), 'cp\n');
+fs.writeFileSync(path.join(logs, 'nightly.log'), 'cron\n');
+fs.mkdirSync(path.join(logs, 'dispatch-sneaky.log')); // not a file
+
+const listed = listThinkingLogFiles(hub);
+const names = listed.map((f) => f.name).sort();
+if (names.join(',') !== 'dispatch-alpha.log,dispatch-hub.log') {
+  console.error('listed wrong', names);
+  process.exit(1);
+}
+if (listed.some((f) => f.name.endsWith('.stderr') || f.name === 'structured.log')) {
+  console.error('non-thinking files leaked', names);
+  process.exit(2);
+}
+if (normalizeFilter('../etc/passwd') !== null) {
+  console.error('pathy filter accepted');
+  process.exit(3);
+}
+if (normalizeFilter('all') !== 'all' || normalizeFilter('hub') !== 'hub') {
+  console.error('normalizeFilter failed');
+  process.exit(4);
+}
+const hubOnly = filesMatchingFilter(listed, 'hub');
+if (hubOnly.length !== 1 || hubOnly[0].slug !== 'hub') {
+  console.error('hub filter failed', hubOnly);
+  process.exit(5);
+}
+if (parseThinkingLogName('dispatch-foo.stderr') || parseThinkingLogName('structured.log')) {
+  console.error('parse should reject non-thinking names');
+  process.exit(6);
+}
+const big = Buffer.alloc(40 * 1024, 'x');
+const bigPath = path.join(logs, 'dispatch-big.log');
+fs.writeFileSync(bigPath, big);
+const off = initialOffset(big.length);
+if (off !== big.length - 32 * 1024) {
+  console.error('initialOffset wrong', off);
+  process.exit(7);
+}
+const chunk = readChunk(bigPath, off, 64 * 1024);
+if (!chunk.text || chunk.text.length !== 32 * 1024) {
+  console.error('readChunk tail wrong', chunk.text && chunk.text.length);
+  process.exit(8);
+}
+const rotated = readChunk(path.join(logs, 'dispatch-hub.log'), 99999, 1024);
+if (!rotated.rotated || rotated.offset !== rotated.text.length) {
+  console.error('rotation reset failed', rotated);
+  process.exit(9);
+}
+const linesPath = path.join(logs, 'dispatch-lines.log');
+const lines = Array.from({ length: 25 }, (_, i) => `line-${i + 1}`).join('\n') + '\n';
+fs.writeFileSync(linesPath, lines);
+const tailOff = tailLineOffset(linesPath, 20);
+const tailText = fs.readFileSync(linesPath).slice(tailOff).toString('utf8');
+const tailCount = tailText.replace(/\n$/, '').split('\n').length;
+if (tailCount !== 20 || !tailText.startsWith('line-6\n')) {
+  console.error('tailLineOffset last-20 failed', tailCount, JSON.stringify(tailText.slice(0, 40)));
+  process.exit(10);
+}
+if (ALL_TAIL_LINES !== 20) {
+  console.error('ALL_TAIL_LINES should be 20', ALL_TAIL_LINES);
+  process.exit(11);
+}
+if (startOffsetForFilter('hub', linesPath, fs.statSync(linesPath).size) !== 0) {
+  console.error('single-agent small log must start at byte 0');
+  process.exit(12);
+}
+if (startOffsetForFilter('hub', linesPath, 0) !== tailOff) {
+  console.error('single-agent unknown size must tail last-20, not byte 0');
+  process.exit(16);
+}
+if (startOffsetForFilter('all', linesPath, 0) !== tailOff) {
+  console.error('all filter must start at last-20 offset');
+  process.exit(13);
+}
+const singleOff = startOffsetForFilter('hub', bigPath, big.length);
+if (singleOff !== initialOffset(big.length)) {
+  console.error('single-agent large log must start at last INITIAL_BYTES', singleOff);
+  process.exit(14);
+}
+if (CATCHUP_BYTES > 512 * 1024) {
+  console.error('CATCHUP_BYTES too large for the thinking page', CATCHUP_BYTES);
+  process.exit(15);
+}
+NODE
+then
+  fail "thinking-logs unit checks failed"
+fi
+
 
 echo "  ok: control-plane"

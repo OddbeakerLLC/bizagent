@@ -66,22 +66,38 @@ You ask the hub for the big picture; it digests every journal and reports back.
 
 Three steps — one command does the work.
 
+> [!IMPORTANT]
+> **Get your LLM API key *before* you start the install.** The installer will
+> ask you to pick a provider and then prompt for that provider's API key — and
+> it will **not complete until a valid key is entered** (it validates the key
+> with a tiny "hello" request before proceeding). So grab your key now and have
+> it ready at install time to keep the flow friction-free.
+>
+> The default provider is **Grok (xAI)** — get a key at
+> [console.x.ai](https://console.x.ai/). For other providers see the
+> [provider table](#llm-providers) below. You can also hand the key off
+> non-interactively so the installer never pauses:
+> `BIZAGENT_API_KEY=... curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash`
+
 **Step 1 (optional).** Create a dedicated OS user (strongly recommended):
 
 ```sh
-# Pre-install system dependencies (requires sudo/root)
-sudo apt-get install -y git nodejs cron   # Debian/Ubuntu
-# sudo dnf install -y git nodejs cron     # Fedora/RHEL
-# brew install git node                   # macOS
+# Pre-install system dependencies (requires sudo/root) — optional but fastest
+sudo apt-get install -y git python3 curl nodejs npm cron openjdk-17-jre-headless graphviz plantuml   # Debian/Ubuntu
+# sudo dnf install -y git python3 curl nodejs npm cronie java-17-openjdk-headless graphviz plantuml # Fedora/RHEL
+# brew install git python3 curl node openjdk@17 graphviz plantuml                                   # macOS
 
 # Create the user and run the installer as that user
 sudo adduser bizagent
 sudo -u bizagent bash -c 'curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash'
 ```
 
-The installer uses `sudo` to install missing packages, so pre-installing
-them (or granting `bizagent` passwordless `sudo` for your package manager)
-is required.
+The installer installs any missing packages via your package manager (`sudo`
+on Linux, Homebrew on macOS). When `sudo` is unavailable it falls back to a
+**user-local** stack under `~/.bizagent/tools/` for Java, Graphviz (`dot`), and
+PlantUML so the web UI diagram preview still works. Pre-installing the packages
+above (or granting passwordless `sudo` for the package manager) is still the
+smoothest path.
 
 > **Headless server (VPS, SSH-only)?** Prefer non-interactive key handoff:
 > `BIZAGENT_API_KEY=... curl -fsSL ... | bash` (writes `.bizagent/env` for the
@@ -96,12 +112,44 @@ is required.
 curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash
 ```
 
-This installs `git`, `python3`, Node.js, and `cron` if missing; installs the
-**bizagent-agent** runtime; sets a default LLM provider (override with
-`BIZAGENT_PROVIDER=chatgpt|claude|gemini|…`); **prompts for that provider’s API
-key** into `.bizagent/env` (mode 600, never committed); runs
-`scripts/check-hub-ready.sh`; starts the control plane; queues first-run setup
-mail when ready; and prints your URL.
+This installs **all runtime dependencies first** if missing — `git`, `python3`,
+`curl`, **Node.js 18+**/`npm`, `cron`, **Java (JRE 17+)**, **Graphviz (`dot`)**, and
+**PlantUML** (jar + wrapper; needed for the web UI diagram preview) — then
+installs the **bizagent-agent** runtime; sets a default LLM provider (override
+with `BIZAGENT_PROVIDER=chatgpt|claude|gemini|…`); **prompts for that
+provider’s API key** into `.bizagent/env` (mode 600, never committed); writes
+tool path hints (`PLANTUML_SH`, `GRAPHVIZ_DOT`, `JAVA_HOME`) into the same env
+file when user-local tools were used; runs `scripts/check-hub-ready.sh`; starts
+the control plane; queues first-run setup mail when ready; and prints your URL.
+
+| Dependency | Why | Package names (apt / dnf / brew) | User-local fallback |
+|---|---|---|---|
+| git | clone hub + product repos | `git` | — (required via pkg) |
+| python3 | installer seeding + small scripts | `python3` | — (required via pkg) |
+| curl | downloads + API-key hello check | `curl` | — (required via pkg) |
+| Node.js **18+** + npm | control plane + agent-runtime | `nodejs npm` / `node` (must be **v18+**; distro Node 12/16 is too old) | — (required via pkg; use NodeSource or nvm on WSL if apt is stale) |
+| cron | nightly / scheduled hub jobs | `cron` / `cronie` (macOS ships cron) | — |
+| Java 17+ | PlantUML renderer | `openjdk-17-jre-headless` / `java-17-openjdk-headless` / `openjdk@17` | Temurin JDK → `~/.bizagent/tools/jdk` |
+| Graphviz (`dot`) | PlantUML non-sequence diagrams | `graphviz` | deb-extract or wrapper → `~/.bizagent/tools/` |
+| PlantUML | web UI `.puml` → SVG preview | `plantuml` | jar + `plantuml.sh` → `~/.bizagent/tools/` |
+
+**Optional — console TTS (Kokoro via oddbeaker-tts).** The installer runs
+`scripts/install-oddbeaker-tts.sh` after cloning: installs the shared daemon on
+**port 9201** when the host allows, prompts for a preferred voice, and stores
+`BIZAGENT_TTS_VOICE` in `.bizagent/env`. The UI TTS toggle stays **off** until
+you enable it. One daemon per host (shared with Jobe if already on 9201). Soft
+failure leaves browser `speechSynthesis` as fallback.
+
+| Install env | Purpose |
+|-------------|--------|
+| `BIZAGENT_TTS_VOICE` | Non-interactive voice id (default `af_heart`) |
+| `BIZAGENT_TTS_SOURCE` | Local checkout or git URL for oddbeaker-tts |
+| `BIZAGENT_SKIP_TTS=1` | Skip TTS install entirely |
+| `BIZAGENT_NONINTERACTIVE=1` | No voice/provider prompts |
+
+Upgrade: `scripts/upgrade.sh` offers TTS when `:9201` is unhealthy (`--with-tts`
+/ `--no-tts`). Manual: `scripts/install-oddbeaker-tts.sh --hub "$PWD" --prompt-voice`.
+Details: [`docs/TTS-CONSOLE.md`](docs/TTS-CONSOLE.md).
 
 **Step 3.** Open the URL shown in your terminal (or `http://localhost:8787`
 if it doesn't appear). Create a login, then chat with PTL to finish onboarding
@@ -131,6 +179,23 @@ bizagent uses `cron` for the nightly pass, so on Windows you'll need WSL.
 In PowerShell, run `wsl --install`, reboot, then run the one-liner above
 inside your new WSL shell.
 
+**Node 18+ required.** Older Ubuntu images on WSL (especially Windows 10) often
+ship Node 12 or 16 via `apt`. The installer checks the version and **exits
+non-zero** if Node is below v18 — it will not silently continue. If that
+happens, install a current LTS before re-running:
+
+```sh
+# NodeSource LTS (recommended on WSL)
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+sudo apt-get install -y nodejs
+node -v   # expect v18+ / v20+ / v22+
+
+# or nvm (user-local)
+curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+# restart shell, then:
+nvm install --lts && nvm use --lts
+```
+
 ### Manual install
 
 ```sh
@@ -152,40 +217,19 @@ your `registry.json`).
 - **Agent rail** — left sidebar: each agent with a status light, **`provider >> model`**
   (click to change LLM), expand for inbox / last dispatch / journal
 - **Agent detail panel** — expand a row for inbox count, last-dispatched time, journal snippet
-- **Library** — topbar **Library** browses operator-facing plans/specs under hub
-  `library/` (markdown preview). Agents should write deliverables there. `GET/POST /api/library`
+- **Library** — topbar **Library** opens a named-tab accordion: **Hub**
+  (`docs/`, `company/`, `reports/` only) plus each registry project repo.
+  Markdown and PlantUML/SVG diagrams render in-browser (no `library/manifest.json`).
+  `GET /api/library/repos`, `GET /api/library/tree?repo=…`,
+  `GET /api/library/file?repo=&path=` (`?raw=1`, `?download=1`, `?source=1`, `?render=1`)
+- **Playbooks / consult** — cross-agent proven how-tos under `knowledge-stack/playbooks/`
+  (+ `INDEX.md`). Agents mail hub `consult: …` / `playbook candidate` (no fleet broadcast).
+  Design: [`docs/PLAYBOOKS-AND-CONSULT.md`](docs/PLAYBOOKS-AND-CONSULT.md).
 - **Company files** — topbar **Company** uploads into hub `company/` (Knowledge Stack
   inputs) when you cannot reach the hub disk; `GET/POST /api/company/files`
 - **Dynamic page title** — browser tab reads `BizAgent — {org name}` from `registry.json`
 - **Push updates** — WebSocket feeds preferred; optional poll via `?poll=1`
 - **Hub session memory** — compact rolling markdown; older turns are summarized, not accumulated
-
----
-
-## Bring your own LLM — including local models
-
-BizAgent uses one runtime (**bizagent-agent**) and an OpenAI-compatible HTTP API
-per provider. Configure providers in `cli.json` (`baseURL`, `keyEnv`, `models`);
-pick **provider + model** per hub/product in the UI or `registry.json`
-(`settings.hub_agent.provider` / `model`).
-
-| Provider key | Label | Key env (`.bizagent/env`) |
-|--------------|--------|---------------------------|
-| `grok` | Grok (xAI) | `XAI_API_KEY` |
-| `chatgpt` | ChatGPT | `OPENAI_API_KEY` |
-| `claude` | Claude | `ANTHROPIC_API_KEY` |
-| `gemini` | Gemini | `GEMINI_API_KEY` |
-| `venice` | Venice | `VENICE_API_KEY` |
-| `ollama` | Ollama (local) | optional |
-
-```sh
-# Local models via Ollama's OpenAI-compatible endpoint
-# cli.json already has an ollama provider; set hub_agent.provider to "ollama"
-ollama serve   # default http://127.0.0.1:11434/v1
-```
-
-Nightly/weekly cron call `scripts/run-agent.sh`, which launches the same runtime
-with keys from `.bizagent/env`.
 
 ---
 
@@ -235,6 +279,11 @@ scripts/hub-daemon.sh status
 scripts/hub-daemon.sh ping
 scripts/hub-daemon.sh stop
 
+# SSH operator console (pick a conversation, talk to the hub; no browser/VPN)
+scripts/chat.sh                          # interactive: list, pick, chat
+scripts/chat.sh --list                   # list conversations only
+scripts/chat.sh --conversation ID --send "hello"   # one-shot send
+
 # Safe preview then apply archive pruning (default 15 days)
 scripts/prune-archives.sh --dry-run
 scripts/prune-archives.sh
@@ -244,8 +293,17 @@ scripts/viewlog.sh
 scripts/viewlog.sh hub          # warm hub + dispatch-hub.*
 
 # Nightly mechanical half + end-of-night backup push
-scripts/nightly.sh              # pull, route, archive, prune
+scripts/nightly.sh              # pull, route, archive, prune (+ optional auto-upgrade)
 scripts/nightly.sh push         # commit/push product repos + hub (private remote)
+scripts/defer.sh --in 15m ...   # schedule one-shot wake mail (see docs/DEFERRED-WAKE.md)
+scripts/defer.sh --list         # pending deferred wakes
+scripts/defer.sh --cancel ID
+
+# Framework upgrade from public OddbeakerLLC/bizagent (never clobbers ops data)
+scripts/upgrade.sh --dry-run    # show what would change
+scripts/upgrade.sh              # apply + restart control plane
+scripts/upgrade.sh --yes        # non-interactive apply
+# SHTF repair (same restore engine as upgrade): scripts/factory-reset.sh repair
 
 # After clone: drop public framework origin; ops gitignore; print private-remote advice
 scripts/detach-framework-remote.sh
@@ -259,6 +317,7 @@ Multiple BizAgent hubs can run on one machine. Set
 
 ```json
 "settings": {
+  "auto_update": false,
   "dispatch": {
     "poll_seconds": 2,
     "max_concurrency": 8,
@@ -274,6 +333,40 @@ Multiple BizAgent hubs can run on one machine. Set
 
 `poll_seconds` (1–30) controls how often the control plane wakes. Separate hub/agent slot pools keep operator turns responsive even under heavy fan-out. Archive pruning removes old `*/archive/` mail automatically on the nightly (or on demand).
 
+### Upgrading the hub framework
+
+Live hubs are **ops clones** (private remote, local `registry.json` / agents / mail).
+Framework code still comes from the public repo
+[`OddbeakerLLC/bizagent`](https://github.com/OddbeakerLLC/bizagent).
+
+```sh
+# Preview (no writes, no service bounce)
+scripts/upgrade.sh --dry-run -v
+
+# Apply: clone public main → restore machinery only → npm install → restart CP
+scripts/upgrade.sh --yes
+```
+
+**Preserved:** `registry.json`, `cli.json`, `agents/`, `company/`,
+`knowledge-stack/`, `library/`, `journal/`, mailboxes, `logs/`, `.bizagent/`
+(auth, env, runtime), secrets.
+
+**Updated:** `control-plane/`, `scripts/`, `templates/`, `tests/`,
+`agent-runtime/`, docs/examples, and other framework files.
+
+**Install-time preference.** The installer asks whether you want:
+
+- **Manual only** (default) — you or PTL run `scripts/upgrade.sh` when ready.
+- **Automatic** — nightly may run upgrade when `settings.auto_update` is `true`.
+
+Non-interactive: `BIZAGENT_AUTO_UPDATE=0|1`. Change later in `registry.json`
+→ `settings.auto_update`. Manual upgrade always works regardless of that flag.
+Ask PTL anytime to check/apply updates.
+
+**Caveats:** upgrade stops/restarts the control plane (brief UI downtime). A
+timestamped backup lands under `.bizagent/backups/`. Prefer a private hub remote
+and recent backup before large jumps. Hard-reload the browser after upgrade.
+
 ---
 
 ## What PTL asks during setup
@@ -288,6 +381,7 @@ and begins setup in the web UI. It only asks for the things that are genuinely y
 - nightly run time _(default 23:00)_
 - how long an unactioned message waits before being archived _(default 30 days)_
 - agent autonomy: maintenance-only, +monitoring, or +light-dev _(default maintenance-only)_
+- framework auto-update vs manual-only _(installer default: manual-only; `settings.auto_update`)_
 - a **private** git remote for the hub (strongly recommended)
 
 The installer **removes** the public framework GitHub remote from the clone so
@@ -316,6 +410,8 @@ bizagent/
 │   └── bizagent-control-plane.service  systemd unit template
 ├── scripts/
 │   ├── bizagent-control-plane.js  Node control-plane CLI + write-message
+│   ├── chat.sh                SSH operator console (interactive + one-shot)
+│   ├── lib/operator-chat.js   chat.sh backend (conversation/inbox path)
 │   ├── control-plane.sh       start/stop/status/restart wrapper
 │   ├── hub-daemon.js          warm hub turn worker (socket protocol)
 │   ├── hub-daemon.sh          daemon start/stop/status/ping
@@ -323,7 +419,10 @@ bizagent/
 │   ├── prune-archives.sh      archive retention (15-day default, registry-driven)
 │   ├── viewlog.sh             tail -F control-plane / hub / structured logs
 │   ├── write-message.sh       canonical outbox helper (conversation stamping)
-│   ├── nightly.sh             route + prune + journal/sitemap housekeeping
+│   ├── defer.sh               one-shot deferred wake mail (poll-after)
+│   ├── nightly.sh             route + prune + optional auto-upgrade + housekeeping
+│   ├── upgrade.sh             safe framework upgrade from public OddbeakerLLC/bizagent
+│   ├── factory-reset.sh       repair / restore-ops / nuke (upgrade uses repair)
 │   └── ...                    (router, run-agent, onboard, publish-check, etc.)
 ├── control-plane/
 │   ├── server.js
@@ -333,6 +432,7 @@ bizagent/
 ├── tests/                   shell test suite
 └── docs/
     ├── ARCHITECTURE.md
+    ├── DEFERRED-WAKE.md
     └── LATENCY-OPTIMIZATION-PLAN.md
 ```
 

@@ -80,13 +80,68 @@ grep -q 'ANTHROPIC_API_KEY' "$ROOT/install.sh" \
   || fail "install.sh does not map claude → ANTHROPIC_API_KEY"
 grep -q 'BIZAGENT_API_KEY' "$ROOT/install.sh" \
   || fail "install.sh missing non-interactive BIZAGENT_API_KEY support"
+# API key is required (non-empty) at the CLI-choice step, with a clear warning.
+grep -q 'incorrectly entered API key will prevent completing the installation' "$ROOT/install.sh" \
+  || fail "install.sh does not warn about an incorrect API key"
+grep -q '\[\[ -z "\$key" \]\]' "$ROOT/install.sh" \
+  || fail "install.sh does not require a non-empty API key"
+grep -q 'incorrectly entered API key will prevent completing the installation' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not warn about an incorrect API key"
+grep -q '\[\[ -z "\$typed_key" \]\]' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not require a non-empty API key"
+# API key is validated with a tiny 'hello' prompt before proceeding (re-prompt on failure).
+grep -q 'validate_api_key' "$ROOT/install.sh" \
+  || fail "install.sh missing API key validation helper"
+grep -q 'chat/completions' "$ROOT/install.sh" \
+  || fail "install.sh validation does not send a hello prompt to the LLM"
+grep -q 'rejected by the provider' "$ROOT/install.sh" \
+  || fail "install.sh does not re-prompt after a failed API key validation"
+grep -q 'validate_api_key' "$ROOT/install/install.sh" \
+  || fail "install/install.sh missing API key validation helper"
+grep -q 'chat/completions' "$ROOT/install/install.sh" \
+  || fail "install/install.sh validation does not send a hello prompt to the LLM"
+grep -q 'rejected by the provider' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not re-prompt after a failed API key validation"
 grep -qE 'api_key_var_for_provider|api_key_var_for_cli' "$ROOT/install/install.sh" \
   || fail "install/install.sh missing API key → .bizagent/env step"
-grep -q 'check-hub-ready' "$ROOT/install/install.sh" \
-  || fail "install/install.sh missing first-run readiness check"
+grep -q 'seed-first-run\|check-hub-ready' "$ROOT/install/install.sh" \
+  || fail "install/install.sh missing first-run readiness / seed"
+grep -q 'seed-first-run' "$ROOT/install.sh" \
+  || fail "root install.sh missing seed-first-run handoff"
+[ -x "$ROOT/scripts/seed-first-run.sh" ] \
+  || fail "scripts/seed-first-run.sh missing or not executable"
 grep -q '\.bizagent/env' "$ROOT/install/install.sh" \
   || fail "install/install.sh does not write .bizagent/env"
 grep -qE 'bizagent-agent|LLM provider|check-hub-ready' "$ROOT/README.md" \
   || fail "README does not document installer API key prompt"
 
+
+# LLM provider choice during install (root install.sh + install/install.sh)
+grep -q 'Choose an LLM provider' "$ROOT/install.sh" \
+  || fail "install.sh does not prompt the user to choose an LLM provider"
+grep -q 'Choose an LLM provider' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not prompt the user to choose an LLM provider"
+grep -q 'BIZAGENT_PROVIDER' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not respect BIZAGENT_PROVIDER override"
+
+
 echo "  ok: installer source override"
+
+# oddbeaker-tts dependency + voice prompt (console TTS)
+grep -q 'ensure_oddbeaker_tts' "$ROOT/install.sh" \
+  || fail "install.sh missing ensure_oddbeaker_tts"
+grep -q 'install-oddbeaker-tts' "$ROOT/install.sh" \
+  || fail "install.sh does not call install-oddbeaker-tts"
+[ -x "$ROOT/scripts/install-oddbeaker-tts.sh" ] \
+  || fail "scripts/install-oddbeaker-tts.sh missing or not executable"
+bash -n "$ROOT/scripts/install-oddbeaker-tts.sh" \
+  || fail "install-oddbeaker-tts.sh bash -n failed"
+grep -q 'BIZAGENT_TTS_VOICE' "$ROOT/scripts/install-oddbeaker-tts.sh" \
+  || fail "install-oddbeaker-tts.sh does not persist BIZAGENT_TTS_VOICE"
+grep -q 'BIZAGENT_SKIP_TTS' "$ROOT/install.sh" \
+  || fail "install.sh missing BIZAGENT_SKIP_TTS"
+grep -q 'BIZAGENT_TTS_VOICE' "$ROOT/.bizagent/env.example" \
+  || fail "env.example missing BIZAGENT_TTS_VOICE"
+grep -q 'install-oddbeaker-tts' "$ROOT/README.md" \
+  || fail "README missing install-oddbeaker-tts docs"
+

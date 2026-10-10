@@ -155,6 +155,27 @@ Lease and caps are configurable via env (`BIZAGENT_*`) or
 `settings.dispatch.{poll_seconds,max_concurrency,hub_slots,agent_slots,lock_lease_secs}`
 in `registry.json`.
 
+### Standby helper pool (in-turn workers)
+
+Named product agents stay on smart models. For bounded grunt work they may call
+`hire_helper` inside an already-locked turn. The control plane / runtime
+spawns a short **read-only** `bizagent-agent` on the cheap helper model and
+returns one string; the parent reviews and is the only writer.
+
+- **Not products.** Helpers have no slug, inbox, sitemap, or rail entry.
+- **Config:** `registry.json` → `settings.helpers`
+  - `enabled` (bool; example default **false**)
+  - `pool_size` — floor on live helpers (default **10**)
+  - live cap is **`max(pool_size, product count)`** so the pool never undershoots the product set
+  - `provider` / `model` — same `cli.json` keys as agents (default Venice `qwen3-5-9b`)
+  - `max_concurrent_per_agent`, `max_wall_secs` (kill), `max_depth` (always 1), `allow` kinds
+- **Kinds:** `research`, `search`, `summarize`, `test-extract`. Unknown kind = refuse.
+- **Read-only:** list/glob/grep/read/fetch only. Shell only for `test-extract`. No write, mail, or nested hire.
+- **Runtime:** parent tool `hire_helper` → spawn `bizagent-agent --helper` → one text result in the same turn.
+- **Slots:** `.bizagent/helper-slots/` (hub-wide). Over-cap hire returns an error; parent does the work itself.
+- Dispatch sets `BIZAGENT_HUB` and `BIZAGENT_AGENT_SLUG` so the parent is attributed on the slot.
+- Design: `docs/2026-09-22-standby-helper-pool.md`.
+
 LLM selection is **registry + `cli.json`** (single runtime):
 
 - **Runtime:** always `bizagent-agent` (`agent-runtime/`, launcher
@@ -164,6 +185,83 @@ LLM selection is **registry + `cli.json`** (single runtime):
 - `registry.json` `settings.hub_agent.provider` / product `provider` (+ `model`) —
   which LLM endpoint and model to use. `cliName` is a legacy alias for `provider`.
 - UI agent rail shows `provider >> model` (not a CLI binary name).
+
+### MCP client (in-turn tools)
+
+Optional **Model Context Protocol client** in `agent-runtime`. Same tool set
+for hub PTL and every product agent — no per-agent allowlists in this slice.
+
+- **Config:** `registry.json` → `settings.mcp`
+  - `enabled` (bool, **default false** — omit or false = unchanged behavior)
+  - `servers[]` fields:
+    - `name` (required)
+    - `transport`: `stdio` | `http` (Streamable HTTP; alias `streamable-http`)
+      | `sse` (legacy HTTP+SSE from protocol 2024-11-05)
+    - **stdio:** `command`, `args`, optional `env` (values are **env-var name
+      refs**, not secrets in git), optional `cwd`
+    - **http / sse:** `url` (required), optional `headers` whose values are
+      **env-var name refs** (e.g. `"Authorization": "MCP_REMOTE_TOKEN"` →
+      resolve `process.env.MCP_REMOTE_TOKEN`; put the full header value there,
+      including any `Bearer ` prefix)
+  - Additive extension points (safe to ignore): `allowlists`, `policy`, `audit`
+- **Runtime:** on each agent launch, connect configured servers, `tools/list`,
+  map each tool into the OpenAI-style function-call loop next to built-ins as
+  `mcp__<server>__<tool>`, forward `tools/call`, tear down on process exit.
+  Control plane sets `BIZAGENT_HUB` so the runtime finds the hub registry from
+  any cwd (hub runtime-cwd or product repo).
+- **Remote transports:** prefer Streamable HTTP (`transport: http`) — POST
+  JSON-RPC to the MCP endpoint; accept `application/json` or SSE response
+  bodies; honor `Mcp-Session-Id` when the server issues one. Legacy `sse`
+  opens a GET SSE stream, reads the `endpoint` event, and POSTs messages
+  there. TLS certificate verification is **on** by default
+  (`BIZAGENT_MCP_TLS_INSECURE=1` only if you must disable it).
+- **Safety:** per-server soft-fail (log + skip); connect/call timeouts so a hung
+  server cannot wedge a turn; logs tool **names** only (not argument payloads
+  or secret header values).
+- **Not the agent bus.** MCP is in-turn capability only. Multi-agent work still
+  uses filesystem mail + hub mediation. Do not invent agent-to-agent MCP.
+- **Free vs enterprise:** OSS = runtime + configured remote servers. Enterprise
+  later can add vault, org policy, curated connectors, and audit on the same
+  config shape without rewriting the client.
+- **Maintainer note:** stdio transport remains implemented for tests and
+  internal use; do not advertise it in public README / install marketing.
+
+#### Enable a remote MCP server (paste-in — preferred)
+
+Operators paste vendor MCP connection info into hub chat. The hub runs
+`scripts/mcp-onboard.js` (see **`docs/MCP-ONBOARD.md`** for the full operator
+contract). That helper:
+
+- parses common paste shapes (Cursor `mcpServers`, flat JSON, URL + Bearer text)
+- writes secrets only to `hub/.bizagent/env` (env-var refs in registry, never literals)
+- sets `settings.mcp.enabled` and upserts `servers[]` (idempotent by name/URL)
+- verifies with `tools/list` when reachable; soft-fails if not
+- needs **no** control-plane restart — next agent turn re-reads registry + env
+
+Hub confirms `connected: <name> → N tools` or asks 1–2 clarifying questions.
+**Never** tell the operator to hand-edit `registry.json` or `.bizagent/env`.
+
+Maintainer shape (written by the helper, not by the operator):
+
+```json
+"mcp": {
+  "enabled": true,
+  "servers": [
+    {
+      "name": "remote_tools",
+      "transport": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "MCP_REMOTE_TOOLS_TOKEN"
+      }
+    }
+  ]
+}
+```
+
+Stdio remains implemented for tests/internal use only; do not advertise it in
+public README. Missing/unreachable remotes soft-fail; other servers and built-in
+tools still run.
 
 ## Messaging
 
@@ -179,6 +277,13 @@ Replies are new files — there are no threads.
 File-based messaging was chosen over a database or git-commit log because it is
 trivially auditable (every message is a file you can open), needs no
 infrastructure, and is easy for both humans and agents to inspect and debug.
+
+`scripts/chat.sh` (backend `scripts/lib/operator-chat.js`) is an SSH/no-VPN
+path into that same messaging system: pick a conversation, talk to the hub,
+and watch replies in the terminal when you can SSH to the hub host but cannot
+reach the web UI. It posts through the identical hub-inbox path and reads the
+same `.bizagent/conversations/` files as the browser console — one inbox, one
+conversation store, not a second messaging system.
 
 ## Journals and sitemaps
 

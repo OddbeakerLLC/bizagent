@@ -13,6 +13,9 @@
  *   → { "type": "turn", "requestId": "..." }
  *   ← { "ok": true|false, "type": "turn_result", ... }
  *
+ *   → { "type": "cancel", "requestId": "..." }
+ *   ← { "ok": true, "type": "cancel_result", cancelled: bool, busy: bool }
+ *
  *   → { "type": "shutdown" }
  *   ← { "ok": true, "type": "bye" }
  *
@@ -43,6 +46,7 @@ const {
   ensureHubRuntimePrompt,
 } = require(path.join(libRoot, 'hub-memory'));
 const { logEvent } = require(path.join(libRoot, 'log'));
+const ollamaFallback = require(path.join(libRoot, 'ollama-fallback'));
 const { postLaunchAck } = require(path.join(libRoot, 'conversations'));
 const {
   onHubCliExit,
@@ -75,6 +79,10 @@ const PID_FILE = path.join(HUB, '.bizagent', 'hub-daemon.pid');
 
 let busy = false;
 let server = null;
+/** @type {import('child_process').ChildProcess | null} */
+let currentChild = null;
+/** Set when operator cancel aborts the in-flight CLI. */
+let cancelRequested = false;
 
 function ensureDirs() {
   fs.mkdirSync(path.join(HUB, '.bizagent'), { recursive: true });
@@ -165,8 +173,23 @@ function runTurn() {
     }
 
     let cliSettings;
+    // Ollama fallback (hub-only): launch-time override while the flag is
+    // active — registry.json / cli.json are never rewritten.
+    let effectiveModel = hubModel || '';
+    let effectiveCliName = hubCliName || '';
+    const fbOverride = ollamaFallback.hubLaunchOverride(HUB);
+    if (fbOverride) {
+      effectiveCliName = fbOverride.provider;
+      effectiveModel = fbOverride.model;
+      logEvent(HUB, {
+        event: 'hub_ollama_fallback_launch',
+        provider: fbOverride.provider,
+        model: fbOverride.model,
+        via: 'warm_daemon',
+      });
+    }
     try {
-      cliSettings = getCliSettings(HUB, cliJson, config, hubCliName || '', hubModel || '');
+      cliSettings = getCliSettings(HUB, cliJson, config, effectiveCliName, effectiveModel);
     } catch (err) {
       try { fs.unlinkSync(promptFile); } catch (_e) { /* ignore */ }
       logEvent(HUB, {
@@ -193,13 +216,13 @@ function runTurn() {
       conversation_id: conversationId || '',
       turn: path.basename(promptFile),
       cmd: cmdPreview,
-      model: hubModel || 'default',
+      model: effectiveModel || 'default',
       has_xai_key: !!(process.env.XAI_API_KEY && process.env.XAI_API_KEY.length > 0),
       env_file_found: !!envInfo.found,
       via: 'warm_daemon',
     });
 
-    const childEnv = { ...process.env };
+    const childEnv = { ...process.env, BIZAGENT_HUB: HUB };
     const script = [
       'set +e',
       `HUB=${JSON.stringify(HUB)}`,
@@ -209,12 +232,18 @@ function runTurn() {
       'exit $?',
     ].join('\n');
 
+    cancelRequested = false;
+    // detached so we can SIGKILL the whole bash+CLI group on operator cancel
+    // without touching the long-lived daemon process.
     const child = spawn('bash', ['-c', script], {
       env: childEnv,
       stdio: 'ignore',
+      detached: true,
     });
+    currentChild = child;
 
     child.on('error', (err) => {
+      currentChild = null;
       try { fs.unlinkSync(promptFile); } catch (_e) { /* ignore */ }
       const duration_ms = Date.now() - start;
       logEvent(HUB, {
@@ -233,46 +262,80 @@ function runTurn() {
     });
 
     child.on('exit', (code) => {
-      const exitCode = code == null ? 1 : code;
-      let action = 'ok';
-      try {
-        if (conversationId) {
-          const result = onHubCliExit(HUB, {
-            conversationId,
-            logByteOffset: logOffset,
-            stderrByteOffset: stderrOffset,
-            startedAt,
-            agentLog,
-            agentStderr,
-            replyBodyFile,
-            exitCode,
-          });
-          action = (result && result.action) || 'ok';
+      currentChild = null;
+      const wasCancelled = cancelRequested;
+      cancelRequested = false;
+      const exitCode = code == null ? (wasCancelled ? 137 : 1) : code;
+      let action = wasCancelled ? 'operator_stop' : 'ok';
+      // Operator stop: do not run hard-fail recovery that would clear dispatch
+      // markers or invent a failure reply — CP already holds markers + status line.
+      if (!wasCancelled) {
+        try {
+          if (conversationId) {
+            const result = onHubCliExit(HUB, {
+              conversationId,
+              logByteOffset: logOffset,
+              stderrByteOffset: stderrOffset,
+              startedAt,
+              agentLog,
+              agentStderr,
+              replyBodyFile,
+              exitCode,
+            });
+            action = (result && result.action) || 'ok';
+          }
+        } catch (err) {
+          action = `safety_error:${err.message}`;
         }
-      } catch (err) {
-        action = `safety_error:${err.message}`;
       }
       try { fs.unlinkSync(promptFile); } catch (_e) { /* ignore */ }
 
       const duration_ms = Date.now() - start;
       logEvent(HUB, {
         event: 'hub_daemon_turn_end',
-        status: exitCode === 0 ? 'ok' : 'error',
+        status: wasCancelled ? 'stopped' : (exitCode === 0 ? 'ok' : 'error'),
         exit_code: exitCode,
         duration_ms,
         action,
         conversation_id: conversationId || '',
         via: 'warm_daemon',
+        operator_stop: wasCancelled || undefined,
       });
       resolve({
-        ok: exitCode === 0 || action === 'reserved-body' || action === 'ok-existing',
+        ok: wasCancelled
+          ? false
+          : (exitCode === 0 || action === 'reserved-body' || action === 'ok-existing'),
         exitCode,
         duration_ms,
         action,
         conversationId: conversationId || '',
+        operator_stop: wasCancelled || undefined,
       });
     });
   });
+}
+
+/**
+ * Abort the in-flight CLI child (if any). Daemon stays up.
+ * @returns {{ cancelled: boolean, busy: boolean }}
+ */
+function cancelInFlightTurn() {
+  if (!busy || !currentChild || !currentChild.pid) {
+    return { cancelled: false, busy: !!busy };
+  }
+  cancelRequested = true;
+  const n = currentChild.pid;
+  try {
+    process.kill(-n, 'SIGKILL');
+  } catch (_err) {
+    try { process.kill(n, 'SIGKILL'); } catch (_err2) { /* gone */ }
+  }
+  logEvent(HUB, {
+    event: 'hub_daemon_cancel',
+    pid: n,
+    t: nowIso(),
+  });
+  return { cancelled: true, busy: true };
 }
 
 function handleLine(line, socket) {
@@ -292,6 +355,18 @@ function handleLine(line, socket) {
   if (msg.type === 'shutdown') {
     socket.write(`${JSON.stringify({ ok: true, type: 'bye' })}\n`);
     shutdown(0);
+    return;
+  }
+
+  if (msg.type === 'cancel') {
+    const result = cancelInFlightTurn();
+    socket.write(`${JSON.stringify({
+      ok: true,
+      type: 'cancel_result',
+      requestId: msg.requestId || null,
+      cancelled: !!result.cancelled,
+      busy: !!result.busy,
+    })}\n`);
     return;
   }
 
@@ -332,6 +407,9 @@ function handleLine(line, socket) {
 }
 
 function shutdown(code) {
+  try {
+    cancelInFlightTurn();
+  } catch (_e) { /* ignore */ }
   try {
     logEvent(HUB, { event: 'hub_daemon_stop', pid: process.pid });
   } catch (_e) { /* ignore */ }
@@ -407,4 +485,8 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { getRecentHubInboxMessage, hubDaemonSockPath: SOCK };
+module.exports = {
+  cancelInFlightTurn,
+  getRecentHubInboxMessage,
+  hubDaemonSockPath: SOCK,
+};

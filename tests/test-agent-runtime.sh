@@ -15,6 +15,25 @@ fi
 
 (cd "$ROOT/agent-runtime" && npm test) || fail "agent-runtime unit tests failed"
 
+# Standby helper pool
+[ -f "$ROOT/agent-runtime/src/helpers.js" ] || fail "helpers.js missing"
+[ -f "$ROOT/agent-runtime/test/helpers.test.js" ] || fail "helpers.test.js missing"
+grep -q 'hire_helper' "$ROOT/agent-runtime/src/tools.js" || fail "tools.js missing hire_helper"
+grep -q '"helpers"' "$ROOT/registry.example.json" || fail "registry.example.json missing helpers"
+grep -q 'Standby helper pool' "$ROOT/docs/ARCHITECTURE.md" || fail "ARCHITECTURE missing helper pool note"
+grep -q 'hire_helper' "$ROOT/templates/dispatch.md.template" || fail "dispatch template missing hire_helper"
+
+# MCP client module present
+[ -f "$ROOT/agent-runtime/src/mcp-client.js" ] || fail "mcp-client.js missing"
+[ -f "$ROOT/agent-runtime/test/mcp-client.test.js" ] || fail "mcp-client.test.js missing"
+grep -q 'settings.mcp' "$ROOT/docs/ARCHITECTURE.md" || fail "ARCHITECTURE missing MCP note"
+grep -q '"mcp"' "$ROOT/registry.example.json" || fail "registry.example.json missing mcp"
+# MCP paste-in onboarding helper
+[ -f "$ROOT/scripts/mcp-onboard.js" ] || fail "scripts/mcp-onboard.js missing"
+[ -f "$ROOT/docs/MCP-ONBOARD.md" ] || fail "docs/MCP-ONBOARD.md missing"
+grep -q 'mcp-onboard' "$ROOT/docs/ARCHITECTURE.md" || fail "ARCHITECTURE missing mcp-onboard note"
+(cd "$ROOT" && node --test scripts/mcp-onboard.test.js) || fail "mcp-onboard unit tests failed"
+
 out="$("$ROOT/scripts/bizagent-agent" --list-providers)" || fail "--list-providers failed"
 echo "$out" | grep -q '^grok' || fail "providers list missing grok"
 echo "$out" | grep -q '^chatgpt' || fail "providers list missing chatgpt"

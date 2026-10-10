@@ -3,7 +3,7 @@
 OpenAI-compatible tool-calling agent runtime for BizAgent.
 
 Local tools (list/glob/grep/read/edit/shell/fetch) + multi-provider HTTP backend.
-Defaults: temperature `0.2`, up to `50` tool iterations (`BIZAGENT_AGENT_MAX_ITERATIONS`).
+Defaults: temperature `0.2`, up to `100` tool iterations (`BIZAGENT_AGENT_MAX_ITERATIONS`).
 
 ## Providers
 

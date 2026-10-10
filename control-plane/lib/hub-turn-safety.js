@@ -16,6 +16,7 @@ const {
   appendMessage,
   frontmatterValue,
   getConversation,
+  isNearDuplicateHubReply,
   LAUNCH_ACK_KIND,
   readUserInboxMessages,
   STATUS_ERROR_KIND,
@@ -23,6 +24,7 @@ const {
 } = require('./conversations');
 const { logEvent, logError, appendLog } = require('./log');
 const { routeOutboxes, writeOutboxMessage } = require('./mail');
+const { clearThinking } = require('./thinking');
 
 const DEFAULT_MAX_BLOB_CHARS = 4000;
 const MIN_BLOB_CHARS = 12;
@@ -310,12 +312,32 @@ function pendingUserOutboxFor(hub, conversationId) {
 }
 
 function promoteBlobToOutbox(hub, conversationId, body, subject = 'recovered hub reply') {
+  let userId = '';
+  try {
+    const conv = getConversation(hub, conversationId);
+    if (conv && conv.user_id) userId = String(conv.user_id);
+  } catch (_e) { /* ignore */ }
+  if (!userId) {
+    try {
+      const { getActiveEnterpriseHooks, isActiveEnterprise } = require('./enterprise-plugin');
+      if (isActiveEnterprise()) {
+        const hooks = getActiveEnterpriseHooks();
+        if (typeof hooks.resolveActingUserId === 'function') {
+          userId = hooks.resolveActingUserId(hub, { conversationId }) || '';
+        }
+      }
+    } catch (_e) { /* ignore */ }
+  }
+  // forceOutbox: reserved-body finalize must write real outbox mail, not re-funnel
+  // into the reserved file (writeOutboxMessage funnels hub→user when reserved exists).
   return writeOutboxMessage(hub, {
     from: 'hub',
     to: 'user',
     subject,
     body,
     conversationId,
+    userId,
+    forceOutbox: true,
   });
 }
 
@@ -476,39 +498,37 @@ function ensureHubUserReply(hub, turn) {
   routeOutboxes(hub);
   readUserInboxMessages(hub);
 
+  // If write-message (or a prior finalize) already delivered a hub reply for this
+  // turn, do not also promote the reserved body — dual-path turns used to land
+  // two operator-visible messages for one prompt.
   if (hubReplySince(hub, conversationId, turn.startedAt)) {
     clearPendingHubTurn(hub, turn);
     clearReservedReplyBody(hub, conversationId);
+    // Always drop launch-acks on success — otherwise Thinking Preview stays open
+    // forever with no hub message to replace the ack.
+    supersedeLaunchAcks(hub, conversationId);
     // Relay (here or prior EXIT hook) may have just written the hub message — push.
     notifyConversationMutated(hub, conversationId);
     return { action: 'ok-existing', conversationId, mutated: true };
   }
-  // Idempotent: shell EXIT + Node exit + tick drain may all fire.
-  if (hubFailureSince(hub, conversationId, turn.startedAt)) {
-    clearPendingHubTurn(hub, turn);
-    clearReservedReplyBody(hub, conversationId);
-    notifyConversationMutated(hub, conversationId);
-    return { action: 'ok-failed-already', conversationId, mutated: true };
-  }
-  if (pendingUserOutboxFor(hub, conversationId)) {
-    routeOutboxes(hub);
-    readUserInboxMessages(hub);
-    if (hubReplySince(hub, conversationId, turn.startedAt)) {
-      clearPendingHubTurn(hub, turn);
-      clearReservedReplyBody(hub, conversationId);
-      notifyConversationMutated(hub, conversationId);
-      return { action: 'ok-existing', conversationId, mutated: true };
-    }
-  }
 
-  // Reserved body path: model wrote markdown body only; CP owns frontmatter + route.
+  // Reserved body is authoritative when no hub reply has landed yet this turn.
+  // Skip near-duplicates of a recent hub message (cross-turn paraphrase / re-fire).
   const reservedBody = readReservedReplyBody(hub, conversationId);
   if (reservedBody && reservedBody.length >= MIN_RESERVED_BODY_CHARS) {
-    if (hubReplySince(hub, conversationId, turn.startedAt)) {
+    const conv = getConversation(hub, conversationId);
+    if (conv && isNearDuplicateHubReply(conv, reservedBody)) {
       clearPendingHubTurn(hub, turn);
       clearReservedReplyBody(hub, conversationId);
+      supersedeLaunchAcks(hub, conversationId);
       notifyConversationMutated(hub, conversationId);
-      return { action: 'ok-existing', conversationId, mutated: true };
+      logEvent(hub, {
+        event: 'hub_safety',
+        action: 'skip-near-duplicate',
+        conversation_id: conversationId,
+        chars: reservedBody.length,
+      });
+      return { action: 'ok-existing', conversationId, mutated: true, skippedDuplicate: true };
     }
     const result = finalizeViaOutbox(
       hub,
@@ -519,7 +539,27 @@ function ensureHubUserReply(hub, turn) {
     );
     clearPendingHubTurn(hub, turn);
     clearReservedReplyBody(hub, conversationId);
+    // finalizeViaOutbox → appendMessage(role hub) already strips launch-acks.
     return result;
+  }
+  // Idempotent: shell EXIT + Node exit + tick drain may all fire.
+  if (hubFailureSince(hub, conversationId, turn.startedAt)) {
+    clearPendingHubTurn(hub, turn);
+    clearReservedReplyBody(hub, conversationId);
+    supersedeLaunchAcks(hub, conversationId);
+    notifyConversationMutated(hub, conversationId);
+    return { action: 'ok-failed-already', conversationId, mutated: true };
+  }
+  if (pendingUserOutboxFor(hub, conversationId)) {
+    routeOutboxes(hub);
+    readUserInboxMessages(hub);
+    if (hubReplySince(hub, conversationId, turn.startedAt)) {
+      clearPendingHubTurn(hub, turn);
+      clearReservedReplyBody(hub, conversationId);
+      supersedeLaunchAcks(hub, conversationId);
+      notifyConversationMutated(hub, conversationId);
+      return { action: 'ok-existing', conversationId, mutated: true };
+    }
   }
 
   // ALWAYS-WARM: No blob promotion fallback. If reserved body is empty, that's a failure.
@@ -527,6 +567,7 @@ function ensureHubUserReply(hub, turn) {
     || hubFailureSince(hub, conversationId, turn.startedAt)) {
     clearPendingHubTurn(hub, turn);
     clearReservedReplyBody(hub, conversationId);
+    supersedeLaunchAcks(hub, conversationId);
     notifyConversationMutated(hub, conversationId);
     return { action: 'ok-existing', conversationId, mutated: true };
   }
@@ -542,6 +583,11 @@ function ensureHubUserReply(hub, turn) {
   );
   clearPendingHubTurn(hub, turn);
   clearReservedReplyBody(hub, conversationId);
+  // Allow the same unarchived inbox mail to re-dispatch after a hard fail.
+  try {
+    const { clearDispatchState } = require('./dispatcher');
+    clearDispatchState(hub, 'hub');
+  } catch (_err) { /* ignore */ }
   logEvent(hub, {
     event: 'hub_safety_fail',
     conversation_id: conversationId,
@@ -595,6 +641,14 @@ function drainPendingHubTurns(hub, isHubActive) {
 function onHubCliExit(hub, turn) {
   const start = Date.now();
   const result = ensureHubUserReply(hub, turn || {});
+
+  // Turn is over — drop the hub's stale in-flight thinking entry so a later
+  // stream for the same conversation can never replay this (or an older) turn's
+  // output. Only the hub slug: a delegated agent's entry for this conversation
+  // may still be live and must not be clobbered.
+  if (turn && turn.conversationId) {
+    try { clearThinking(hub, turn.conversationId, 'hub'); } catch (_err) { /* best-effort */ }
+  }
 
   logEvent(hub, {
     event: 'hub_safety_on_exit',

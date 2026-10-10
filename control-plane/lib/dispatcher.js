@@ -9,6 +9,7 @@ const {
   buildHubTurnPrompt,
   ensureHubRuntimeCwd,
   ensureHubRuntimePrompt,
+  pickPendingConversationId,
 } = require('./hub-memory');
 const { pendingMail } = require('./mail');
 const { logEvent, logLatency, logError, appendLog } = require('./log');
@@ -17,6 +18,7 @@ const {
   createConversation,
   getActiveConversationId,
   getConversation,
+  getPendingAgentWorkConversationId,
   listConversations,
   postLaunchAck,
   postAgentCompletionNotice,
@@ -36,19 +38,24 @@ const {
   classifyProviderError,
   formatProviderFailureMessage,
 } = require('./provider-errors');
+const ollamaFallback = require('./ollama-fallback');
+const {
+  clearThinking,
+  recordThinking,
+} = require('./thinking');
 
 function hubDaemonSock(hub) {
   return path.join(hub, '.bizagent', 'hub.sock');
 }
 
 /**
- * Ask the warm hub-daemon to process pending hub mail.
- * Resolves { ok, via:'warm', ... } or { ok:false, error } on connect/timeout/busy.
+ * Low-level NDJSON request to the warm hub-daemon socket.
+ * Resolves parsed response or { ok:false, error }.
  */
-function requestWarmHubTurn(hub, opts = {}) {
+function requestHubDaemon(hub, payload, opts = {}) {
   const sockPath = hubDaemonSock(hub);
   const connectMs = Math.max(100, Number(opts.connectTimeoutMs || 500));
-  const turnMs = Math.max(5000, Number(opts.turnTimeoutMs || 600000));
+  const turnMs = Math.max(1000, Number(opts.turnTimeoutMs || 5000));
   return new Promise((resolve) => {
     if (!fs.existsSync(sockPath)) {
       resolve({ ok: false, error: 'no_socket' });
@@ -69,11 +76,7 @@ function requestWarmHubTurn(hub, opts = {}) {
     socket.setEncoding('utf8');
     socket.on('connect', () => {
       clearTimeout(connectTimer);
-      const req = {
-        type: 'turn',
-        requestId: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-      };
-      socket.write(`${JSON.stringify(req)}\n`);
+      socket.write(`${JSON.stringify(payload)}\n`);
     });
     socket.on('data', (chunk) => {
       buf += chunk;
@@ -82,12 +85,7 @@ function requestWarmHubTurn(hub, opts = {}) {
       const line = buf.slice(0, nl).trim();
       clearTimeout(turnTimer);
       try {
-        const msg = JSON.parse(line);
-        done({
-          ...msg,
-          via: 'warm',
-          ok: !!msg.ok || msg.action === 'reserved-body' || msg.action === 'ok-existing',
-        });
+        done(JSON.parse(line));
       } catch (err) {
         done({ ok: false, error: `bad_response:${err.message}` });
       }
@@ -100,6 +98,53 @@ function requestWarmHubTurn(hub, opts = {}) {
   });
 }
 
+/**
+ * Ask the warm hub-daemon to process pending hub mail.
+ * Resolves { ok, via:'warm', ... } or { ok:false, error } on connect/timeout/busy.
+ */
+function requestWarmHubTurn(hub, opts = {}) {
+  const connectMs = Math.max(100, Number(opts.connectTimeoutMs || 500));
+  const turnMs = Math.max(5000, Number(opts.turnTimeoutMs || 600000));
+  return requestHubDaemon(
+    hub,
+    {
+      type: 'turn',
+      requestId: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    },
+    { connectTimeoutMs: connectMs, turnTimeoutMs: turnMs },
+  ).then((msg) => {
+    if (msg.error && !msg.type && msg.ok === false) {
+      return { ...msg, via: undefined };
+    }
+    return {
+      ...msg,
+      via: 'warm',
+      ok: !!msg.ok || msg.action === 'reserved-body' || msg.action === 'ok-existing',
+    };
+  });
+}
+
+/**
+ * Ask the warm hub-daemon to abort its in-flight CLI turn (if any).
+ * Does not shut down the daemon process.
+ */
+function requestWarmHubCancel(hub, opts = {}) {
+  const connectMs = Math.max(100, Number(opts.connectTimeoutMs || 500));
+  const turnMs = Math.max(500, Number(opts.turnTimeoutMs || 3000));
+  return requestHubDaemon(
+    hub,
+    {
+      type: 'cancel',
+      requestId: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    },
+    { connectTimeoutMs: connectMs, turnTimeoutMs: turnMs },
+  ).then((msg) => ({
+    ...msg,
+    via: 'warm',
+    ok: !!msg.ok,
+  }));
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -107,21 +152,13 @@ function nowIso() {
 /**
  * Get conversation_id for hub dispatch.
  * ALWAYS returns a valid conversation_id — never null.
- * Prefer the oldest pending inbox message with an explicit id (FIFO),
- * not the newest file — avoids mis-binding when multiple messages queue.
+ * Newest operator/user console mail wins (the chat they are waiting in);
+ * else oldest pending mail with a conversation_id (FIFO agent reports).
  */
 function getHubConversationId(hub) {
-  // First: oldest pending hub inbox mail with explicit conversation_id (FIFO)
-  const inboxDir = path.join(hub, 'inbox');
   try {
-    const files = fs.readdirSync(inboxDir)
-      .filter(f => f.endsWith('.md') && !f.startsWith('.'))
-      .sort(); // ascending = oldest first
-    for (const name of files) {
-      const content = fs.readFileSync(path.join(inboxDir, name), 'utf8');
-      const match = content.match(/^conversation_id:\s*(.+?)$/m);
-      if (match) return match[1].trim();
-    }
+    const picked = pickPendingConversationId(hub);
+    if (picked) return picked;
   } catch (_err) {
     /* ignore */
   }
@@ -253,6 +290,14 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   const kind = classified ? classified.kind : 'error';
   if (shouldSkipDuplicateAgentError(hub, slug, exitCode, kind)) return;
 
+  // Hub-only Ollama fallback: paid provider reachable but refused (credits /
+  // auth / model). Background — classifies, checks Ollama, activates the
+  // launch-time override, and tells the operator what to fix. Never for
+  // product agents, never a network outage.
+  try {
+    ollamaFallback.maybeTriggerFallback(hub, { slug, text: combined });
+  } catch (_err) { /* ignore */ }
+
   const errorMsg = formatProviderFailureMessage({
     slug,
     exitCode,
@@ -360,6 +405,18 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
  * do not always deliver Node 'exit' to the long-lived control plane).
  */
 function notifyAgentExitFromLogs(hub, slug, exitCode) {
+  // Operator hard-stop: suppress failure chatter + hard-fail re-dispatch.
+  if (wasOperatorStopped(hub, slug)) {
+    try {
+      logEvent(hub, {
+        event: 'operator_stop_exit',
+        slug,
+        exit_code: exitCode,
+        t: nowIso(),
+      });
+    } catch (_err) { /* ignore */ }
+    return;
+  }
   const stderrTail = readStderrTail(
     path.join(hub, 'logs', `dispatch-${slug}.stderr`),
   );
@@ -394,6 +451,34 @@ function pidAlive(pid) {
   }
 }
 
+/**
+ * Scan /proc for a live bizagent-agent CLI process for this slug
+ * (node <hub>/agent-runtime/src/index.js -f …/turns/agent-<slug>-<turn>.md …).
+ * Returns the pid (string) or '' when none is running.
+ */
+function findAgentCliPid(hub, slug) {
+  const marker = slug === 'hub' ? 'hub-' : `agent-${slug}-`;
+  let entries;
+  try {
+    entries = fs.readdirSync('/proc');
+  } catch (_err) {
+    return '';
+  }
+  for (const entry of entries) {
+    if (!/^[0-9]+$/.test(entry)) continue;
+    let cmd = '';
+    try {
+      cmd = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8');
+    } catch (_err) {
+      continue;
+    }
+    if (!cmd.includes('src/index.js')) continue;
+    if (!cmd.includes(marker)) continue;
+    return entry;
+  }
+  return '';
+}
+
 function lockDir(hub, slug) {
   if (slug === 'hub') return path.join(appDir(hub), 'hub.lock');
   return path.join(hub, 'agents', slug, '.lock');
@@ -425,38 +510,64 @@ function sameFingerprint(left, right) {
   return left.file === right.file && left.size === right.size && left.mtimeMs === right.mtimeMs;
 }
 
+/**
+ * How long a dispatch marker suppresses re-launch while the inbox file still exists.
+ * Capped low (60s) caused duplicate hub turns: hub often finishes + leaves mail
+ * unarchived briefly, then the next tick re-dispatches the same file.
+ * Keep markers for the lock lease (default 30m), bounded 60s–6h.
+ * Failed turns clear markers explicitly so retry is not blocked.
+ */
 function dispatchRetrySecs(config) {
-  return Math.max(1, Math.min(60, Number(config.lockLeaseSecs || 60)));
+  return Math.max(60, Math.min(6 * 3600, Number(config.lockLeaseSecs || 1800)));
 }
 
-function activeDispatchMarker(item, fingerprint, now, retrySecs) {
+function activeDispatchMarker(item, fingerprint, now, retrySecs, running = false) {
   const dispatchedAt = Number(item.dispatchedAt || 0);
-  return sameFingerprint(item, fingerprint) && dispatchedAt > 0 && now - dispatchedAt < retrySecs;
+  if (!sameFingerprint(item, fingerprint) || dispatchedAt <= 0) return false;
+  // A slug that is actually running holds its markers regardless of age —
+  // the same inbox fingerprint must not launch a second copy.
+  if (running) return true;
+  return now - dispatchedAt < retrySecs;
 }
 
-function pendingUndispatchedMail(hub, slug, retrySecs = 0) {
+function pendingUndispatchedMail(hub, slug, retrySecs = 0, leaseSecs = 0) {
   const handled = readDispatchState(hub, slug);
   const now = Math.floor(Date.now() / 1000);
+  const running = leaseSecs ? isAgentActive(hub, slug, leaseSecs) : false;
   return pendingMail(hub, slug).filter((file) => {
     const fingerprint = dispatchFingerprint(file);
-    return !handled.some((item) => activeDispatchMarker(item, fingerprint, now, retrySecs));
+    return !handled.some((item) => activeDispatchMarker(item, fingerprint, now, retrySecs, running));
   });
 }
 
-function markMailDispatched(hub, slug, files, retrySecs = 0) {
+function markMailDispatched(hub, slug, files, retrySecs = 0, leaseSecs = 0) {
   const target = dispatchStateFile(hub, slug);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const handled = readDispatchState(hub, slug);
   const now = Math.floor(Date.now() / 1000);
   const mailDir = path.dirname(files[0] || '');
+  const running = leaseSecs ? isAgentActive(hub, slug, leaseSecs) : false;
+  // Drop markers only when the inbox file is gone (archived) or past retry
+  // window — never while the slug is actually running.
   const next = handled.filter((item) => (
-    fs.existsSync(path.join(mailDir, item.file)) && Number(item.dispatchedAt || 0) > now - retrySecs
+    fs.existsSync(path.join(mailDir, item.file)) &&
+    (running || Number(item.dispatchedAt || 0) > now - retrySecs)
   ));
   for (const file of files) {
     const fingerprint = dispatchFingerprint(file);
     if (!next.some((item) => sameFingerprint(item, fingerprint))) next.push({ ...fingerprint, dispatchedAt: now });
   }
   fs.writeFileSync(target, JSON.stringify({ handled: next.slice(-200) }, null, 2));
+}
+
+/** Clear hub/agent dispatch markers so unarchived mail may launch again (e.g. hard-fail). */
+function clearDispatchState(hub, slug) {
+  const target = dispatchStateFile(hub, slug);
+  try {
+    if (fs.existsSync(target)) fs.unlinkSync(target);
+  } catch (_err) {
+    /* ignore */
+  }
 }
 
 function lockAgeSecs(lock) {
@@ -490,8 +601,13 @@ function tryLock(hub, slug, leaseSecs) {
     } catch (_readErr) {
       pid = '';
     }
-    const age = lockAgeSecs(lock);
-    if (pidAlive(pid) && age < leaseSecs) return false;
+    // A still-running lock owner keeps exclusive ownership past the lease —
+    // long turns (>30m) must never be stolen / double-dispatched.
+    if (pidAlive(pid)) return false;
+    // Lock pid gone but a leftover bizagent-agent child for this slug may
+    // still be running (orphaned wrapper) — do not steal.
+    if (findAgentCliPid(hub, slug)) return false;
+    // Dead/stale lock: reclaim.
     fs.rmSync(lock, { recursive: true, force: true });
     return tryLock(hub, slug, leaseSecs);
   }
@@ -517,6 +633,10 @@ function liveRunCount(hub, leaseSecs) {
   return liveHubCount(hub, leaseSecs) + liveAgentCount(hub, leaseSecs);
 }
 
+/**
+ * True iff a live process exists for this slug — independent of lease age.
+ * False as soon as the process is gone (lights/thinking follow reality).
+ */
 function isAgentActive(hub, slug, leaseSecs) {
   const lock = lockDir(hub, slug);
   if (!fs.existsSync(lock)) return false;
@@ -526,7 +646,205 @@ function isAgentActive(hub, slug, leaseSecs) {
   } catch (_err) {
     pid = '';
   }
-  return pidAlive(pid) && lockAgeSecs(lock) < leaseSecs;
+  if (pidAlive(pid)) return true;
+  // Lock pid gone but a leftover bizagent-agent child may still run.
+  return !!findAgentCliPid(hub, slug);
+}
+
+/**
+ * Never SIGKILL the control-plane or hub-daemon themselves.
+ * Warm hub locks often still hold the CP pid (tryLock writes process.pid before
+ * the daemon owns the turn); killing that group would take down the whole hub.
+ */
+function isProtectedStopPid(hub, pid) {
+  const n = Number(pid);
+  if (!Number.isFinite(n) || n <= 0) return true;
+  if (n === process.pid) return true;
+  try {
+    const daemonPid = fs.readFileSync(path.join(hub, '.bizagent', 'hub-daemon.pid'), 'utf8').trim();
+    if (daemonPid && Number(daemonPid) === n) return true;
+  } catch (_err) { /* no daemon pid file */ }
+  return false;
+}
+
+/**
+ * Kill a detached bash+CLI process group from a lock pid file.
+ * Returns true if a kill signal was sent.
+ */
+function killLockProcessGroup(hub, lock) {
+  let pid = '';
+  try {
+    pid = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim();
+  } catch (_err) {
+    pid = '';
+  }
+  if (!pid || !/^[0-9]+$/.test(pid)) return false;
+  if (isProtectedStopPid(hub, pid)) return false;
+  const n = Number(pid);
+  let killed = false;
+  try {
+    // Negative pid targets the whole process group (spawn used detached:true).
+    process.kill(-n, 'SIGKILL');
+    killed = true;
+  } catch (_err) {
+    try { process.kill(n, 'SIGKILL'); killed = true; } catch (_err2) { /* gone */ }
+  }
+  return killed;
+}
+
+/**
+ * Kill a leftover bizagent-agent CLI process for this slug (whole process
+ * group when possible, else the pid). Used when the lock pid is missing or
+ * protected (CP/daemon) so an orphaned turn is still stopped.
+ * Returns true when a kill signal was sent.
+ */
+function killLeftoverAgentCli(hub, slug) {
+  const pid = findAgentCliPid(hub, slug);
+  if (!pid) return false;
+  const n = Number(pid);
+  if (isProtectedStopPid(hub, n)) return false;
+  // Prefer the process group (wrapper bash + CLI + stderr-tee children).
+  let pgrp = 0;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const close = stat.indexOf(')');
+    const fields = stat.slice(close + 2).trim().split(/\s+/);
+    pgrp = Number(fields[2]) || 0; // field 5 = pgrp
+  } catch (_err) { /* fall back to pid */ }
+  if (pgrp > 0 && pgrp !== n) {
+    try { process.kill(-pgrp, 'SIGKILL'); return true; } catch (_err) { /* fall through */ }
+  }
+  try { process.kill(-n, 'SIGKILL'); return true; } catch (_err) { /* fall through */ }
+  try { process.kill(n, 'SIGKILL'); return true; } catch (_err2) { return false; }
+}
+
+function operatorStopStampPath(hub, slug) {
+  return path.join(appDir(hub), 'operator-stop', `${slug}.json`);
+}
+
+/**
+ * Stamp an operator stop so cold-path exit hooks do not clearDispatchState
+ * (hard-fail retry) and re-fire the same mail within seconds.
+ */
+function markOperatorStop(hub, slug) {
+  try {
+    const target = operatorStopStampPath(hub, slug);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(
+      target,
+      `${JSON.stringify({ slug, at: Math.floor(Date.now() / 1000), t: nowIso() })}\n`,
+      'utf8',
+    );
+  } catch (_err) { /* best-effort */ }
+}
+
+/**
+ * True when an operator stop landed recently (default 2 minutes).
+ * Consumed by hub cold exit / hard-fail paths that would otherwise clear markers.
+ */
+function wasOperatorStopped(hub, slug, withinSecs = 120) {
+  try {
+    const raw = fs.readFileSync(operatorStopStampPath(hub, slug), 'utf8');
+    const data = JSON.parse(raw);
+    const at = Number(data.at || 0);
+    if (!at) return false;
+    return Math.floor(Date.now() / 1000) - at < withinSecs;
+  } catch (_err) {
+    return false;
+  }
+}
+
+/**
+ * Keep dispatch markers after an intentional operator stop so the same
+ * unarchived inbox mail is not re-launched on the next poll tick.
+ * Operator stop ≠ hard-fail retry (which still calls clearDispatchState).
+ * Markers expire with the normal lock-lease window once mail is archived
+ * or the operator resends a new file.
+ */
+function suppressRedispatchAfterStop(hub, slug) {
+  markOperatorStop(hub, slug);
+  try {
+    const files = pendingMail(hub, slug);
+    if (!files.length) return;
+    markMailDispatched(hub, slug, files, dispatchRetrySecs({ lockLeaseSecs: 1800 }));
+  } catch (_err) { /* best-effort */ }
+  try {
+    logEvent(hub, {
+      event: 'operator_stop_hold_dispatch',
+      slug,
+      t: nowIso(),
+    });
+  } catch (_err) { /* ignore */ }
+}
+
+/** clearDispatchState unless this slug was just operator-stopped. */
+function clearDispatchStateUnlessOperatorStop(hub, slug) {
+  if (wasOperatorStopped(hub, slug)) {
+    try {
+      logEvent(hub, {
+        event: 'dispatch_clear_skipped_operator_stop',
+        slug,
+        t: nowIso(),
+      });
+    } catch (_err) { /* ignore */ }
+    return false;
+  }
+  clearDispatchState(hub, slug);
+  return true;
+}
+
+/**
+ * Hard-stop an in-flight turn (operator Escape or running status light).
+ * - Product agents / cold hub: SIGKILL detached process group from lock pid.
+ * - Warm hub: cancel the daemon's in-flight CLI (do not kill CP or daemon).
+ * Always drops the lock and holds dispatch markers so mail is not re-fired.
+ * Async: await from API handlers. Returns true if a live process was targeted
+ * or warm cancel reported an in-flight kill.
+ */
+async function stopAgentTurn(hub, slug) {
+  const lock = lockDir(hub, slug);
+  let killed = false;
+
+  if (slug === 'hub') {
+    // Warm path: lock pid is often the CP itself — never kill that.
+    // Ask the daemon to abort its current CLI child instead.
+    try {
+      const result = await requestWarmHubCancel(hub, {
+        connectTimeoutMs: 500,
+        turnTimeoutMs: 3000,
+      });
+      if (result && result.ok && result.cancelled) killed = true;
+      else if (result && result.ok && result.busy === false) {
+        /* daemon idle — fall through to cold lock kill if any */
+      } else if (result && result.cancelled) {
+        killed = true;
+      }
+    } catch (_err) { /* fall through to cold lock kill */ }
+  }
+
+  // Cold spawn (product agents, or hub cold fallback): kill lock process group.
+  // Skip if pid is protected (CP / daemon).
+  if (killLockProcessGroup(hub, lock)) killed = true;
+  // Lock missing/stolen or pid protected (CP/daemon): scan for leftover
+  // bizagent-agent CLI children for this slug and kill their process groups.
+  if (!killed && killLeftoverAgentCli(hub, slug)) killed = true;
+
+  // SIGKILL cannot be trapped, so the shell EXIT trap won't clean the lock.
+  try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_err) { /* ignore */ }
+
+  // Hold markers so the same inbox mail is not immediately re-dispatched.
+  suppressRedispatchAfterStop(hub, slug);
+
+  try {
+    logEvent(hub, {
+      event: 'operator_stop',
+      slug,
+      killed: !!killed,
+      t: nowIso(),
+    });
+  } catch (_err) { /* ignore */ }
+
+  return killed;
 }
 
 function buildArgs(extraArgs, modelOverride) {
@@ -641,15 +959,32 @@ function launchAgent(config, slug, model = '', cliName = '') {
   const child = spawn('bash', ['-c', script, '_', hub, slug, cliSettings.cli, cliSettings.promptFlag, cliSettings.extraArgs, promptFile, agentLog, agentStderr], {
     detached: true,
     stdio: 'ignore',
-    env: process.env,
+    // BIZAGENT_HUB / BIZAGENT_AGENT_SLUG so hire_helper can attribute pool slots
+    // (and agent-runtime can load settings.mcp from registry.json).
+    env: { ...process.env, BIZAGENT_HUB: hub, BIZAGENT_AGENT_SLUG: slug },
   });
 
   child.on('exit', (code) => {
-    if (code !== 0 && code !== null) {
+    if (code !== 0 && code !== null && !wasOperatorStopped(hub, slug)) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, slug, code, stderrTail, null);
     }
   });
+
+  // Track the in-flight turn so the UI can stream this agent's thinking live.
+  try {
+    const cid =
+      getPendingAgentWorkConversationId(hub, slug) ||
+      getActiveConversationId(hub, 24 * 60 * 60 * 1000);
+    if (cid) {
+      // Visible thinking attachment on the bound conversation (launch-ack).
+      try { postLaunchAck(hub, cid); } catch (_ackErr) { /* best-effort */ }
+      recordThinking(hub, cid, slug, agentLog, logByteOffset(agentLog));
+      try { notifyConversationMutated(hub, cid); } catch (_pushErr) { /* best-effort */ }
+    }
+  } catch (_err) {
+    /* best-effort */
+  }
 
   child.unref();
   logEvent(hub, {
@@ -690,6 +1025,8 @@ function launchHub(config) {
     try {
       postLaunchAck(hub, conversationId);
       logEvent(hub, { event: 'launch_ack', conversation_id: conversationId, t: startedAt });
+      // Track the in-flight turn so the UI can stream its thinking live.
+      recordThinking(hub, conversationId, 'hub', agentLog, logOffset);
       // Push "Working. Stand by..." over WS/SSE (hook no-ops outside main CP process).
       notifyConversationMutated(hub, conversationId);
     } catch (err) {
@@ -702,7 +1039,7 @@ function launchHub(config) {
     logEvent(hub, { event: 'dispatch_dry_run', slug: 'hub', type: 'hub' });
     // No CLI → no safety-net pending (would false-fail with empty log).
     // Still build turn prompt so reserved path + delivery instructions are exercised.
-    try { buildHubTurnPrompt(hub); } catch (_err) { /* optional in dry-run */ }
+    try { buildHubTurnPrompt(hub, { conversationId }); } catch (_err) { /* optional in dry-run */ }
     return;
   }
 
@@ -735,7 +1072,27 @@ function launchHub(config) {
           conversation_id: conversationId || result.conversationId || '',
           error: result.error || undefined,
         });
+        // Hard-fail: allow the same unarchived inbox mail to re-dispatch.
+        // Skip after operator stop (markers must keep holding the mail).
+        if (
+          !result.ok
+          && !result.operator_stop
+          && result.action !== 'operator_stop'
+          && (result.action === 'failed' || result.action === 'cli_config_error')
+        ) {
+          try { clearDispatchStateUnlessOperatorStop(hub, 'hub'); } catch (_e) { /* ignore */ }
+        }
         // Daemon owns CLI lifecycle; drop CP lock when turn finishes.
+        try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_e) { /* ignore */ }
+        return;
+      }
+      // Daemon is mid-turn for another request — do NOT cold-spawn a second hub CLI
+      // (that double-delivered operator replies). Release lock; tick will retry.
+      if (result.error === 'busy') {
+        logEvent(hub, {
+          event: 'hub_warm_busy',
+          conversation_id: conversationId || '',
+        });
         try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_e) { /* ignore */ }
         return;
       }
@@ -811,8 +1168,39 @@ function launchHubCold(config, ctx) {
   } = ctx;
   const { hub } = config;
 
+  // Ollama fallback (hub-only): while the flag is active, retry this hub turn
+  // against local Ollama. Launch-time override only — registry.json / cli.json
+  // are never rewritten as the new default.
+  let effectiveModel = hubModel || '';
+  let effectiveCliName = hubCliName || '';
+  const fbOverride = ollamaFallback.hubLaunchOverride(hub);
+  if (fbOverride) {
+    effectiveCliName = fbOverride.provider;
+    effectiveModel = fbOverride.model;
+    try {
+      logEvent(hub, {
+        event: 'hub_ollama_fallback_launch',
+        provider: fbOverride.provider,
+        model: fbOverride.model,
+        conversation_id: conversationId || '',
+      });
+    } catch (_e) { /* ignore */ }
+  }
+
   // Build turn prompt first (creates reserved body file when conversation_id present).
-  const promptFile = buildHubTurnPrompt(hub);
+  let promptFile;
+  try {
+    promptFile = buildHubTurnPrompt(hub, { conversationId });
+  } catch (err) {
+    try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_e) { /* ignore */ }
+    logEvent(hub, {
+      event: 'hub_turn_prompt_error',
+      message: err.message,
+      conversation_id: conversationId || '',
+      status: 'error',
+    });
+    return;
+  }
   const replyBodyFile = conversationId
     ? (reservedReplyBodyPath(hub, conversationId) || prepareReservedReplyBody(hub, conversationId))
     : '';
@@ -835,7 +1223,7 @@ function launchHubCold(config, ctx) {
   // Prefer settings.hub_agent.cliName (via config.hubCliName); empty falls back to .cli / default.
   let cliSettings;
   try {
-    cliSettings = getCliSettings(hub, cliJson, config, hubCliName || '', hubModel || '');
+    cliSettings = getCliSettings(hub, cliJson, config, effectiveCliName, effectiveModel);
   } catch (err) {
     fs.rmSync(lock, { recursive: true, force: true });
     try { fs.unlinkSync(promptFile); } catch (_e) { /* ignore */ }
@@ -868,7 +1256,7 @@ function launchHubCold(config, ctx) {
     slug: 'hub',
     turn: path.basename(promptFile),
     cmd: cmdPreview,
-    model: hubModel || 'default',
+    model: effectiveModel || 'default',
     cwd: path.relative(hub, runtimeCwd) || runtimeCwd,
     env_file_found: !!envLoad.found,
     env_keys_applied: envLoad.applied || 0,
@@ -933,17 +1321,20 @@ function launchHubCold(config, ctx) {
   ], {
     detached: true,
     stdio: 'ignore',
-    env: process.env,
+    // BIZAGENT_HUB / BIZAGENT_AGENT_SLUG so hire_helper can attribute pool slots
+    // (and agent-runtime can load settings.mcp from registry.json).
+    env: { ...process.env, BIZAGENT_HUB: hub, BIZAGENT_AGENT_SLUG: 'hub' },
   });
 
   child.on('exit', (code) => {
-    if (code !== 0 && code !== null) {
+    const opStop = wasOperatorStopped(hub, 'hub');
+    if (code !== 0 && code !== null && !opStop) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, 'hub', code, stderrTail, conversationId);
     }
     // Backup if shell EXIT hook did not clear the pending turn (tick also drains).
-    let action = '';
-    if (conversationId) {
+    let action = opStop ? 'operator_stop' : '';
+    if (!opStop && conversationId) {
       const stillPending = readPendingHubTurns(hub).some(
         (t) => t.conversationId === conversationId && t.startedAt === startedAt,
       );
@@ -973,6 +1364,13 @@ function launchHubCold(config, ctx) {
       action,
       conversation_id: conversationId || '',
     });
+    if (
+      action !== 'operator_stop'
+      && (action === 'failed'
+        || (code !== 0 && code !== null && action !== 'reserved-body' && action !== 'ok-existing'))
+    ) {
+      try { clearDispatchStateUnlessOperatorStop(hub, 'hub'); } catch (_e) { /* ignore */ }
+    }
   });
 
   child.unref();
@@ -997,15 +1395,24 @@ function dispatchPendingAgents(config) {
   let skippedCap = 0;
   const retrySecs = dispatchRetrySecs(config);
 
-  const hubNew = pendingUndispatchedMail(config.hub, 'hub', retrySecs);
+  const hubNew = pendingUndispatchedMail(config.hub, 'hub', retrySecs, config.lockLeaseSecs);
   if (hubNew.length > 0) {
     if (hubRunning >= hubSlots) {
       skippedCap += 1;
     } else if (tryLock(config.hub, 'hub', config.lockLeaseSecs)) {
-      markMailDispatched(config.hub, 'hub', hubNew, retrySecs);
-      launchHub(config);
-      launched += 1;
-      hubRunning += 1;
+      markMailDispatched(config.hub, 'hub', hubNew, retrySecs, config.lockLeaseSecs);
+      try {
+        launchHub(config);
+        launched += 1;
+        hubRunning += 1;
+      } catch (err) {
+        try { fs.rmSync(lockDir(config.hub, 'hub'), { recursive: true, force: true }); } catch (_e) { /* ignore */ }
+        logEvent(config.hub, {
+          event: 'hub_launch_error',
+          message: err.message,
+          status: 'error',
+        });
+      }
     } else {
       skippedLocked += 1;
     }
@@ -1014,7 +1421,7 @@ function dispatchPendingAgents(config) {
   for (const agent of agents) {
     const pending = pendingMail(config.hub, agent.slug);
     if (pending.length === 0) continue;
-    const fresh = pendingUndispatchedMail(config.hub, agent.slug, retrySecs);
+    const fresh = pendingUndispatchedMail(config.hub, agent.slug, retrySecs, config.lockLeaseSecs);
     if (fresh.length === 0) {
       continue;
     }
@@ -1023,7 +1430,7 @@ function dispatchPendingAgents(config) {
       continue;
     }
     if (tryLock(config.hub, agent.slug, config.lockLeaseSecs)) {
-      markMailDispatched(config.hub, agent.slug, fresh, retrySecs);
+      markMailDispatched(config.hub, agent.slug, fresh, retrySecs, config.lockLeaseSecs);
       launchAgent(config, agent.slug, agent.model || config.agentDefaultModel || '', agent.cliName || '');
       launched += 1;
       agentRunning += 1;
@@ -1057,23 +1464,34 @@ module.exports = {
   dispatchRetrySecs,
   drainHubTurnSafety,
   ensureDispatchPrompt,
+  findAgentCliPid,
   getHubConversationId,
   getRecentHubInboxMessage,
   hubDaemonSock,
   isAgentActive,
+  killLeftoverAgentCli,
   launchAgent,
   launchHub,
   launchHubCold,
   liveAgentCount,
   liveHubCount,
   liveRunCount,
+  clearDispatchState,
+  clearDispatchStateUnlessOperatorStop,
+  isProtectedStopPid,
   markMailDispatched,
+  markOperatorStop,
   notifyAgentExitFromLogs,
   pendingUndispatchedMail,
   preferWarmDaemon,
   promptFileFor,
   readStderrTail,
   recordAgentError,
+  requestHubDaemon,
+  requestWarmHubCancel,
   requestWarmHubTurn,
+  stopAgentTurn,
+  suppressRedispatchAfterStop,
   tryLock,
+  wasOperatorStopped,
 };

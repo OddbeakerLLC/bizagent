@@ -74,7 +74,14 @@ start_daemon() {
     return 0
   fi
   load_env
-  command -v node >/dev/null 2>&1 || { echo "node required" >&2; exit 1; }
+  REQUIRE_NODE="$ROOT/scripts/lib/require-node.sh"
+  if [[ -f "$REQUIRE_NODE" ]]; then
+    # shellcheck disable=SC1090
+    source "$REQUIRE_NODE"
+    bizagent_require_node || { echo "hub-daemon: Node.js v${BIZAGENT_MIN_NODE_MAJOR:-18}+ required" >&2; exit 1; }
+  else
+    command -v node >/dev/null 2>&1 || { echo "node required" >&2; exit 1; }
+  fi
   mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")"
   rm -f "$SOCK"
   nohup node "$ROOT/scripts/hub-daemon.js" --hub "$HUB" >>"$LOG_FILE" 2>&1 &

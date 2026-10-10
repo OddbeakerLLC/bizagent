@@ -11,7 +11,7 @@
 #   scripts/defer.sh --list [--to slug]
 #   scripts/defer.sh --reconcile
 #
-# See library/2026-08-07-hub-deferred-wake-spec.md
+# See docs/DEFERRED-WAKE.md
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

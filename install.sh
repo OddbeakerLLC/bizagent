@@ -4,8 +4,8 @@
 # One-liner:
 #   curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash
 #
-# Installs git, python3, cron, and Claude Code; clones bizagent;
-# starts the BizAgent control plane and opens the web UI.
+# Installs runtime deps (git, python3, curl, Node.js, cron, Java, Graphviz,
+# PlantUML), clones bizagent, starts the control plane, and opens the web UI.
 #
 # Env vars (optional):
 #   BIZAGENT_DIR=/path/to/clone    Override the default install dir (./bizagent)
@@ -13,6 +13,14 @@
 #   BIZAGENT_REINSTALL=1           Wipe an existing clone and reinstall from scratch
 #   BIZAGENT_API_KEY=...           Non-interactive: write this as the selected CLI's API key
 #                                  into INSTALL_DIR/.bizagent/env (preferred over prompting)
+#   BIZAGENT_AUTO_UPDATE=0|1       Non-interactive: framework auto-update preference
+#                                  (0=manual-only default, 1=nightly may run scripts/upgrade.sh)
+#                                  Persisted as registry.json settings.auto_update
+#   BIZAGENT_TTS_VOICE=id          Non-interactive: Kokoro voice id (default af_heart)
+#   BIZAGENT_TTS_SOURCE=path|url   oddbeaker-tts checkout or git URL (default: discover/SSH)
+#   BIZAGENT_TTS_DIR=path          Install root for oddbeaker-tts (default ~/.bizagent/oddbeaker-tts)
+#   BIZAGENT_SKIP_TTS=1            Skip oddbeaker-tts install (console TTS stays browser-only)
+#   BIZAGENT_NONINTERACTIVE=1      No prompts (provider/key/voice use env/defaults)
 
 set -euo pipefail
 
@@ -26,6 +34,23 @@ ok()   { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
 note() { printf "  ${DIM}%s${NC}\n" "$1"; }
 warn() { printf "  ${YELLOW}!${NC} %s\n" "$1"; }
 die()  { printf "\n${RED}✗ %s${NC}\n\n" "$1" >&2; exit 1; }
+
+# Wipe dep-install noise before the first onboarding questions.
+# Only on a real TTY and interactive installs — never on failure paths
+# (call only after deps succeed) or CI/non-interactive runs.
+clear_screen_for_onboarding() {
+  if [[ -n "${BIZAGENT_NONINTERACTIVE:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -r /dev/tty ]]; then
+    return 0
+  fi
+  if command -v clear >/dev/null 2>&1; then
+    clear >/dev/tty 2>/dev/null || true
+  else
+    printf '\033c' >/dev/tty 2>/dev/null || true
+  fi
+}
 
 banner() {
   cat <<'EOF'
@@ -154,9 +179,68 @@ ensure_npm() {
   ok "npm ready"
 }
 
+# Minimum Node major — keep in sync with agent-runtime engines and scripts/lib/require-node.sh
+BIZAGENT_MIN_NODE_MAJOR="${BIZAGENT_MIN_NODE_MAJOR:-18}"
+
+_node_major() {
+  local ver major
+  ver="$(node -v 2>/dev/null || node --version 2>/dev/null || true)"
+  ver="${ver#v}"
+  major="${ver%%.*}"
+  [[ "$major" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$major"
+}
+
+_die_node_too_old() {
+  local detected="$1"
+  cat >&2 <<EOF
+
+${RED}✗ Node.js ${detected} is too old (need v${BIZAGENT_MIN_NODE_MAJOR}+).${NC}
+
+Detected: ${detected}
+Required: v${BIZAGENT_MIN_NODE_MAJOR}.0.0 or newer
+
+This machine/setup may not run BizAgent until Node is upgraded.
+Older distro packages (common on WSL / Ubuntu 20.04) often ship Node 12 or 16,
+which can look "installed" then fail when the control plane or agent-runtime starts.
+
+Fix (WSL / Ubuntu / Debian) — pick one:
+
+  # NodeSource current LTS (recommended on WSL)
+  curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+  sudo apt-get install -y nodejs
+
+  # or nvm (user-local, no sudo)
+  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  # restart shell, then:
+  nvm install --lts
+  nvm use --lts
+
+Then confirm:  node -v   # should print v${BIZAGENT_MIN_NODE_MAJOR}.x or newer
+and re-run this installer.
+
+EOF
+  exit 1
+}
+
+_require_node_version() {
+  local detected major
+  if ! have node; then
+    die "Node.js not found on PATH (need v${BIZAGENT_MIN_NODE_MAJOR}+)."
+  fi
+  detected="$(node -v 2>/dev/null || node --version 2>/dev/null || echo unknown)"
+  if ! major="$(_node_major)"; then
+    _die_node_too_old "$detected"
+  fi
+  if [[ "$major" -lt "$BIZAGENT_MIN_NODE_MAJOR" ]]; then
+    _die_node_too_old "$detected"
+  fi
+  ok "node ${detected} (>= v${BIZAGENT_MIN_NODE_MAJOR})"
+}
+
 ensure_node() {
   if have node; then
-    ok "node present"
+    _require_node_version
     return
   fi
   note "node not found — installing Node.js..."
@@ -170,7 +254,515 @@ ensure_node() {
   if ! have node; then
     die "Node.js was installed but 'node' still is not on PATH. Open a new terminal and re-run this installer."
   fi
-  ok "node installed"
+  # Distro packages (esp. WSL/Ubuntu) may install Node below our minimum — fail before clone/start.
+  _require_node_version
+}
+
+ensure_curl() {
+  if have curl; then
+    ok "curl present"
+    return
+  fi
+  note "installing curl..."
+  case "$PKG" in
+    brew)   brew install curl ;;
+    apt)    $INSTALL curl ;;
+    dnf)    $INSTALL curl ;;
+    pacman) $INSTALL curl ;;
+    zypper) $INSTALL curl ;;
+  esac
+  if ! have curl; then
+    die "curl is required (downloads + API key check) but is not on PATH after install."
+  fi
+  ok "curl installed"
+}
+
+# User-local tool root for JDK / PlantUML / Graphviz when package install is unavailable.
+# Override with BIZAGENT_TOOLS_DIR. PATH snippets are written into .bizagent/env later.
+TOOLS_DIR="${BIZAGENT_TOOLS_DIR:-$HOME/.bizagent/tools}"
+TOOLS_BIN="$TOOLS_DIR/bin"
+
+# Track env exports the control plane should inherit (PATH, JAVA_HOME, GRAPHVIZ_DOT, PLANTUML_SH).
+TOOLS_ENV_LINES=()
+
+tools_env_add() {
+  local line="$1"
+  local i
+  for i in "${TOOLS_ENV_LINES[@]+"${TOOLS_ENV_LINES[@]}"}"; do
+    [[ "$i" == "$line" ]] && return
+  done
+  TOOLS_ENV_LINES+=("$line")
+}
+
+tools_path_prepend() {
+  local dir="$1"
+  [[ -d "$dir" ]] || return
+  case ":$PATH:" in
+    *":$dir:"*) ;;
+    *) export PATH="$dir:$PATH" ;;
+  esac
+  tools_env_add "export PATH=\"$dir:\$PATH\""
+}
+
+can_install_pkgs() {
+  # brew never needs sudo; Linux INSTALL uses sudo — accept passwordless or interactive tty.
+  if [[ "$PKG" == "brew" ]]; then
+    return 0
+  fi
+  if sudo -n true >/dev/null 2>&1; then
+    return 0
+  fi
+  # Allow a sudo password prompt only when a real tty is available (interactive install).
+  if [[ -r /dev/tty ]] && [[ -z "${BIZAGENT_NONINTERACTIVE:-}" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+pkg_install() {
+  # Run package install; return non-zero on failure without dying.
+  local pkgs="$*"
+  [[ -n "$pkgs" ]] || return 1
+  if ! can_install_pkgs; then
+    return 1
+  fi
+  # shellcheck disable=SC2086
+  eval "$INSTALL $pkgs"
+}
+
+detect_os_arch() {
+  local os arch
+  case "$(uname -s)" in
+    Darwin) os="mac" ;;
+    Linux)  os="linux" ;;
+    *)      os="linux" ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch="x64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    armv7l) arch="arm" ;;
+    *) arch="x64" ;;
+  esac
+  printf '%s %s\n' "$os" "$arch"
+}
+
+# --- Java (PlantUML) ---
+ensure_java() {
+  if have java; then
+    ok "java present ($(java -version 2>&1 | head -1))"
+    return
+  fi
+  # Homebrew often leaves openjdk keg-only — check common prefixes.
+  if [[ "$PKG" == "brew" ]]; then
+    local brew_java
+    for brew_java in \
+      "$(brew --prefix openjdk@17 2>/dev/null)/bin" \
+      "$(brew --prefix openjdk 2>/dev/null)/bin" \
+      "/opt/homebrew/opt/openjdk@17/bin" \
+      "/usr/local/opt/openjdk@17/bin"
+    do
+      if [[ -x "$brew_java/java" ]]; then
+        tools_path_prepend "$brew_java"
+        tools_env_add "export JAVA_HOME=\"$(dirname "$brew_java")\""
+        ok "java present (Homebrew keg)"
+        return
+      fi
+    done
+  fi
+
+  note "java not found — installing a JRE/JDK for PlantUML..."
+  local installed=0
+  case "$PKG" in
+    brew)
+      if pkg_install openjdk@17 || pkg_install openjdk; then installed=1; fi
+      ;;
+    apt)
+      if pkg_install openjdk-17-jre-headless || pkg_install default-jre-headless; then installed=1; fi
+      ;;
+    dnf)
+      if pkg_install java-17-openjdk-headless || pkg_install java-11-openjdk-headless; then installed=1; fi
+      ;;
+    pacman)
+      if pkg_install jre17-openjdk-headless || pkg_install jre-openjdk-headless; then installed=1; fi
+      ;;
+    zypper)
+      if pkg_install java-17-openjdk-headless || pkg_install java-11-openjdk-headless; then installed=1; fi
+      ;;
+  esac
+
+  # Refresh brew keg path after install.
+  if [[ "$PKG" == "brew" ]]; then
+    local brew_java
+    for brew_java in \
+      "$(brew --prefix openjdk@17 2>/dev/null)/bin" \
+      "$(brew --prefix openjdk 2>/dev/null)/bin"
+    do
+      if [[ -x "${brew_java}/java" ]]; then
+        tools_path_prepend "$brew_java"
+        tools_env_add "export JAVA_HOME=\"$(dirname "$brew_java")\""
+        have java && { ok "java installed (Homebrew)"; return; }
+      fi
+    done
+  fi
+
+  if have java; then
+    ok "java installed"
+    return
+  fi
+
+  # User-local Temurin JDK 17 (no sudo).
+  install_java_userlocal
+}
+
+install_java_userlocal() {
+  have curl || die "curl required to download a user-local JDK"
+  local os arch
+  read -r os arch <<<"$(detect_os_arch)"
+  local dest="$TOOLS_DIR/jdk"
+  mkdir -p "$TOOLS_DIR"
+  if [[ -x "$dest/bin/java" ]]; then
+    tools_path_prepend "$dest/bin"
+    tools_env_add "export JAVA_HOME=\"$dest\""
+    ok "java present (user-local $dest)"
+    return
+  fi
+  note "downloading Temurin JDK 17 to $dest (user-local, no sudo)..."
+  local url tmp tarball top
+  url="https://api.adoptium.net/v3/binary/latest/17/ga/${os}/${arch}/jdk/hotspot/normal/eclipse?project=jdk"
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  if ! curl -fsSL "$url" -o "$tmp/jdk.tgz"; then
+    die "Failed to download Temurin JDK 17. Install a JRE manually (openjdk 17+) and re-run."
+  fi
+  tar -xzf "$tmp/jdk.tgz" -C "$tmp"
+  top="$(find "$tmp" -maxdepth 1 -type d -name 'jdk-*' | head -1)"
+  [[ -n "$top" && -x "$top/bin/java" ]] || die "JDK archive did not contain bin/java"
+  rm -rf "$dest"
+  mv "$top" "$dest"
+  tools_path_prepend "$dest/bin"
+  tools_env_add "export JAVA_HOME=\"$dest\""
+  if ! have java; then
+    die "User-local JDK installed at $dest but java is not on PATH"
+  fi
+  ok "java installed user-local ($dest)"
+}
+
+# --- Graphviz / dot (PlantUML non-sequence diagrams) ---
+ensure_graphviz() {
+  if have dot; then
+    ok "dot present ($(dot -V 2>&1 | head -1))"
+    return
+  fi
+  note "graphviz (dot) not found — installing for PlantUML diagrams..."
+  case "$PKG" in
+    brew)   pkg_install graphviz || true ;;
+    apt)    pkg_install graphviz || true ;;
+    dnf)    pkg_install graphviz || true ;;
+    pacman) pkg_install graphviz || true ;;
+    zypper) pkg_install graphviz || true ;;
+  esac
+  hash -r 2>/dev/null || true
+  if have dot; then
+    ok "dot installed"
+    return
+  fi
+  install_graphviz_userlocal
+}
+
+install_graphviz_userlocal() {
+  local dest="$TOOLS_DIR/graphviz"
+  local bin_dir="$dest/usr/bin"
+  if [[ -x "$bin_dir/dot" ]]; then
+    expose_userlocal_graphviz "$dest"
+    if have dot && dot -V >/dev/null 2>&1; then
+      ok "dot present (user-local $bin_dir/dot)"
+      return
+    fi
+  fi
+
+  # Debian/Ubuntu: download .debs + recursive Depends and extract (no sudo).
+  # Package SONAMEs change across releases (libgvc6 vs libgvc7, etc.).
+  if have apt-get && have apt-cache && have dpkg-deb; then
+    note "extracting graphviz packages user-local into $dest..."
+    local debdir="$TOOLS_DIR/debs-graphviz"
+    mkdir -p "$debdir" "$dest"
+    # Resolve package names dynamically from apt metadata.
+    local -a pkgs=()
+    local line dep
+    pkgs+=(graphviz)
+    while IFS= read -r line; do
+      # apt-cache depends lines look like: "  Depends: libgvc7"
+      dep="$(printf '%s\n' "$line" | sed -n 's/^[[:space:]]*Depends:[[:space:]]*//p')"
+      [[ -n "$dep" ]] || continue
+      # Skip alternatives / debconf virtuals / libc
+      case "$dep" in
+        *\|*|libc6|libc6_*|libstdc++*|libgcc*|base-files|fonts-* ) continue ;;
+      esac
+      # Strip version operators: "libfoo (>= 1)" → libfoo
+      dep="${dep%% *}"
+      dep="${dep%%:*}"; # drop :any
+      pkgs+=("$dep")
+    done < <(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts \
+      --no-breaks --no-replaces --no-enhances graphviz 2>/dev/null | head -200)
+
+    # Also pull common Graphviz plugin packages when present in the index.
+    local plug
+    for plug in libgvplugin-core8 libgvplugin-dot-layout8 libgvplugin-gd8 \
+                libgvplugin-pango8 libgvplugin-neato-layout8; do
+      if apt-cache show "$plug" >/dev/null 2>&1; then
+        pkgs+=("$plug")
+      fi
+    done
+
+    # Unique package list
+    local -a uniq=()
+    local p seen
+    for p in "${pkgs[@]}"; do
+      seen=0
+      for u in "${uniq[@]+"${uniq[@]}"}"; do
+        [[ "$u" == "$p" ]] && { seen=1; break; }
+      done
+      [[ $seen -eq 0 ]] && uniq+=("$p")
+    done
+
+    if (cd "$debdir" && apt-get download "${uniq[@]}" >/dev/null 2>&1); then
+      local deb
+      for deb in "$debdir"/*.deb; do
+        [[ -f "$deb" ]] || continue
+        dpkg-deb -x "$deb" "$dest" 2>/dev/null || true
+      done
+      if [[ -x "$bin_dir/dot" ]]; then
+        expose_userlocal_graphviz "$dest"
+        if have dot && dot -V >/dev/null 2>&1; then
+          ok "dot installed user-local ($bin_dir/dot)"
+          return
+        fi
+        # If wrapper failed, surface ldd clues in a soft warn then fall through to die.
+        warn "user-local dot extracted but failed to run (missing libs?)"
+      fi
+    else
+      warn "apt-get download of graphviz deps failed (offline or no universe mirror?)"
+    fi
+  fi
+
+  die "Graphviz 'dot' is required for PlantUML (non-sequence diagrams) but could not be installed.
+Install it with your package manager and re-run, e.g.:
+  sudo apt-get install -y graphviz
+  sudo dnf install -y graphviz
+  brew install graphviz"
+}
+
+expose_userlocal_graphviz() {
+  local dest="$1"
+  local bin_dir="$dest/usr/bin"
+  local lib_dir=""
+  # Prefer multiarch lib dir when present.
+  if [[ -d "$dest/usr/lib/x86_64-linux-gnu" ]]; then
+    lib_dir="$dest/usr/lib/x86_64-linux-gnu"
+  elif [[ -d "$dest/usr/lib/aarch64-linux-gnu" ]]; then
+    lib_dir="$dest/usr/lib/aarch64-linux-gnu"
+  elif [[ -d "$dest/usr/lib" ]]; then
+    lib_dir="$dest/usr/lib"
+  fi
+  mkdir -p "$TOOLS_BIN"
+
+  # Register Graphviz plugins into configN (required after unpacking .debs without dpkg).
+  if [[ -n "$lib_dir" && -d "$lib_dir/graphviz" && -x "$bin_dir/dot" ]]; then
+    LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+      GVBINDIR="$lib_dir/graphviz" \
+      "$bin_dir/dot" -c >/dev/null 2>&1 || true
+  fi
+
+  # Wrapper so consumers only need TOOLS_BIN on PATH (sets LD_LIBRARY_PATH).
+  cat > "$TOOLS_BIN/dot" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+LIB="$lib_dir"
+BIN="$bin_dir"
+if [[ -n "\$LIB" ]]; then
+  export LD_LIBRARY_PATH="\$LIB\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+  # Graphviz plugins live under lib/graphviz
+  export GVBINDIR="\$LIB/graphviz"
+fi
+exec "\$BIN/dot" "\$@"
+EOF
+  chmod +x "$TOOLS_BIN/dot"
+  # Also expose sibling layout engines commonly invoked as `dot` alternatives.
+  local eng
+  for eng in neato fdp sfdp twopi circo; do
+    if [[ -x "$bin_dir/$eng" && ! -e "$TOOLS_BIN/$eng" ]]; then
+      cat > "$TOOLS_BIN/$eng" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+LIB="$lib_dir"
+BIN="$bin_dir"
+if [[ -n "\$LIB" ]]; then
+  export LD_LIBRARY_PATH="\$LIB\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+  export GVBINDIR="\$LIB/graphviz"
+fi
+exec "\$BIN/$eng" "\$@"
+EOF
+      chmod +x "$TOOLS_BIN/$eng"
+    fi
+  done
+  tools_path_prepend "$TOOLS_BIN"
+  tools_env_add "export GRAPHVIZ_DOT=\"$TOOLS_BIN/dot\""
+  if [[ -n "$lib_dir" ]]; then
+    tools_env_add "export LD_LIBRARY_PATH=\"$lib_dir\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\""
+    tools_env_add "export GVBINDIR=\"$lib_dir/graphviz\""
+  fi
+}
+
+# --- PlantUML (jar + wrapper) ---
+find_plantuml_bin() {
+  local c
+  for c in \
+    "${PLANTUML_SH:-}" \
+    "$TOOLS_DIR/plantuml.sh" \
+    "$HOME/tools/plantuml.sh" \
+    "$HOME/.local/bin/plantuml" \
+    "/usr/local/bin/plantuml" \
+    "/usr/bin/plantuml"
+  do
+    [[ -n "$c" && -f "$c" && -x "$c" ]] && { printf '%s\n' "$c"; return 0; }
+  done
+  if have plantuml; then
+    command -v plantuml
+    return 0
+  fi
+  return 1
+}
+
+ensure_plantuml() {
+  local existing
+  if existing="$(find_plantuml_bin 2>/dev/null)"; then
+    ok "plantuml present ($existing)"
+    tools_env_add "export PLANTUML_SH=\"$existing\""
+    return
+  fi
+
+  note "PlantUML not found — installing..."
+  # Distro package when available (often pulls Java; Graphviz may be recommended only).
+  case "$PKG" in
+    brew)   pkg_install plantuml || true ;;
+    apt)    pkg_install plantuml || true ;;
+    dnf)    pkg_install plantuml || true ;;
+    pacman) pkg_install plantuml || true ;;
+    zypper) pkg_install plantuml || true ;;
+  esac
+  hash -r 2>/dev/null || true
+  if existing="$(find_plantuml_bin 2>/dev/null)"; then
+    ok "plantuml installed ($existing)"
+    tools_env_add "export PLANTUML_SH=\"$existing\""
+    return
+  fi
+
+  install_plantuml_userlocal
+}
+
+install_plantuml_userlocal() {
+  have curl || die "curl required to download PlantUML"
+  have java || die "java required before PlantUML jar install"
+  mkdir -p "$TOOLS_DIR" "$TOOLS_BIN" "$HOME/.local/bin"
+  local jar="$TOOLS_DIR/plantuml.jar"
+  local wrap="$TOOLS_DIR/plantuml.sh"
+  local ver="1.2024.7"
+  local url="https://github.com/plantuml/plantuml/releases/download/v${ver}/plantuml-${ver}.jar"
+
+  if [[ ! -f "$jar" ]]; then
+    note "downloading PlantUML ${ver} jar to $jar..."
+    if ! curl -fsSL "$url" -o "$jar"; then
+      # Fallback: latest redirect from plantuml.com
+      if ! curl -fsSL "https://github.com/plantuml/plantuml/releases/latest/download/plantuml.jar" -o "$jar"; then
+        die "Failed to download plantuml.jar. Install the plantuml package or place plantuml.jar at $jar."
+      fi
+    fi
+  fi
+
+  # Portable wrapper: prefers java on PATH / JAVA_HOME, jar next to the script.
+  cat > "$wrap" <<'EOF'
+#!/usr/bin/env bash
+# PlantUML render wrapper (user-local install).
+# Usage:
+#   plantuml.sh <file.puml> [format]     # format: svg (default) | png | both
+#   plantuml.sh -tsvg <file.puml>        # passthrough to java -jar
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JAR="${PLANTUML_JAR:-$ROOT/plantuml.jar}"
+
+resolve_java() {
+  if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]]; then
+    printf '%s\n' "$JAVA_HOME/bin/java"
+    return
+  fi
+  if command -v java >/dev/null 2>&1; then
+    command -v java
+    return
+  fi
+  local c
+  for c in "$ROOT/jdk/bin/java" "$HOME/.bizagent/tools/jdk/bin/java"; do
+    if [[ -x "$c" ]]; then
+      printf '%s\n' "$c"
+      return
+    fi
+  done
+  echo "java not found (install a JRE 17+ or set JAVA_HOME)" >&2
+  exit 1
+}
+
+JAVA="$(resolve_java)"
+[[ -f "$JAR" ]] || { echo "PlantUML jar not found at $JAR" >&2; exit 1; }
+
+# Prefer installer-provided Graphviz wrapper / GRAPHVIZ_DOT.
+if [[ -n "${GRAPHVIZ_DOT:-}" && -x "$GRAPHVIZ_DOT" ]]; then
+  export GRAPHVIZ_DOT
+elif [[ -x "$HOME/.bizagent/tools/bin/dot" ]]; then
+  export GRAPHVIZ_DOT="$HOME/.bizagent/tools/bin/dot"
+  export PATH="$HOME/.bizagent/tools/bin:$PATH"
+fi
+
+DOT_ARGS=()
+if [[ -n "${GRAPHVIZ_DOT:-}" && -x "$GRAPHVIZ_DOT" ]]; then
+  DOT_ARGS=(-graphvizdot "$GRAPHVIZ_DOT")
+fi
+
+if [[ $# -eq 0 ]]; then
+  echo "Usage: plantuml.sh <file.puml> [svg|png|both]" >&2
+  exit 1
+fi
+
+if [[ "$1" == -* ]]; then
+  exec "$JAVA" -jar "$JAR" ${DOT_ARGS[@]+"${DOT_ARGS[@]}"} "$@"
+fi
+
+PUML="$1"
+FMT="${2:-svg}"
+case "$FMT" in
+  svg)  "$JAVA" -jar "$JAR" ${DOT_ARGS[@]+"${DOT_ARGS[@]}"} -tsvg "$PUML" ;;
+  png)  "$JAVA" -jar "$JAR" ${DOT_ARGS[@]+"${DOT_ARGS[@]}"} -tpng "$PUML" ;;
+  both)
+    "$JAVA" -jar "$JAR" ${DOT_ARGS[@]+"${DOT_ARGS[@]}"} -tsvg "$PUML"
+    "$JAVA" -jar "$JAR" ${DOT_ARGS[@]+"${DOT_ARGS[@]}"} -tpng "$PUML"
+    ;;
+  *)    echo "Unknown format: $FMT (use svg|png|both)" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "$wrap"
+
+  # PATH convenience: plantuml → wrapper
+  ln -sfn "$wrap" "$TOOLS_BIN/plantuml"
+  ln -sfn "$wrap" "$HOME/.local/bin/plantuml" 2>/dev/null || true
+  tools_path_prepend "$TOOLS_BIN"
+  tools_path_prepend "$HOME/.local/bin"
+  tools_env_add "export PLANTUML_SH=\"$wrap\""
+  tools_env_add "export PLANTUML_JAR=\"$jar\""
+
+  if ! find_plantuml_bin >/dev/null; then
+    die "PlantUML wrapper written to $wrap but not discoverable"
+  fi
+  ok "plantuml installed user-local ($wrap)"
 }
 
 validate_source() {
@@ -252,23 +844,53 @@ install_cli() {
 # Default LLM provider for new hubs (bizagent-agent is always the runtime).
 # Override with BIZAGENT_PROVIDER=openai|venice|openrouter|grok
 select_default_provider() {
-  SELECTED_PROVIDER="${BIZAGENT_PROVIDER:-grok}"
-  case "$SELECTED_PROVIDER" in
-    grok|chatgpt|claude|gemini|venice|ollama) ;;
-    xai) SELECTED_PROVIDER="grok" ;;
-    openai|codex) SELECTED_PROVIDER="chatgpt" ;;
-    openrouter) SELECTED_PROVIDER="claude" ;;
-    agy) SELECTED_PROVIDER="gemini" ;;
-    *)
-      warn "Unknown BIZAGENT_PROVIDER=$SELECTED_PROVIDER — using grok"
-      SELECTED_PROVIDER="grok"
-      ;;
-  esac
+  if [[ -n "${BIZAGENT_PROVIDER:-}" ]]; then
+    # Non-interactive: respect the env override.
+    SELECTED_PROVIDER="${BIZAGENT_PROVIDER}"
+    case "$SELECTED_PROVIDER" in
+      grok|chatgpt|claude|gemini|venice|ollama) ;;
+      xai) SELECTED_PROVIDER="grok" ;;
+      openai|codex) SELECTED_PROVIDER="chatgpt" ;;
+      openrouter) SELECTED_PROVIDER="claude" ;;
+      agy) SELECTED_PROVIDER="gemini" ;;
+      *)
+        warn "Unknown BIZAGENT_PROVIDER=$SELECTED_PROVIDER — using grok"
+        SELECTED_PROVIDER="grok"
+        ;;
+    esac
+  else
+    # Interactive: let the user pick a provider (default grok).
+    # Prefer /dev/tty so piping the installer still works when a real terminal exists.
+    printf "\nChoose an LLM provider for the hub:\n"
+    printf "  1) grok\n  2) chatgpt\n  3) claude\n  4) gemini\n  5) venice\n  6) ollama\n"
+    _provider_choice=""
+    if [[ -r /dev/tty ]]; then
+      read -r -p "  Select provider [1-6, default 1 (grok)]: " _provider_choice </dev/tty || true
+    else
+      # No TTY (fully non-interactive pipe without BIZAGENT_PROVIDER): default grok.
+      _provider_choice="1"
+    fi
+    case "${_provider_choice:-1}" in
+      2|chatgpt) SELECTED_PROVIDER="chatgpt" ;;
+      3|claude)  SELECTED_PROVIDER="claude" ;;
+      4|gemini)  SELECTED_PROVIDER="gemini" ;;
+      5|venice)  SELECTED_PROVIDER="venice" ;;
+      6|ollama)  SELECTED_PROVIDER="ollama" ;;
+      *)         SELECTED_PROVIDER="grok" ;;
+    esac
+  fi
   # Legacy vars still set for older install paths that reference SELECTED_CLI
   SELECTED_CLI="bizagent-agent"
   SELECTED_PROMPT_FLAG="-f"
   SELECTED_YOLO_FLAG="-y"
   ok "LLM runtime: bizagent-agent · default provider: $SELECTED_PROVIDER"
+
+  # If the user doesn't already have their API key, now is the time to grab it:
+  # the install will NOT complete until a valid key is entered at the next step.
+  if [[ -z "${BIZAGENT_API_KEY:-}" ]]; then
+    note "If you don't already have an API key for ${SELECTED_PROVIDER:-grok}, grab it now —"
+    note "the next step requires it and the install will not finish until a valid key is entered."
+  fi
 }
 
 # Map provider → primary API key env var for .bizagent/env
@@ -286,6 +908,42 @@ api_key_var_for_cli() {
   esac
 }
 
+# Provider → OpenAI-compatible endpoint + a cheap model for the hello check.
+provider_hello_endpoint() {
+  case "$1" in
+    grok|xai)        echo "https://api.x.ai/v1|grok-4.3" ;;
+    chatgpt|openai|codex) echo "https://api.openai.com/v1|gpt-5.4-mini" ;;
+    claude)          echo "https://api.anthropic.com/v1/|claude-haiku-4-5-20251001" ;;
+    openrouter)      echo "https://openrouter.ai/api/v1|anthropic/claude-sonnet-4" ;;
+    gemini|agy)      echo "https://generativelanguage.googleapis.com/v1beta/openai/|gemini-2.5-flash-lite" ;;
+    venice)          echo "https://api.venice.ai/api/v1|deepseek-v4-flash-0731" ;;
+    ollama)          echo "http://127.0.0.1:11434/v1|llama3.2" ;;
+    *)               echo "" ;;
+  esac
+}
+
+# Send a tiny 'hello' prompt to the LLM to confirm the API key works before
+# proceeding. Returns 0 on success, 1 on failure. Skips (returns 0) when the
+# provider endpoint is unknown or curl is unavailable — never blocks install.
+validate_api_key() {
+  local provider="$1" key="$2"
+  local ep base model code
+  ep="$(provider_hello_endpoint "$provider")"
+  [[ -z "$ep" ]] && return 0
+  base="${ep%%|*}"; model="${ep#*|}"
+  base="${base%/}"
+  if ! have curl; then
+    warn "curl not found — skipping API key validation"
+    return 0
+  fi
+  code="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "$base/chat/completions" \
+    -H "Authorization: Bearer $key" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":1}" 2>/dev/null)"
+  [[ "$code" == "200" ]]
+}
+
 prompt_api_key() {
   SELECTED_API_KEY_VAR="$(api_key_var_for_cli "${SELECTED_PROVIDER:-grok}")"
   SELECTED_API_KEY=""
@@ -297,6 +955,9 @@ prompt_api_key() {
     fi
     SELECTED_API_KEY="$BIZAGENT_API_KEY"
     ok "Using BIZAGENT_API_KEY for $SELECTED_API_KEY_VAR (will write .bizagent/env)"
+    if ! validate_api_key "$SELECTED_PROVIDER" "$SELECTED_API_KEY"; then
+      warn "BIZAGENT_API_KEY was rejected by the provider — installation may fail until it is corrected."
+    fi
     return
   fi
 
@@ -321,20 +982,28 @@ prompt_api_key() {
   fi
 
   printf "\n${BOLD}API key for provider %s${NC}\n" "${SELECTED_PROVIDER:-grok}"
+  warn "An incorrectly entered API key will prevent completing the installation."
   note "Hub turns need $SELECTED_API_KEY_VAR in .bizagent/env (sourced by control-plane + hub-daemon)."
-  note "Paste the key (input hidden). Leave blank to skip — chat will fail until you add it."
-  local key
+  note "Paste the key (input hidden). It is required — installation cannot finish without it."
+  local key=""
   # -r: raw; -s: silent. Read from /dev/tty so curl|bash still works.
-  read -r -s -p "  $SELECTED_API_KEY_VAR: " key </dev/tty
-  printf "\n"
-  if [[ -n "$key" ]]; then
-    SELECTED_API_KEY="$key"
-    ok "$SELECTED_API_KEY_VAR will be written to .bizagent/env (mode 600)"
-  else
-    warn "No key entered. Create .bizagent/env before expecting hub replies:"
-    note "  echo '$SELECTED_API_KEY_VAR=...' > $INSTALL_DIR/.bizagent/env && chmod 600 $INSTALL_DIR/.bizagent/env"
-    note "  then: scripts/hub-daemon.sh restart && scripts/control-plane.sh restart"
-  fi
+  # Loop until a non-empty key that passes a live 'hello' check is entered
+  # (required for the hub to run turns — keeps the install error-free).
+  while true; do
+    read -r -s -p "  $SELECTED_API_KEY_VAR (required): " key </dev/tty
+    printf "\n"
+    if [[ -z "$key" ]]; then
+      warn "API key is required — an empty or incorrect key will prevent completing the installation. Please enter it."
+      continue
+    fi
+    if validate_api_key "$SELECTED_PROVIDER" "$key"; then
+      break
+    fi
+    warn "That API key was rejected by the provider. Please re-enter it."
+    key=""
+  done
+  SELECTED_API_KEY="$key"
+  ok "$SELECTED_API_KEY_VAR validated and will be written to .bizagent/env (mode 600)"
 }
 
 # Seed cli.json (LLM provider catalog + fixed _runtime). Runtime is always bizagent-agent.
@@ -413,6 +1082,15 @@ PY
     ok "cli.json has provider '$provider' (runtime: bizagent-agent)"
   fi
 
+  # Install root (control-plane) deps if present — e.g. `ws` for the web UI.
+  if [[ -f "$INSTALL_DIR/package.json" ]]; then
+    if command -v npm >/dev/null 2>&1; then
+      (cd "$INSTALL_DIR" && npm install --silent) \
+        && ok "control-plane npm dependencies installed" \
+        || warn "root npm install failed — run: cd $INSTALL_DIR && npm install"
+    fi
+  fi
+
   # Install agent-runtime deps if present
   if [[ -f "$INSTALL_DIR/agent-runtime/package.json" ]]; then
     if command -v npm >/dev/null 2>&1; then
@@ -424,21 +1102,84 @@ PY
   fi
 }
 
+# Ask (or take BIZAGENT_AUTO_UPDATE) whether nightly may auto-upgrade framework code.
+# Default: manual-only (false). Choice is written to registry.json settings.auto_update.
+SELECTED_AUTO_UPDATE="false"
+
+prompt_auto_update() {
+  # Non-interactive override
+  if [[ -n "${BIZAGENT_AUTO_UPDATE:-}" ]]; then
+    case "${BIZAGENT_AUTO_UPDATE}" in
+      1|true|TRUE|yes|YES|on|ON)
+        SELECTED_AUTO_UPDATE="true"
+        ok "auto-update: enabled (BIZAGENT_AUTO_UPDATE) — nightly may run scripts/upgrade.sh"
+        ;;
+      0|false|FALSE|no|NO|off|OFF)
+        SELECTED_AUTO_UPDATE="false"
+        ok "auto-update: manual-only (BIZAGENT_AUTO_UPDATE)"
+        ;;
+      *)
+        warn "Unknown BIZAGENT_AUTO_UPDATE=$BIZAGENT_AUTO_UPDATE — defaulting to manual-only"
+        SELECTED_AUTO_UPDATE="false"
+        ;;
+    esac
+    return
+  fi
+
+  # No TTY: safe default
+  if [[ ! -r /dev/tty ]] || [[ -n "${BIZAGENT_NONINTERACTIVE:-}" ]]; then
+    SELECTED_AUTO_UPDATE="false"
+    ok "auto-update: manual-only (non-interactive default)"
+    note "Change later: registry.json → settings.auto_update true|false"
+    return
+  fi
+
+  step "Framework updates"
+  note "BizAgent can pull framework upgrades from the public repo (OddbeakerLLC/bizagent)."
+  note "Upgrades never overwrite registry.json, cli.json, agents/, company/, or mail."
+  note "Default is manual-only — you (or PTL) run scripts/upgrade.sh when ready."
+  printf "\n"
+  printf "  ${BOLD}1)${NC} Manual only ${DIM}(recommended default)${NC}\n"
+  printf "  ${BOLD}2)${NC} Automatic ${DIM}(nightly may run upgrade when appropriate)${NC}\n"
+  printf "\n"
+  local choice=""
+  while true; do
+    read -r -p "  Choose [1/2] (default 1): " choice </dev/tty || choice="1"
+    choice="${choice:-1}"
+    case "$choice" in
+      1|m|M|manual|Manual)
+        SELECTED_AUTO_UPDATE="false"
+        ok "auto-update: manual-only"
+        break
+        ;;
+      2|a|A|auto|Auto|automatic|Automatic)
+        SELECTED_AUTO_UPDATE="true"
+        ok "auto-update: enabled (nightly may run scripts/upgrade.sh)"
+        break
+        ;;
+      *)
+        warn "Enter 1 (manual) or 2 (automatic)"
+        ;;
+    esac
+  done
+}
+
 # Seed operator registry.json; set settings.hub_agent.provider to the default LLM.
 # registry.json is gitignored; the public repo only ships registry.example.json.
 write_registry_seed() {
   local dest="$INSTALL_DIR/registry.json"
   local src="$INSTALL_DIR/registry.example.json"
   local provider="${SELECTED_PROVIDER:-grok}"
+  local auto_update="${SELECTED_AUTO_UPDATE:-false}"
 
   if [[ ! -f "$dest" ]]; then
     if [[ ! -f "$src" ]]; then
       warn "registry.example.json missing — control plane needs a registry.json"
       return
     fi
-    if ! python3 - "$src" "$dest" "$provider" <<'PY'
+    if ! python3 - "$src" "$dest" "$provider" "$auto_update" <<'PY'
 import json, sys
-src, dest, provider = sys.argv[1:4]
+src, dest, provider, auto_update = sys.argv[1:5]
 d = json.load(open(src))
 d["org"] = ""
 d["products"] = []
@@ -446,11 +1187,34 @@ d["cross_product_edges"] = []
 if "hub" in d and isinstance(d["hub"], dict):
     d["hub"]["name"] = "BizAgent"
 settings = d.setdefault("settings", {})
+settings["auto_update"] = auto_update.strip().lower() in ("1", "true", "yes", "on")
 hub_agent = settings.setdefault("hub_agent", {})
 hub_agent["provider"] = provider
 hub_agent["cliName"] = provider  # legacy alias
-if provider == "grok" and not hub_agent.get("model"):
-    hub_agent["model"] = "grok-4.5"
+# Provider first-model defaults (must match cli.json.example / PROVIDER_CATALOG).
+PROVIDER_DEFAULT_MODEL = {
+    "grok": "grok-4.5",
+    "chatgpt": "gpt-4o",
+    "openai": "gpt-4o",
+    "claude": "claude-sonnet-4-6",
+    "gemini": "gemini-2.5-flash",
+    "venice": "llama-3.3-70b",
+    "ollama": "llama3.2",
+    "openrouter": "anthropic/claude-sonnet-4",
+}
+default_model = PROVIDER_DEFAULT_MODEL.get(provider, "")
+if provider == "grok":
+    hub_agent.setdefault("model", "grok-4.5")
+elif str(hub_agent.get("model", "")).startswith("grok"):
+    # example ships grok-4.5 — drop the stale grok model so the runtime
+    # uses the selected provider's default
+    del hub_agent["model"]
+if default_model and not str(hub_agent.get("model") or "").strip():
+    hub_agent["model"] = default_model
+# Product agents need an explicit default too (no silent runtime fallback).
+models = settings.setdefault("models", {})
+if default_model and not str(models.get("agent_default") or "").strip():
+    models["agent_default"] = default_model
 json.dump(d, open(dest, "w"), indent=2)
 open(dest, "a").write("\n")
 PY
@@ -458,15 +1222,19 @@ PY
       cp "$src" "$dest"
       warn "seeded registry.json as a full example copy (python seed failed)"
     else
-      ok "registry.json seeded (empty products, hub_agent.provider=$provider)"
+      ok "registry.json seeded (empty products, hub_agent.provider=$provider, auto_update=$auto_update)"
     fi
   else
-    # Existing registry: ensure hub provider is set.
-    if ! python3 - "$dest" "$provider" <<'PY'
+    # Existing registry: ensure hub provider + auto_update preference are set.
+    if ! python3 - "$dest" "$provider" "$auto_update" <<'PY'
 import json, sys
-path, provider = sys.argv[1:3]
+path, provider, auto_update = sys.argv[1:4]
 d = json.load(open(path))
 settings = d.setdefault("settings", {})
+# Only set auto_update when missing so re-install over existing clone keeps operator choice
+# unless they explicitly passed BIZAGENT_AUTO_UPDATE (SELECTED already resolved).
+# Installer always writes the choice from this run when key was prompted/env-set.
+settings["auto_update"] = auto_update.strip().lower() in ("1", "true", "yes", "on")
 hub_agent = settings.setdefault("hub_agent", {})
 current = (hub_agent.get("provider") or hub_agent.get("cliName") or hub_agent.get("cli") or "").strip()
 legacy_map = {"claude": "openrouter", "codex": "openai", "agy": "openrouter", "bizagent-agent": provider or "grok", "xai": "grok"}
@@ -474,22 +1242,41 @@ if current:
     current = legacy_map.get(current, current)
     hub_agent["provider"] = current
     hub_agent["cliName"] = current
-    json.dump(d, open(path, "w"), indent=2)
-    open(path, "a").write("\n")
-    print("keep")
-    raise SystemExit(0)
-hub_agent["provider"] = provider
-hub_agent["cliName"] = provider
-if provider == "grok" and not hub_agent.get("model"):
-    hub_agent["model"] = "grok-4.5"
+else:
+    hub_agent["provider"] = provider
+    hub_agent["cliName"] = provider
+final_provider = hub_agent.get("provider") or provider
+PROVIDER_DEFAULT_MODEL = {
+    "grok": "grok-4.5",
+    "chatgpt": "gpt-4o",
+    "openai": "gpt-4o",
+    "claude": "claude-sonnet-4-6",
+    "gemini": "gemini-2.5-flash",
+    "venice": "llama-3.3-70b",
+    "ollama": "llama3.2",
+    "openrouter": "anthropic/claude-sonnet-4",
+}
+default_model = PROVIDER_DEFAULT_MODEL.get(final_provider, "")
+if final_provider == "grok":
+    hub_agent.setdefault("model", "grok-4.5")
+elif str(hub_agent.get("model", "")).startswith("grok"):
+    # stale grok model (e.g. from a previous install) — drop it so the
+    # runtime uses the selected provider's default
+    del hub_agent["model"]
+if default_model and not str(hub_agent.get("model") or "").strip():
+    hub_agent["model"] = default_model
+# Only seed agent_default when missing/empty — never clobber operator choice.
+models = settings.setdefault("models", {})
+if default_model and not str(models.get("agent_default") or "").strip():
+    models["agent_default"] = default_model
 json.dump(d, open(path, "w"), indent=2)
 open(path, "a").write("\n")
-print(provider)
+print(settings.get("auto_update"))
 PY
     then
-      warn "could not set hub_agent.provider on existing registry.json"
+      warn "could not set hub_agent.provider / auto_update on existing registry.json"
     else
-      ok "registry.json hub_agent.provider ensured"
+      ok "registry.json hub_agent.provider + auto_update ensured"
     fi
   fi
 
@@ -506,6 +1293,7 @@ write_env_file() {
     if [[ ! -f "$env_file" ]] && [[ -f "$INSTALL_DIR/.bizagent/env.example" ]]; then
       note "No API key saved. See .bizagent/env.example for the format."
     fi
+    write_tools_env_lines
     return
   fi
 
@@ -526,6 +1314,82 @@ EOF
   fi
   chmod 600 "$env_file"
   ok "API key written to .bizagent/env ($SELECTED_API_KEY_VAR)"
+  write_tools_env_lines
+}
+
+# Append tool PATH / PlantUML / Graphviz exports so control-plane.sh inherits them.
+write_tools_env_lines() {
+  local env_file="$INSTALL_DIR/.bizagent/env"
+  mkdir -p "$INSTALL_DIR/.bizagent"
+  if [[ ${#TOOLS_ENV_LINES[@]} -eq 0 ]]; then
+    # Still record discovery hints when tools were already on PATH from packages.
+    local puml
+    if puml="$(find_plantuml_bin 2>/dev/null)"; then
+      TOOLS_ENV_LINES+=("export PLANTUML_SH="$puml"")
+    fi
+    if have dot; then
+      TOOLS_ENV_LINES+=("export GRAPHVIZ_DOT="$(command -v dot)"")
+    fi
+  fi
+  [[ ${#TOOLS_ENV_LINES[@]} -eq 0 ]] && return 0
+  touch "$env_file"
+  chmod 600 "$env_file" 2>/dev/null || true
+  local line key
+  for line in "${TOOLS_ENV_LINES[@]}"; do
+    # Idempotent: drop prior export of same VAR then append.
+    key="${line%%=*}"
+    key="${key#export }"
+    if grep -qE "^export ${key}=" "$env_file" 2>/dev/null; then
+      local tmp
+      tmp="$(mktemp)"
+      grep -v -E "^export ${key}=" "$env_file" > "$tmp" || true
+      mv "$tmp" "$env_file"
+    fi
+    printf '%s
+' "$line" >> "$env_file"
+  done
+  ok "tool paths written to .bizagent/env (PlantUML/Graphviz/Java)"
+}
+
+# --- optional oddbeaker-tts (Kokoro) local service ---
+# Installs/starts shared daemon on :9201 when possible; prompts for voice;
+# persists BIZAGENT_TTS_VOICE in .bizagent/env. Soft-fails so hub install still succeeds.
+ensure_oddbeaker_tts() {
+  if [[ -n "${BIZAGENT_SKIP_TTS:-}" ]]; then
+    ok "skipping oddbeaker-tts (BIZAGENT_SKIP_TTS)"
+    return 0
+  fi
+  local helper=""
+  if [[ -x "$INSTALL_DIR/scripts/install-oddbeaker-tts.sh" ]]; then
+    helper="$INSTALL_DIR/scripts/install-oddbeaker-tts.sh"
+  elif [[ -x "$(dirname "${BASH_SOURCE[0]}")/scripts/install-oddbeaker-tts.sh" ]]; then
+    helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/install-oddbeaker-tts.sh"
+  fi
+  if [[ -z "$helper" ]]; then
+    warn "install-oddbeaker-tts.sh missing — console TTS will use browser speechSynthesis only"
+    note "Later: place oddbeaker-tts on the host and run scripts/install-oddbeaker-tts.sh"
+    return 0
+  fi
+  step "Console TTS (oddbeaker-tts / Kokoro)"
+  note "Optional local service on 127.0.0.1:9201. UI TTS toggle stays off until you enable it."
+  note "One daemon per host — shared with other Oddbeaker products if already running."
+  local args=(--hub "$INSTALL_DIR" --yes)
+  # Interactive install: prompt for voice when a TTY exists
+  if [[ -r /dev/tty ]] && [[ -z "${BIZAGENT_NONINTERACTIVE:-}" ]]; then
+    args+=(--prompt-voice)
+  fi
+  if [[ -n "${BIZAGENT_TTS_VOICE:-}" ]]; then
+    args+=(--voice "$BIZAGENT_TTS_VOICE")
+  fi
+  if [[ -n "${BIZAGENT_TTS_SOURCE:-}" ]]; then
+    args+=(--source "$BIZAGENT_TTS_SOURCE")
+  fi
+  # Do not fail the whole BizAgent install if TTS cannot be built on this host.
+  if ! bash "$helper" "${args[@]}"; then
+    warn "oddbeaker-tts install reported failure — hub continues; browser TTS fallback remains"
+    return 0
+  fi
+  ok "oddbeaker-tts step finished (voice in .bizagent/env when set)"
 }
 
 # --- clone + handoff ---
@@ -619,6 +1483,15 @@ PY
 )
   port="${port:-8787}"
 
+  # First-run inbox + Welcome conversation seed BEFORE control-plane start so
+  # the first UI load can show the short PTL bubble (and TTS can speak it).
+  step "First-run readiness"
+  if [[ -x "$INSTALL_DIR/scripts/seed-first-run.sh" ]]; then
+    bash "$INSTALL_DIR/scripts/seed-first-run.sh" "$INSTALL_DIR" || true
+  else
+    warn "scripts/seed-first-run.sh missing — no first-run welcome seed"
+  fi
+
   step "Starting BizAgent"
   bash "$INSTALL_DIR/scripts/control-plane.sh" start "$INSTALL_DIR"
 
@@ -660,8 +1533,17 @@ main() {
   step "Installing dependencies"
   ensure git
   ensure python3
+  ensure_curl
   ensure_node
   ensure_cron
+  # PlantUML UI preview stack (must be present before software setup / handoff)
+  ensure_java
+  ensure_graphviz
+  ensure_plantuml
+
+  # Deps succeeded — blank the terminal so provider/key questions aren't buried
+  # under apt/npm noise. Skipped when non-interactive or no TTY.
+  clear_screen_for_onboarding
 
   step "Default LLM provider"
   select_default_provider
@@ -671,6 +1553,8 @@ main() {
   INSTALL_DIR="${BIZAGENT_DIR:-$HOME/bizagent}"
   prompt_api_key
 
+  prompt_auto_update
+
   step "Setting up bizagent"
   choose_dir
   clone_repo
@@ -678,6 +1562,7 @@ main() {
   write_cli_json
   write_registry_seed
   write_env_file
+  ensure_oddbeaker_tts
 
   handoff
 }

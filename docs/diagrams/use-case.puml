@@ -1,0 +1,31 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+
+actor User
+actor "Control Plane" as CP <<System>>
+actor "Hub Agent (PTL)" as Hub
+actor "Product Agent" as PA
+
+rectangle "BizAgent System" {
+    usecase "Submit Request/Prompt" as UC1
+    usecase "Orchestrate Turn & Context" as UC2
+    usecase "Route & Delegate Task" as UC3
+    usecase "Execute Product Work" as UC4
+    usecase "Synthesize Final Response" as UC5
+    usecase "Deliver Output to User" as UC6
+}
+
+User --> UC1
+UC1 --> CP
+CP --> UC2
+UC2 --> Hub
+Hub --> UC3
+UC3 --> PA
+PA --> UC4
+UC4 --> Hub : (via Mail)
+Hub --> UC5
+UC5 --> CP
+CP --> UC6
+UC6 --> User
+@enduml

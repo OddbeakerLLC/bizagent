@@ -1,0 +1,62 @@
+@startuml
+!theme plain
+skinparam componentStyle uml2
+skinparam packageStyle rectangle
+
+title BizAgent Hub-and-Spoke System Architecture
+
+actor "Operator" as op
+
+package "Hub Repository" {
+    component [Web UI / Control Plane] as cp <<Node.js>>
+    component [Hub Agent (PTL)] as hub <<LLM Agent>>
+    
+    folder "Mailboxes (Filesystem)" {
+        file "hub/inbox" as h_in
+        file "hub/outbox" as h_out
+        file "agents/<slug>/inbox" as a_in
+        file "agents/<slug>/outbox" as a_out
+    }
+    
+    component [Registry / Config] as reg <<JSON>>
+    component [Scripts] as scripts <<Shell/JS>>
+}
+
+package "Product Project Repos" {
+    folder "Agent State" {
+        file ".agent/journal/" as journal
+        file "sitemap.md" as sitemap
+    }
+}
+
+cloud "LLM Interface" {
+    component [LLM Provider] as llm <<OpenAI / Local>>
+}
+
+cloud "External" {
+    component [Git Remotes] as git <<Private/Backup>>
+}
+
+' Interactions
+op --> cp : Interacts via Browser
+cp --> h_in : Routes Operator messages
+cp --> hub : Launches (if mail pending)
+cp --> a_in : Routes Hub -> Agent mail
+cp --> h_out : Routes Agent -> Hub mail
+
+hub --> reg : Reads configuration
+hub --> a_in : Dispatches work (via scripts)
+hub --> llm : Reasoning / Tool use
+
+cp --> a_in : Launches Product Agents (if mail pending)
+a_in --> [Product Agents] : Trigger
+[Product Agents] --> journal : Updates progress
+[Product Agents] --> sitemap : Refreshes structure
+[Product Agents] --> a_out : Reports back to Hub
+[Product Agents] --> llm : Reasoning / Tool use
+
+scripts --> git : Nightly sync/backup
+scripts --> journal : Housekeeping
+scripts --> h_in : Routing (legacy/CLI)
+
+@enduml

@@ -30,6 +30,7 @@ describe('tools', () => {
       'write_file',
       'search_replace',
       'execute_shell_command',
+      'hire_helper',
     ]) {
       assert.ok(names.includes(n), `missing ${n}`);
     }

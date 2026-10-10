@@ -11,6 +11,10 @@ const MAX_EXCERPT_CHARS = 220;
 const MAX_TURN_SESSION_CHARS = 6000;
 /** Cap each pending mail body embedded in the turn prompt. */
 const MAX_TURN_MAIL_CHARS = 8000;
+/** Image types the runtime can attach as vision content (match uploads ALLOWED_EXT). */
+const VISION_IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+/** Max images attached to one turn (matches the composer chip cap). */
+const MAX_VISION_IMAGES = 8;
 
 function hubPromptDir(hub) {
   return path.join(appDir(hub), 'prompts');
@@ -148,10 +152,20 @@ function deriveHubRuntimePrompt(hub) {
     '## Brevity',
     '',
     'Replies to the operator default to **two sentences or less**. Longer only when the work requires it.',
-    '**Two-sentence summary (operator lock):** Every **substantive / long** operator reply must open with a visible **two-sentence summary of the full answer**, then a blank line, then the body when more is needed.',
-    'A leading `**TLDR:**` / `TLDR:` / `**TL;DR:**` / `TL;DR:` label is **optional** — include it or not; the first two lead sentences are the spoken summary either way.',
-    'Console TTS speaks those two summary sentences (labeled block if present, else first two complete lead sentences). Do **not** open long replies with a single non-summary sentence.',
-    'Skip the two-sentence summary only for pure one-liners, yes/no, or short “on it / waiting” acks — never invent a fake summary for those.',
+    '**TTS summary lock (long replies):** Every **substantive / long** operator reply must open with a two-sentence spoken summary in a **markdown `tts` fence** (like a code fence, info string `tts`):',
+    '',
+    '````',
+    '```tts',
+    'Sentence one. Sentence two.',
+    '```',
+    '````',
+    '',
+    'Then a blank line, then the full answer body when more is needed. Rules:',
+    '- Put **exactly two complete sentences** inside the fence (plain prose — no nested fences, no `TLDR:` label).',
+    '- Console markdown **keeps the inner text** and drops only the fence markers (so the summary still shows with the rest of the reply). Console TTS speaks **only** those two sentences from the fence.',
+    '- Do **not** open long replies without this fence. Short one-liners, yes/no, and “on it / waiting” acks skip it entirely — never invent a fake summary for those.',
+    '- Do **not** use HTML tags (`<tts-summary>`) for this — replies are markdown and HTML markers show up or break in the renderer.',
+    '- Legacy fallback (avoid for new replies): a leading `**TLDR:**` / `TLDR:` / `**TL;DR:**` / `TL;DR:` block, else the first two complete lead sentences.',
     'Messages to product agents: only what the recipient needs to act — no preamble, recap, or signoff.',
     'Prefer one task per agent mail; include goal, constraints, and done-when so a cold product agent can act.',
     '',
@@ -324,11 +338,171 @@ function parseTo(text) {
   return match ? match[1].trim() : '';
 }
 
+function listArchiveInboxFiles(hub) {
+  const archiveDir = path.join(hub, 'inbox', 'archive');
+  try {
+    return fs.readdirSync(archiveDir)
+      .filter((f) => f.endsWith('.md') && !f.startsWith('.'))
+      .sort()
+      .reverse()
+      .map((f) => path.join(archiveDir, f));
+  } catch (_err) {
+    return [];
+  }
+}
+
+function filenameAfterDate(name) {
+  return String(name || '').replace(/^\d{4}-\d{2}-\d{2}-/, '').replace(/\.md$/i, '');
+}
+
+function filenameMatchesSender(name, sender) {
+  if (!sender) return false;
+  const rest = filenameAfterDate(name);
+  return rest === sender || rest.startsWith(`${sender}-`);
+}
+
+function knownSenders(hub) {
+  const slugs = new Set(['hub', 'operator', 'user']);
+  try {
+    const raw = fs.readFileSync(path.join(hub, 'registry.json'), 'utf8');
+    const products = JSON.parse(raw).products || [];
+    for (const product of products) {
+      if (product && product.slug) slugs.add(String(product.slug));
+    }
+  } catch (_err) {
+    /* ignore */
+  }
+  return [...slugs].sort((a, b) => b.length - a.length);
+}
+
+function inferSenderFromFilename(hub, name) {
+  const rest = filenameAfterDate(name);
+  for (const slug of knownSenders(hub)) {
+    if (rest === slug || rest.startsWith(`${slug}-`)) return slug;
+  }
+  return rest.split('-')[0] || '';
+}
+
+/**
+ * Newest archived conversation_id for this sender (`from:` or filename slug).
+ * Falls back to the newest archived conversation_id of any sender.
+ */
+function lookupArchivedConversationId(hub, sender) {
+  const senderNorm = String(sender || '').trim().toLowerCase();
+  let anyCid = '';
+  for (const file of listArchiveInboxFiles(hub)) {
+    let body = '';
+    try {
+      body = fs.readFileSync(file, 'utf8');
+    } catch (_err) {
+      continue;
+    }
+    const cid = parseConversationId(body);
+    if (!cid) continue;
+    if (!anyCid) anyCid = cid;
+    const from = parseFrom(body).toLowerCase();
+    const name = path.basename(file);
+    if (senderNorm && (from === senderNorm || filenameMatchesSender(name, senderNorm))) {
+      return cid;
+    }
+  }
+  return anyCid;
+}
+
+function stampConversationId(file, cid) {
+  if (!file || !cid) return false;
+  let body;
+  try {
+    body = fs.readFileSync(file, 'utf8');
+  } catch (_err) {
+    return false;
+  }
+  if (parseConversationId(body)) return false;
+  let next;
+  if (/^conversation_id:\s*$/m.test(body)) {
+    next = body.replace(/^conversation_id:\s*$/m, `conversation_id: ${cid}`);
+  } else {
+    const match = body.match(/^(---[ \t]*\r?\n)([\s\S]*?)(\r?\n---[ \t]*)/);
+    if (match) {
+      const frontmatter = match[2].replace(/\s+$/, '');
+      next = `${match[1]}${frontmatter}\nconversation_id: ${cid}${match[3]}${body.slice(match[0].length)}`;
+    } else {
+      next = `---\nconversation_id: ${cid}\n---\n\n${body}`;
+    }
+  }
+  if (next === body) return false;
+  fs.writeFileSync(file, next);
+  return true;
+}
+
+/**
+ * Stamp missing conversation_id on pending hub inbox mail from archived
+ * mail by the same sender (filename slug or from:). Returns the FIFO id.
+ */
+function recoverPendingConversationIds(hub) {
+  let first = '';
+  for (const file of listPendingInboxFiles(hub)) {
+    let body = '';
+    try {
+      body = fs.readFileSync(file, 'utf8');
+    } catch (_err) {
+      continue;
+    }
+    let cid = parseConversationId(body);
+    if (!cid) {
+      const sender = parseFrom(body) || inferSenderFromFilename(hub, path.basename(file));
+      cid = lookupArchivedConversationId(hub, sender);
+      if (cid && stampConversationId(file, cid)) {
+        logEvent(hub, {
+          event: 'conversation_id_recovered',
+          from: sender,
+          conversation_id: cid,
+          file: path.basename(file),
+          source: 'inbox-archive',
+        });
+      }
+    }
+    if (cid && !first) first = cid;
+  }
+  return first;
+}
+
+function isConsoleOperatorMail(file, body) {
+  const from = parseFrom(body).toLowerCase();
+  if (from === 'operator' || from === 'user') return true;
+  return /operator-console-message/.test(path.basename(file || ''));
+}
+
+/**
+ * Conversation id for this hub turn.
+ * Newest operator/user console mail wins (the chat the operator is waiting in);
+ * else oldest pending mail with a conversation_id (FIFO agent reports).
+ */
+function pickPendingConversationId(hub) {
+  recoverPendingConversationIds(hub);
+  const pending = listPendingInboxFiles(hub);
+  let oldest = '';
+  let newestOperator = '';
+  for (const file of pending) {
+    let body = '';
+    try {
+      body = fs.readFileSync(file, 'utf8');
+    } catch (_err) {
+      continue;
+    }
+    const cid = parseConversationId(body);
+    if (!cid) continue;
+    if (!oldest) oldest = cid;
+    if (isConsoleOperatorMail(file, body)) newestOperator = cid;
+  }
+  return newestOperator || oldest || '';
+}
+
 /**
  * Build an ephemeral turn prompt: slim system + pending mail + session pointer/excerpt.
  * Written under .bizagent/prompts/turns/; caller deletes after CLI exit.
  */
-function buildHubTurnPrompt(hub) {
+function buildHubTurnPrompt(hub, opts) {
   const start = Date.now();
   ensureHubRuntimePrompt(hub);
   ensureDir(hubTurnsDir(hub));
@@ -358,6 +532,9 @@ function buildHubTurnPrompt(hub) {
   } catch (_err) {
     sessionBody = '_No session file yet._';
   }
+  // Agent→hub mail often has no conversation_id. Steal one from archive
+  // (same sender via from:/filename) so a cold launch cannot crash the CP.
+  recoverPendingConversationIds(hub);
   const pending = listPendingInboxFiles(hub);
   const conversationIds = [];
   const mailBlocks = pending.map((file) => {
@@ -379,10 +556,12 @@ function buildHubTurnPrompt(hub) {
     ].join('\n');
   });
 
-  // FIFO: first pending inbox message with a conversation_id wins (matches dispatch).
-  const convId = conversationIds.length
-    ? conversationIds[0]
-    : '';
+  // Prefer the id the dispatcher/daemon already chose (operator console mail).
+  // Fall back to newest operator mail, then oldest pending cid.
+  let convId = opts && opts.conversationId ? String(opts.conversationId).trim() : '';
+  if (!convId) {
+    convId = pickPendingConversationId(hub) || (conversationIds.length ? conversationIds[0] : '');
+  }
 
   // ALWAYS-WARM: conversation_id is guaranteed by dispatcher.getHubConversationId()
   // If somehow missing, fail fast rather than cold-launch
@@ -477,6 +656,7 @@ function buildHubTurnPrompt(hub) {
     '',
     mailBlocks.length ? mailBlocks.join('\n') : '_No pending inbox mail._',
     '',
+    visionTurnBlock(hub, pending),
     '## Session excerpt (CP-compacted; do not rewrite)',
     '',
     '```markdown',
@@ -499,6 +679,99 @@ function listAgentPendingInboxFiles(hub, slug) {
   } catch (_err) {
     return [];
   }
+}
+
+/**
+ * Attachment paths from a mail body. Matches the `Attachments:` block the
+ * control plane writes via uploads.formatAttachmentsMarkdown:
+ *
+ *   Attachments:
+ *   - `.bizagent/uploads/...` (name)
+ *
+ * Parsing is scoped to that block so ordinary prose that mentions paths
+ * never produces vision attachments.
+ */
+function attachmentPathsFromMailBody(text) {
+  const paths = [];
+  let inBlock = false;
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (/^Attachments:\s*$/.test(trimmed)) {
+      inBlock = true;
+      continue;
+    }
+    if (!inBlock) continue;
+    if (trimmed === '') continue; // trailing blank line after the list
+    const match = trimmed.match(/^-\s+`([^`]+)`/);
+    if (!match) break; // any other line ends the block
+    paths.push(match[1].trim());
+  }
+  return paths;
+}
+
+/**
+ * Existing image attachments under the allowed roots (uploads/ or company/)
+ * referenced by the given mail files. Deduped, forward slashes, hub-relative.
+ * Soft-fails anything unreadable / outside policy / non-image.
+ */
+function collectVisionImages(hub, files) {
+  const out = [];
+  const seen = new Set();
+  let allowed;
+  try {
+    // Lazy require keeps load order simple (uploads → config/company-files).
+    ({ assertAllowedAttachmentPath: allowed } = require('./uploads'));
+  } catch (_err) {
+    return out;
+  }
+  for (const file of Array.isArray(files) ? files : []) {
+    let text = '';
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch (_err) {
+      continue;
+    }
+    for (const claimed of attachmentPathsFromMailBody(text)) {
+      if (out.length >= MAX_VISION_IMAGES) return out;
+      const ext = path.extname(String(claimed)).toLowerCase();
+      if (!VISION_IMAGE_EXTS.has(ext)) continue;
+      if (seen.has(claimed)) continue;
+      try {
+        const rel = allowed(hub, claimed);
+        seen.add(rel);
+        out.push(rel);
+      } catch (_err) {
+        /* not under uploads/company or missing on disk — skip */
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Prompt block for a turn whose pending mail carries images: tells the agent
+ * the images are already attached to its model context as vision content, and
+ * carries a machine-readable marker (bizagent-vision) the runtime parses to
+ * load and attach the files. Also documents the forwarding convention so the
+ * hub can pass images on to product agents in mail.
+ */
+function visionTurnBlock(hub, files) {
+  const images = collectVisionImages(hub, files);
+  if (images.length === 0) return '';
+  return [
+    '## Images attached to this turn (vision)',
+    '',
+    `The control plane already attached the ${images.length} image file(s) below to your model context as vision content — you can see and answer questions about them directly; do not re-read them with file tools.`,
+    '',
+    ...images.map((p) => `- \`${p}\``),
+    '',
+    'To forward an image to a product agent in mail, include its path as the same `- \\`path\\` (name)` line under an `Attachments:` heading in your message body; their runtime will attach it to their turn as vision content too.',
+    '',
+    '<!-- bizagent-vision',
+    ...images,
+    '-->',
+    '',
+  ].join('\n');
 }
 
 /**
@@ -578,6 +851,7 @@ function buildAgentTurnPrompt(hub, slug) {
     '',
     mailBlocks.length ? mailBlocks.join('\n') : '_No pending inbox mail._',
     '',
+    visionTurnBlock(hub, pending),
   ].join('\n');
 
   fs.writeFileSync(turnFile, content);
@@ -678,9 +952,11 @@ function compactHubSession(hub, conversation, sessionOrUserId) {
 }
 
 module.exports = {
+  attachmentPathsFromMailBody,
   buildAgentTurnPrompt,
   buildHubTurnPrompt,
   classifyRegistryState,
+  collectVisionImages,
   compactHubSession,
   deriveHubRuntimePrompt,
   ensureHubRuntimeCwd,
@@ -692,5 +968,8 @@ module.exports = {
   hubTurnsDir,
   listAgentPendingInboxFiles,
   listPendingInboxFiles,
+  pickPendingConversationId,
+  recoverPendingConversationIds,
   resetHubSession,
+  visionTurnBlock,
 };

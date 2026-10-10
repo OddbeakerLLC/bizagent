@@ -100,7 +100,9 @@ confirm() {
   [[ "$ans" == "y" || "$ans" == "Y" || "$ans" == "yes" ]] || die "aborted"
 }
 
-# Paths restored from framework on repair (relative to hub / source root).
+# Paths restored from framework on repair / upgrade (relative to hub / source root).
+# Keep in sync with scripts/upgrade.sh FRAMEWORK_PATHS.
+# Never includes cli.json, registry.json, or other operator state.
 FRAMEWORK_PATHS=(
   control-plane
   scripts
@@ -108,14 +110,23 @@ FRAMEWORK_PATHS=(
   tests
   install
   docs
+  agent-runtime
   cli.json.example
   registry.example.json
   package.json
+  package-lock.json
   NIGHTLY.md
   WEEKLY.md
+  AGENT.md
+  README.md
+  LICENSE
+  deploy.sh
+  viewlog.sh
+  bizagent.png
 )
 
 # Ops paths never clobbered by repair; restored by restore-ops when requested.
+# library/ is local operator content (plans/specs) — never overwritten by repair.
 OPS_PATHS=(
   registry.json
   cli.json
@@ -123,6 +134,7 @@ OPS_PATHS=(
   journal
   company
   knowledge-stack
+  library
   inbox
   outbox
   user
@@ -134,10 +146,11 @@ backup_hub_snapshot() {
   # Snapshot critical trees; skip huge/ephemeral if missing.
   local p
   for p in \
-    control-plane scripts templates tests install docs \
-    registry.json cli.json agents journal company knowledge-stack \
-    package.json NIGHTLY.md WEEKLY.md cli.json.example registry.example.json \
-    AGENT.md; do
+    control-plane scripts templates tests install docs agent-runtime \
+    registry.json cli.json agents journal company knowledge-stack library \
+    package.json package-lock.json NIGHTLY.md WEEKLY.md \
+    cli.json.example registry.example.json \
+    AGENT.md README.md LICENSE deploy.sh viewlog.sh; do
     if [[ -e "$HUB/$p" ]]; then
       mkdir -p "$BACKUP_DIR/$(dirname "$p")"
       cp -a "$HUB/$p" "$BACKUP_DIR/$p"
@@ -173,6 +186,40 @@ start_control_plane() {
       return 0
     }
   fi
+}
+
+# Best-effort pid of the running control plane for this hub (empty when down).
+control_plane_pid() {
+  bash "$HUB/scripts/control-plane.sh" status "$HUB" 2>/dev/null \
+    | sed -n 's/.*running: pid \([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
+# Verify the control plane actually restarted onto the restored framework.
+# Without this, a missed stop ("already running") or a failed start leaves the
+# OLD code serving against NEW on-disk files (or no CP at all) while repair
+# reports success — the hub then loops agent turns until someone restarts by
+# hand. Hard-fails so upgrade.sh cannot print a green "done" over a broken hub.
+verify_control_plane_restarted() {
+  local old_pid="$1" new_pid=""
+  if [[ "$NO_RESTART" -eq 1 ]]; then
+    return 0
+  fi
+  # Give slow boots (systemd, first require of new deps) a moment, then confirm
+  # the process is still alive — catches crash-on-boot (e.g. port busy).
+  sleep 2
+  new_pid="$(control_plane_pid)"
+  if [[ -z "$new_pid" ]]; then
+    die "control plane is NOT running after repair — agent turns will not dispatch.
+  Start it manually:  bash $HUB/scripts/control-plane.sh start $HUB
+  Then check logs:    $LOG_FILE and $HUB/logs/control-plane-server.log
+  Backup:             $BACKUP_DIR"
+  fi
+  if [[ -n "$old_pid" && "$new_pid" == "$old_pid" ]]; then
+    die "control plane was NOT restarted (pre-repair pid $old_pid is still running old code against new files).
+  Restart it manually:  bash $HUB/scripts/control-plane.sh restart $HUB
+  Backup:               $BACKUP_DIR"
+  fi
+  log "Control plane verified running on new code (pid $new_pid)."
 }
 
 regenerate_hub_prompt() {
@@ -219,6 +266,10 @@ clone_framework_to_tmp() {
   else
     git clone --depth 1 "$url" "$tmp" >>"$LOG_FILE" 2>&1 || die "git clone failed: $url"
   fi
+  # Provenance: make "upgrade succeeded" mean something verifiable. A stale
+  # fork/remote here is invisible otherwise — the repair reports success while
+  # installing old code.
+  git -C "$tmp" log -1 --format='framework source commit: %h %cs %s' 2>/dev/null | log || true
   FRAMEWORK_SRC="$tmp"
   CLEANUP_FRAMEWORK_SRC=1
 }
@@ -251,11 +302,15 @@ copy_tree() {
   local src="$1" dest="$2"
   if command -v rsync >/dev/null 2>&1; then
     mkdir -p "$(dirname "$dest")"
-    rsync -a --delete "$src"/ "$dest"/
+    # Preserve installed dependencies: wiping node_modules here (then failing
+    # the best-effort npm install) leaves every agent turn crashing and
+    # redispatching forever. npm install reconciles deps after the copy.
+    rsync -a --delete --exclude node_modules "$src"/ "$dest"/
   else
-    rm -rf "$dest"
-    mkdir -p "$(dirname "$dest")"
-    cp -a "$src" "$dest"
+    mkdir -p "$dest"
+    # Same rule without rsync: replace everything except node_modules.
+    find "$dest" -mindepth 1 -maxdepth 1 -name node_modules -prune -o -exec rm -rf {} +
+    cp -a "$src"/. "$dest"/
   fi
 }
 
@@ -273,6 +328,7 @@ do_repair() {
   confirm "Restore framework machinery into this hub (ops data kept)?"
 
   backup_hub_snapshot
+  OLD_CP_PID="$(control_plane_pid)"
   stop_control_plane
 
   CLEANUP_FRAMEWORK_SRC=0
@@ -281,7 +337,15 @@ do_repair() {
   [[ -n "$FRAMEWORK_SRC" && -d "$FRAMEWORK_SRC" ]] || die "could not resolve framework source"
   [[ -d "$FRAMEWORK_SRC/control-plane" ]] || die "framework source missing control-plane/: $FRAMEWORK_SRC"
 
+  # Never let a *temp clone's* operator files bleed into live ops.
+  # Only strip from disposable clones — never mutate a --source path the operator owns.
+  if [[ "${CLEANUP_FRAMEWORK_SRC:-0}" -eq 1 ]]; then
+    rm -f "$FRAMEWORK_SRC/cli.json" \
+      "$FRAMEWORK_SRC/registry.json" 2>/dev/null || true
+  fi
+
   local path
+  local skipped_paths=0
   for path in "${FRAMEWORK_PATHS[@]}"; do
     if [[ -d "$FRAMEWORK_SRC/$path" ]]; then
       log "  restore dir  $path/"
@@ -291,8 +355,14 @@ do_repair() {
       copy_file "$FRAMEWORK_SRC/$path" "$HUB/$path"
     else
       log "  skip missing $path (not in source)"
+      skipped_paths=$((skipped_paths + 1))
     fi
   done
+  if [[ "$skipped_paths" -gt 0 ]]; then
+    log "WARN: $skipped_paths framework path(s) missing from the source — if this was"
+    log "      not expected, the source may be stale or incomplete (check --source /"
+    log "      BIZAGENT_FRAMEWORK / the hub's 'framework' git remote)."
+  fi
 
   # Ensure factory-reset itself is executable after restore
   chmod +x "$HUB/scripts/"*.sh 2>/dev/null || true
@@ -305,6 +375,7 @@ do_repair() {
   fi
 
   start_control_plane
+  verify_control_plane_restarted "$OLD_CP_PID"
   log "Repair finished."
   log "Backup: $BACKUP_DIR"
   log "Log:    $LOG_FILE"

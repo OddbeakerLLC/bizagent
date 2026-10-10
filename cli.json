@@ -12,7 +12,12 @@
     "baseURL": "https://api.x.ai/v1",
     "keyEnv": "XAI_API_KEY",
     "models": [
-      "grok-4.5"
+      "grok-4.5",
+      "grok-build-0.1",
+      "grok-4.20-0309-reasoning",
+      "grok-4.20-multi-agent-0309",
+      "grok-4.3",
+      "grok-4.6"
     ]
   },
   "chatgpt": {
@@ -27,7 +32,9 @@
       "gpt-5.6-terra",
       "gpt-5.6-luna",
       "gpt-5.5",
-      "gpt-5.2"
+      "gpt-5.2",
+      "gpt-5.3",
+      "gpt-5.6"
     ]
   },
   "claude": {
@@ -37,7 +44,15 @@
     "models": [
       "claude-sonnet-4-6",
       "claude-opus-5",
-      "claude-sonnet-4"
+      "claude-sonnet-4",
+      "claude-haiku-4-5-20251001",
+      "claude-opus-4-6",
+      "claude-sonnet-4-7",
+      "claude-opus-4-7",
+      "claude-sonnet-4-8",
+      "claude-opus-4-8",
+      "claude-sonnet-5",
+      "claude-fable-5"
     ]
   },
   "gemini": {
@@ -47,7 +62,13 @@
     "models": [
       "gemini-2.5-flash",
       "gemini-2.5-pro",
-      "gemini-2.0-flash"
+      "gemini-2.0-flash",
+      "antigravity-preview-05-2026",
+      "gemini-2.5-flash-lite",
+      "gemini-3.1-flash-lite",
+      "gemini-3-flash-preview",
+      "gemini-3.5-flash",
+      "gemini-3.1-pro-preview"
     ]
   },
   "venice": {
@@ -55,24 +76,51 @@
     "baseURL": "https://api.venice.ai/api/v1",
     "keyEnv": "VENICE_API_KEY",
     "models": [
-      "llama-3.3-70b",
       "kimi-k2-7-code",
+      "qwen3-5-9b",
       "kimi-k2-6",
       "kimi-k2-5",
       "deepseek-v3.2",
       "deepseek-v4-flash-0731",
+      "deepseek-v4-pro-0813",
+      "qwen-3-8-27b",
+      "qwen-3-8-2-4t-a95b",
+      "google-gemma-4-31b-it",
       "zai-org-glm-5-2",
       "zai-org-glm-5-1",
-      "zai-org-glm-5"
+      "zai-org-glm-5",
+      "z-ai-glm-5-3-flash",
+      "z-ai-glm-5-3",
+      "kimi-k3",
+      "kimi-k3-fast-api"
     ]
   },
   "ollama": {
-    "label": "Ollama (local)",
-    "baseURL": "http://127.0.0.1:11434/v1",
+    "label": "Ollama (Jobe)",
+    "baseURL": "http://192.168.40.52:11434/v1",
     "keyEnv": "OLLAMA_API_KEY",
     "optionalKey": true,
     "models": [
-      "llama3.2"
+      "qwen2.5:7b",
+      "qwen2.5:14b",
+      "qwen2.5:latest",
+      "qwen3:8b",
+      "qwen3:14b",
+      "qwen3:30b",
+      "qwen3.8:27b",
+      "deepseek-coder-v2:16b",
+      "jobe:latest",
+      "jobe-brain-v15-7b:latest",
+      "jobe-brain-v14-7b:latest",
+      "jobe-prompt-qwen:latest",
+      "jobe-prompt-deepseek:latest"
     ]
+  },
+  "localhost": {
+	"label": "Ollama (localhost)",
+	"baseURL": "http://localhost:11434/v1",
+	"keyEnv": "OLLAMA_API_KEY",
+	"optionalKey": true,
+	"models": []
   }
 }

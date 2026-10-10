@@ -12,6 +12,30 @@ set -u
 HUB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HUB"
 
+# --- 0a. optional framework auto-upgrade --------------------------------
+# Only when settings.auto_update is true (default false = manual-only).
+# Safe upgrade preserves registry/cli.json/agents/company/KS/library/mail/.bizagent.
+# Manual path anytime: scripts/upgrade.sh (or ask PTL).
+AUTO_UPDATE="$(python3 -c '
+import json
+try:
+    v = json.load(open("registry.json")).get("settings", {}).get("auto_update", False)
+    print("1" if v is True or v == 1 or str(v).lower() in ("1", "true", "yes") else "0")
+except Exception:
+    print("0")
+' 2>/dev/null || echo 0)"
+if [ "$AUTO_UPDATE" = "1" ]; then
+  if [ -x "$HUB/scripts/upgrade.sh" ]; then
+    echo "nightly: settings.auto_update=true — running scripts/upgrade.sh --yes"
+    bash "$HUB/scripts/upgrade.sh" --hub "$HUB" --yes \
+      || echo "nightly: auto-upgrade failed (continuing mechanical half)"
+  else
+    echo "nightly: auto_update set but scripts/upgrade.sh missing — skip"
+  fi
+else
+  echo "nightly: auto_update off (manual-only) — skip framework upgrade"
+fi
+
 # --- 0. pull all project repos -----------------------------------------
 pull_project_paths() {
   python3 - <<'PY'
@@ -56,6 +80,17 @@ if [ -x "$HUB/scripts/defer.sh" ]; then
     || echo "nightly: defer reconcile failed (continuing)"
 else
   echo "nightly: defer.sh missing — skip reconcile"
+fi
+
+# --- 0c. refresh journal search index --------------------------------------
+# Keyword FTS over hub + product journals (docs/2026-10-05-journal-search-mvp-spec.md).
+# Incremental + idempotent; stale-on-query also rebuilds before searches.
+if [ -x "$HUB/scripts/journal-index.sh" ]; then
+  echo "nightly: refreshing journal search index..."
+  bash "$HUB/scripts/journal-index.sh" --hub "$HUB" \
+    || echo "nightly: journal index rebuild failed (continuing)"
+else
+  echo "nightly: journal-index.sh missing — skip"
 fi
 
 # --- 1. route -------------------------------------------------------------
@@ -188,4 +223,11 @@ PY
     echo "hub: still no private remote — journals/KS stay local only"
     echo "  tip: git remote add origin <private-url>  OR set hub.remote in registry.json"
   fi
+fi
+
+# --- enterprise company sync (no-op when not connected) --------------------
+# While connected to the Enterprise Server, push the company/ tree so the
+# box's daily compile includes this hub's company knowledge (spec §8).
+if [ -x "$HUB/scripts/enterprise-sync.sh" ]; then
+  bash "$HUB/scripts/enterprise-sync.sh" || echo "nightly: enterprise-sync failed (continuing)"
 fi

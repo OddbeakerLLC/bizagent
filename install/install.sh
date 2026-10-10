@@ -8,6 +8,7 @@ BOLD=$'\033[1m'; GREEN=$'\033[32m'; BLUE=$'\033[34m'; NC=$'\033[0m'
 step() { printf "\n${BOLD}${BLUE}==>${NC} ${BOLD}%s${NC}\n" "$1"; }
 ok()   { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
 note() { printf "  %s\n" "$1"; }
+warn() { printf "  ! %s\n" "$1"; }
 
 HUB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CP_DIR="$HUB/control-plane"
@@ -29,14 +30,30 @@ PORT="$(registry_port)"
 
 # --- 1. LLM provider (runtime is always bizagent-agent) ---
 step "Default LLM"
-PROVIDER="${BIZAGENT_PROVIDER:-grok}"
-case "$PROVIDER" in
-  grok|chatgpt|claude|gemini|venice|ollama) ;;
-  xai) PROVIDER="grok" ;;
-  openai|codex) PROVIDER="chatgpt" ;;
-  agy) PROVIDER="gemini" ;;
-  *) note "Unknown BIZAGENT_PROVIDER=$PROVIDER — using grok"; PROVIDER="grok" ;;
-esac
+if [[ -n "${BIZAGENT_PROVIDER:-}" ]]; then
+  # Non-interactive: respect the env override.
+  PROVIDER="${BIZAGENT_PROVIDER}"
+  case "$PROVIDER" in
+    grok|chatgpt|claude|gemini|venice|ollama) ;;
+    xai) PROVIDER="grok" ;;
+    openai|codex) PROVIDER="chatgpt" ;;
+    agy) PROVIDER="gemini" ;;
+    *) note "Unknown BIZAGENT_PROVIDER=$PROVIDER — using grok"; PROVIDER="grok" ;;
+  esac
+else
+  # Interactive: let the user pick a provider (default grok).
+  printf "\nChoose an LLM provider for the hub:\n"
+  printf "  1) grok\n  2) chatgpt\n  3) claude\n  4) gemini\n  5) venice\n  6) ollama\n"
+  read -r -p "  Select provider [1-6, default 1 (grok)]: " _provider_choice </dev/tty
+  case "${_provider_choice:-1}" in
+    2|chatgpt) PROVIDER="chatgpt" ;;
+    3|claude)  PROVIDER="claude" ;;
+    4|gemini)  PROVIDER="gemini" ;;
+    5|venice)  PROVIDER="venice" ;;
+    6|ollama)  PROVIDER="ollama" ;;
+    *)         PROVIDER="grok" ;;
+  esac
+fi
 # Default model per provider (overridable via BIZAGENT_MODEL)
 default_model_for() {
   case "$1" in
@@ -105,6 +122,42 @@ api_key_var_for_provider() {
     *) echo "XAI_API_KEY" ;;
   esac
 }
+# Provider → OpenAI-compatible endpoint + a cheap model for the hello check.
+provider_hello_endpoint() {
+  case "$1" in
+    grok|xai)        echo "https://api.x.ai/v1|grok-4.3" ;;
+    chatgpt|openai|codex) echo "https://api.openai.com/v1|gpt-5.4-mini" ;;
+    claude)          echo "https://api.anthropic.com/v1/|claude-haiku-4-5-20251001" ;;
+    openrouter)      echo "https://openrouter.ai/api/v1|anthropic/claude-sonnet-4" ;;
+    gemini|agy)      echo "https://generativelanguage.googleapis.com/v1beta/openai/|gemini-2.5-flash-lite" ;;
+    venice)          echo "https://api.venice.ai/api/v1|deepseek-v4-flash-0731" ;;
+    ollama)          echo "http://127.0.0.1:11434/v1|llama3.2" ;;
+    *)               echo "" ;;
+  esac
+}
+
+# Send a tiny 'hello' prompt to the LLM to confirm the API key works before
+# proceeding. Returns 0 on success, 1 on failure. Skips (returns 0) when the
+# provider endpoint is unknown or curl is unavailable — never blocks install.
+validate_api_key() {
+  local provider="$1" key="$2"
+  local ep base model code
+  ep="$(provider_hello_endpoint "$provider")"
+  [[ -z "$ep" ]] && return 0
+  base="${ep%%|*}"; model="${ep#*|}"
+  base="${base%/}"
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl not found — skipping API key validation"
+    return 0
+  fi
+  code="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "$base/chat/completions" \
+    -H "Authorization: Bearer $key" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":1}" 2>/dev/null)"
+  [[ "$code" == "200" ]]
+}
+
 API_KEY_VAR="$(api_key_var_for_provider "$PROVIDER")"
 mkdir -p "$HUB/.bizagent"
 if [[ ! -f "$HUB/.bizagent/env.example" && -f "$HUB/cli.json.example" ]]; then
@@ -121,6 +174,9 @@ if [[ -n "${BIZAGENT_API_KEY:-}" && -n "$API_KEY_VAR" ]]; then
   fi
   chmod 600 "$HUB/.bizagent/env"
   ok ".bizagent/env updated ($API_KEY_VAR from BIZAGENT_API_KEY)"
+  if ! validate_api_key "$PROVIDER" "$BIZAGENT_API_KEY"; then
+    warn "BIZAGENT_API_KEY was rejected by the provider — installation may fail until it is corrected."
+  fi
 elif [[ -n "$API_KEY_VAR" ]]; then
   existing_val="${!API_KEY_VAR:-}"
   if [[ -z "$existing_val" && -f "$HUB/.bizagent/env" ]]; then
@@ -142,15 +198,24 @@ elif [[ -n "$API_KEY_VAR" ]]; then
     fi
   else
     printf "\nHub turns need %s in .bizagent/env (first-run will not work without it).\n" "$API_KEY_VAR"
-    read -r -s -p "  $API_KEY_VAR (hidden, Enter to skip): " typed_key </dev/tty
-    printf "\n"
-    if [[ -n "$typed_key" ]]; then
-      printf '%s=%s\n' "$API_KEY_VAR" "$typed_key" >> "$HUB/.bizagent/env"
-      chmod 600 "$HUB/.bizagent/env"
-      ok ".bizagent/env written ($API_KEY_VAR)"
-    else
-      printf "  ! Skipped — first-run/hub turns will fail until this key is set.\n"
-    fi
+    printf "  ! An incorrectly entered API key will prevent completing the installation.\n"
+    typed_key=""
+    while true; do
+      read -r -s -p "  $API_KEY_VAR (required, hidden): " typed_key </dev/tty
+      printf "\n"
+      if [[ -z "$typed_key" ]]; then
+        printf "  ! API key is required — an empty or incorrect key will prevent completing the installation. Please enter it.\n"
+        continue
+      fi
+      if validate_api_key "$PROVIDER" "$typed_key"; then
+        break
+      fi
+      printf "  ! That API key was rejected by the provider. Please re-enter it.\n"
+      typed_key=""
+    done
+    printf '%s=%s\n' "$API_KEY_VAR" "$typed_key" >> "$HUB/.bizagent/env"
+    chmod 600 "$HUB/.bizagent/env"
+    ok ".bizagent/env written ($API_KEY_VAR, validated)"
   fi
 fi
 
@@ -177,6 +242,21 @@ else
   ( crontab -l 2>/dev/null | grep -v "$SERVER"; echo "$CRON_CMD" ) | crontab -
   mkdir -p "$HUB/logs"
   ok "cron entry installed"
+fi
+
+# --- 3b. Health watchdog (out-of-process probe timer / cron fallback) ---
+if [[ -n "${BIZAGENT_SKIP_HEALTH_TIMER:-}" ]]; then
+  note "skipping health probe timer (BIZAGENT_SKIP_HEALTH_TIMER)"
+elif [[ -f "$HUB/scripts/install-health-timer.sh" ]]; then
+  if bash "$HUB/scripts/install-health-timer.sh" "$HUB"; then
+    ok "health probe timer installed and enabled"
+  else
+    warn "could not enable the health probe timer automatically (no systemd user session?)"
+    note "Enable it with one command:"
+    note "  bash $HUB/scripts/install-health-timer.sh $HUB"
+  fi
+else
+  warn "scripts/install-health-timer.sh missing — out-of-process health probe not installed"
 fi
 
 # --- 4. Detect headless and patch registry if needed ---
@@ -207,36 +287,12 @@ fi
 step "Starting"
 bash "$HUB/scripts/control-plane.sh" start "$HUB"
 
-# --- 6. Pre-flight + first-run inbox seed ---
+# --- 6. Pre-flight + first-run inbox seed (shared with root install.sh) ---
 step "First-run readiness"
-READY=0
-if [[ -x "$HUB/scripts/check-hub-ready.sh" ]]; then
-  if bash "$HUB/scripts/check-hub-ready.sh" "$HUB"; then
-    READY=1
-  else
-    printf "  ! Hub is not ready to run turns (see above). Fix provider/model/API key, then re-check:\n"
-    note "  bash scripts/check-hub-ready.sh"
-  fi
+if [[ -x "$HUB/scripts/seed-first-run.sh" ]]; then
+  bash "$HUB/scripts/seed-first-run.sh" "$HUB" || true
 else
-  note "check-hub-ready.sh missing — skipping pre-flight"
-  READY=1
-fi
-
-mkdir -p "$HUB/inbox"
-TODAY="$(date -u +%Y-%m-%d)"
-SEED_FILE="$HUB/inbox/${TODAY}-install-first-run.md"
-# Glob-guard: skip if any prior-date seed already exists (prevents duplicate on same-day re-run).
-_EXISTING=$(ls "$HUB/inbox/"*"-install-first-run.md" 2>/dev/null | head -1)
-if [ -z "$_EXISTING" ]; then
-  if [[ "$READY" -eq 1 ]]; then
-    printf '---\nfrom: installer\nto: hub\ndate: %s\nsubject: first-run setup\n---\n\nA new bizagent installation just completed. Welcome the operator in the web UI, interview them about their organization and products (gather → build → distribute), write registry.json and agent dirs as needed, and report when setup is done.\n\nPrerequisites are already checked: bizagent-agent runtime, hub provider/model, and API key in .bizagent/env.\n' \
-      "$TODAY" > "$SEED_FILE"
-    ok "first-run message queued (hub is ready to execute it)"
-  else
-    printf '---\nfrom: installer\nto: hub\ndate: %s\nsubject: first-run setup blocked\n---\n\nInstallation finished but the hub was NOT ready to launch (missing provider, model, API key, or agent-runtime deps). Do not run product onboarding until the operator fixes that.\n\nOperator: run `bash scripts/check-hub-ready.sh`, fix any ✗ items, restart control plane, then send a console message: "Run first-run setup / interview me and onboard my products."\n' \
-      "$TODAY" > "$SEED_FILE"
-    printf "  ! first-run seed written as BLOCKED (will not usefully execute until ready)\n"
-  fi
+  warn "scripts/seed-first-run.sh missing — no first-run welcome seed"
 fi
 
 # --- 7. Open browser ---

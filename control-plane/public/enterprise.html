@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BizAgent — Enterprise Connection</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background: #0f1115; color: #e6e6e6; margin: 0; padding: 2rem; }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 2rem; }
+  label { display: block; margin: .8rem 0 .3rem; font-size: .9rem; color: #9aa3b2; }
+  input[type=text], input[type=password], input[type=url] {
+    width: 100%; box-sizing: border-box; padding: .55rem .7rem; border-radius: 6px;
+    border: 1px solid #2c3340; background: #171b23; color: #e6e6e6; font-size: .95rem;
+  }
+  button { padding: .5rem 1rem; border-radius: 6px; border: 1px solid #2c3340; background: #233; color: #e6e6e6; cursor: pointer; font-size: .9rem; }
+  button.primary { background: #2563eb; border-color: #2563eb; }
+  button.danger { background: #7f1d1d; border-color: #7f1d1d; }
+  button:disabled { opacity: .5; cursor: default; }
+  .product { display: flex; align-items: baseline; gap: .5rem; padding: .35rem 0; }
+  .product small { color: #9aa3b2; }
+  .status { padding: .7rem 1rem; border-radius: 6px; background: #171b23; border: 1px solid #2c3340; font-size: .9rem; margin: 1rem 0; white-space: pre-wrap; }
+  .status.err { border-color: #7f1d1d; color: #fca5a5; }
+  .status.ok { border-color: #14532d; color: #86efac; }
+  .muted { color: #9aa3b2; font-size: .85rem; }
+  code { background: #171b23; padding: .1rem .35rem; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Enterprise connection</h1>
+  <p class="muted">Connect this hub to the company's silent Enterprise Server with its URL and shared token.
+  While connected, the weekly Knowledge Stack refresh is disabled here — the server's daily job compiles the
+  combined company stack. Personal (non-company) knowledge stays local.</p>
+
+  <div id="status" class="status">Loading…</div>
+
+  <section id="connectForm">
+    <h2>Connect</h2>
+    <label for="url">Enterprise server URL</label>
+    <input type="url" id="url" placeholder="http://enterprise-box:8440">
+    <label for="token">Shared token</label>
+    <input type="password" id="token" placeholder="shared token">
+    <h2>Share git remotes (opt-in per product)</h2>
+    <p class="muted">Only checked products share their git remotes with the server (it records URLs and fetches
+    read-only; it is never git origin). Leave everything unchecked to connect with zero remotes. New products
+    stay off until you opt them in — you can change this any time.</p>
+    <div id="products"></div>
+    <p>
+      <button class="primary" id="connectBtn">Connect</button>
+    </p>
+  </section>
+
+  <section id="connectedPanel" style="display:none">
+    <h2>Connected</h2>
+    <div id="connInfo" class="muted"></div>
+    <h2>Product remotes</h2>
+    <div id="productsConnected"></div>
+    <p>
+      <button class="primary" id="saveRemotesBtn">Save remote selection</button>
+      <button id="syncBtn">Push company files now</button>
+      <button class="danger" id="disconnectBtn">Disconnect</button>
+    </p>
+    <p class="muted">Ask Enterprise is available as an agent on this hub while connected.</p>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const statusEl = $('status');
+function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = 'status' + (cls ? ' ' + cls : ''); }
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || res.status);
+  return json;
+}
+
+function renderProducts(container, products, checkedFromSelection) {
+  container.innerHTML = '';
+  if (!products.length) {
+    container.innerHTML = '<p class="muted">No products with git remotes found in the registry — connecting with zero remotes is fine.</p>';
+    return;
+  }
+  for (const p of products) {
+    const row = document.createElement('div');
+    row.className = 'product';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = p.slug;
+    cb.id = 'prod-' + p.slug;
+    cb.checked = checkedFromSelection ? p.selected : false;
+    const label = document.createElement('label');
+    label.htmlFor = cb.id;
+    label.style.margin = '0';
+    label.innerHTML = p.name + ' <small>(' + p.slug + ' — ' + p.projects.map(x => x.name).join(', ') + ')</small>';
+    row.appendChild(cb); row.appendChild(label);
+    container.appendChild(row);
+  }
+}
+
+function checkedSlugs(container) {
+  return [...container.querySelectorAll('input[type=checkbox]:checked')].map(cb => cb.value);
+}
+
+async function refresh() {
+  try {
+    const state = await api('/api/enterprise/status');
+    if (state.connected) {
+      setStatus('Connected to ' + state.url + ' (hub id: ' + state.hub_id + ')' +
+        (state.inference_url ? ' — inference: ' + state.inference_url : ' — inference: (local)'), 'ok');
+      $('connectForm').style.display = 'none';
+      $('connectedPanel').style.display = '';
+      $('connInfo').textContent = 'Connected ' + (state.connected_at || '').slice(0, 19).replace('T', ' ');
+      renderProducts($('productsConnected'), state.products, true);
+    } else {
+      setStatus('Not connected.');
+      $('connectForm').style.display = '';
+      $('connectedPanel').style.display = 'none';
+      renderProducts($('products'), state.products, false);
+    }
+  } catch (err) {
+    setStatus('Failed to load status: ' + err.message + ' (logged in?)', 'err');
+  }
+}
+
+$('connectBtn').onclick = async () => {
+  setStatus('Connecting…');
+  try {
+    const products = checkedSlugs($('products'));
+    const result = await api('/api/enterprise/connect', { url: $('url').value.trim(), token: $('token').value, products });
+    setStatus('Connected. Ask Enterprise agent provisioned (' + result.ask_enterprise + '). Weekly KS refresh disabled while connected.', 'ok');
+    await refresh();
+  } catch (err) { setStatus('Connect failed: ' + err.message, 'err'); }
+};
+
+$('saveRemotesBtn').onclick = async () => {
+  setStatus('Saving…');
+  try {
+    const products = checkedSlugs($('productsConnected'));
+    await api('/api/enterprise/remotes', { products });
+    setStatus('Remote selection saved. Unselected products are not registered; new products stay off until chosen.', 'ok');
+    await refresh();
+  } catch (err) { setStatus('Save failed: ' + err.message, 'err'); }
+};
+
+$('syncBtn').onclick = async () => {
+  setStatus('Pushing company files…');
+  try {
+    const r = await api('/api/enterprise/sync-company', {});
+    setStatus('Company files pushed (' + (r.files_stored ?? '?') + ' stored).', 'ok');
+  } catch (err) { setStatus('Sync failed: ' + err.message, 'err'); }
+};
+
+$('disconnectBtn').onclick = async () => {
+  setStatus('Disconnecting…');
+  try {
+    await api('/api/enterprise/disconnect', {});
+    setStatus('Disconnected. Weekly KS refresh resumes on this hub; Ask Enterprise now reports it is disconnected.', 'ok');
+    await refresh();
+  } catch (err) { setStatus('Disconnect failed: ' + err.message, 'err'); }
+};
+
+refresh();
+</script>
+</body>
+</html>

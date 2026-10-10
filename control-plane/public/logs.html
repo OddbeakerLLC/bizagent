@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#172033">
+  <title>BizAgent Thinking</title>
+  <link rel="stylesheet" href="/styles.css?v=20261002-thinking-tail">
+</head>
+<body class="logs-page">
+  <main class="logs-app" id="logsApp">
+    <div class="logs-chrome">
+      <header class="topbar logs-topbar">
+        <div class="logs-topbar-left">
+          <h1 class="logs-page-title">Thinking...</h1>
+          <span id="logsAuthLabel" class="auth-status">Checking session…</span>
+        </div>
+        <div class="logs-topbar-right">
+          <label class="logs-follow-toggle" title="Pause autoscroll by scrolling up">
+            <input id="logsFollow" type="checkbox" checked>
+            Follow
+          </label>
+          <button id="logsClear" type="button" class="btn-secondary">Clear</button>
+        </div>
+      </header>
+      <div class="logs-filters">
+        <label class="logs-filter-label" for="logsFilterSelect">Agent</label>
+        <select id="logsFilterSelect" aria-label="Thinking log filter"></select>
+      </div>
+    </div>
+
+    <div id="logsAuthGate" class="logs-auth-gate" hidden>
+      <p class="company-help">Sign in on the main BizAgent console, then reopen Thinking.</p>
+      <p><a id="logsConsoleLink" href="/">Open console</a></p>
+    </div>
+
+    <div class="logs-page-body" id="logsMain">
+      <p class="company-help logs-help">
+        Live tail only (last 32 KB per agent, or last 20 lines in All) so large dispatch logs cannot freeze the tab.
+      </p>
+      <pre id="logsPane" class="logs-pane"></pre>
+      <p id="logsStatus" class="modal-status auth-status" hidden></p>
+    </div>
+  </main>
+  <script src="/logs.js?v=20261002-thinking-tail"></script>
+</body>
+</html>

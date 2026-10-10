@@ -16,9 +16,26 @@ BizAgent is a hub-and-spoke system for running AI agents across digital products
 - LLM providers: Grok (xAI), ChatGPT (OpenAI), Claude (Anthropic), Gemini (Google), Venice, Ollama.
 - File‑based messaging (inbox/outbox).
 - Git for version control of product repos.
+- Environment variables via `~/.bizagent/env`.
 - Systemd for service management (optional).
 
 ## Active Work
+- **Ordered-list numbers** (2026-09-30): chat and library already share `control-plane/public/markdown.js`. Blank lines between items closed the `<ol>`, so each item restarted at 1. Loose same-type items stay one list; explicit `value`/`start`. Cache-bust `20260930-ol-numbers`. Not a CSS reset.
+- **Secure paste dialog v1** (2026-09-26): browser-only key dialog on `#configModal` (one provider, `keyEnv` + saved/not set, password field, never shows the value). `POST /api/secrets` writes one line to `hub/.bizagent/env` (mode 600) and `process.env`. Hub `secret-request:` markers are stripped before conversation/inbox. Redaction refuses chat/inbox text that contains a current env secret (≥12 chars). SSH `chat.sh` has no dialog; keys must not be passed on the command line. Test: `tests/test-secrets.sh`.
+- **Clipboard image paste → vision** (2026-09-04): console Ctrl/Cmd+V pastes clipboard images into the chat; rides uploads pipeline + `Attachments:` mail blocks; turn prompts carry a `bizagent-vision` marker the runtime attaches as `image_url` content (hub + product agents; uploads/company roots only; cap 8). Soft-fail text-only retry with operator-visible note if the model can't take images. Public `e50e564`; live hub synced (runtime + hub-memory + static); CP + hub-daemon restarted. Cache-bust `20260904-paste-vision`.
+- **Console conversation-switch animation** (2026-09-04): 250ms fade+slide of the messages panel on conversation change; no added delay; `prefers-reduced-motion` respected. Public `993b446`; live hub static synced.
+- **Key-gated model picker + live model lists** (2026-09-04): providers gated on saved API keys; server-side `GET /api/provider-models` (OpenAI-style + Anthropic /v1/models); chat-model filtering, display names, pricing when reported; custom entry + cli.json fallback. Public `a919839`; live hub synced (server.js + lib + static); CP restarted.
+- **Silent model fallback fix** (2026-09-01): fail-clear when agent model unset; roster `(unset)`; public `a8d00b2`; live CP restarted.
+- **Operator stop + no re-dispatch** (2026-09-01): live hub synced from public `bdec5d3`; CP + hub-daemon restarted. Hard-refresh UI cache-bust `20260901-operator-stop`.
+- **MCP paste-in onboarding** (2026-08-31): live hub has `scripts/mcp-onboard.js` + `docs/MCP-ONBOARD.md` from public `3df1208`. Paste path ready; MCP still default off until operator paste.
+- **MCP remote HTTP/SSE** (2026-08-31): live runtime synced from public `baa98ea` (Streamable HTTP + legacy SSE client). `settings.mcp` still default off.
+- **MCP client MVP** (2026-08-31): runtime + CP launch path synced from public `0f2fbb5`; `settings.mcp` default off on this hub.
+- **Nested markdown lists + shared renderer** (2026-08-30): single `control-plane/public/markdown.js` for console + library; nested ul/ol (2+ spaces/tab; mixed; multi-child). Cache-bust `nested-lists`. Public `f06b562`; live hub static applied.
+- **TTS last-word cutoff** (2026-08-29): scrub kept stripping trailing connectors (`on`/`for`/…); Web Audio also padded +200ms so final phoneme is audible. Public main + live static; hard-refresh `?v=20260829-tts-lastword`.
+- **Library MD hr + math** (2026-08-28): thematic breaks → `<hr>`; display/inline math prettified monospace blocks (no KaTeX). Public `5916a2c`; live hub static applied.
+- **Library nested Product→Project accordion** (2026-08-28): Hub first, then products → projects → files. Live hub matches public `e4ea97c`.
+- **Remove PlantUML preview button** (2026-08-20): chat-header PlantUML button/modal + `/api/plantuml/render` scratch endpoint removed; Library remains sole PlantUML path.
+- **Library named-tab + repo accordion** (2026-08-18): full-page Library tab with registry-repo accordion browse.
 - **Add reasoning extraction to agent runtime** (2026‑08‑15): Mapping provider‑specific reasoning fields (`reasoning_content` for Grok/Venice, `reasoning` for ChatGPT/Gemini/OpenRouter, `thinking` for Claude) and logging `Thinking:` lines to stdout for hub preview.
 
 ## Known Issues

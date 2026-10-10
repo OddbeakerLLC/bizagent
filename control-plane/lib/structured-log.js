@@ -31,7 +31,18 @@ function logEvent(hub, event) {
   };
 
   const line = JSON.stringify(logLine);
-  
+
+  // Disk-full protection: refuse bulky log appends while the reserved
+  // free-space buffer is at risk (small status lines still pass).
+  try {
+    const guard = require('./log-caps').assertBulkyWriteAllowed(hub, Buffer.byteLength(line));
+    if (!guard.ok) {
+      // Never lose errors entirely — keep a one-line breadcrumb on stderr.
+      process.stderr.write(`log-caps: ${guard.reason}; dropped event ${logLine.event || 'event'}\n`);
+      return;
+    }
+  } catch (_err) { /* guard failure must never break logging */ }
+
   // Always write to structured log
   fs.appendFileSync(
     path.join(dir, 'structured.log'),
