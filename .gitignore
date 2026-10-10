@@ -1,74 +1,65 @@
-# PUBLIC framework repo — never commit secrets or operator-specific data.
-# Operational hubs may force-add registry.json for a *private* remote only.
-# Never push operator registry/agents/mail to the public GitHub remote.
-*.env
-.env
+# Local operational hub — push everything except the categories below.
+# (Public GitHub repo uses a different, stricter .gitignore.)
+
+# --- Logs ---
+logs/
+*.log
+
+# --- Inboxes ---
+inbox/
+agents/*/inbox/
+
+# --- Outboxes ---
+outbox/
+agents/*/outbox/
+
+# --- Password / secret files ---
 *.key
 *.pem
 *_secret*
 *secrets*
+.bizagent/auth.json
 
-# Local scratch
-*.log
-*.lock
-*.bak
-logs/
-
-# Runtime state under .bizagent (auth, sessions, pids, sockets, conversations).
-# Keep the committed env template trackable.
-.bizagent/*
+# --- Environment variables ---
+.env
+*.env
 !.bizagent/env.example
+.bizagent/env
+.bizagent/env.bak
 
-# Operator-generated source of truth (created by interview / install seed).
-# Schema lives in registry.example.json only.
-registry.json
-
-# Legacy per-hub CLI name file only (migration). Engine catalog is tracked cli.json.
-.cli
-
-# Dispatcher runtime artifacts
+# --- Runtime artifacts (pids, locks, sockets, transient state) ---
+.bizagent/*.pid
+.bizagent/*.sock
+.bizagent/*.heartbeat
+.bizagent/hub.lock/
+.bizagent/dispatch-state/
+.bizagent/pending-replies/
+.bizagent/runtime-cwd/
+.bizagent/defer/
+.bizagent/operator-stop/
+.bizagent/quarantine/
+.bizagent/uploads/
+.bizagent/backups/
+.bizagent/thinking.json
+.bizagent/sessions.json
+.bizagent/active-conversation.json
+.bizagent/last-agent-error.json
+.bizagent/pending-agent-work.json
+.bizagent/pending-hub-turns.json
+.bizagent/health-state.json
+.bizagent/health-chat-stamp.json
+.bizagent/journal-fts.sqlite
+.bizagent/helper-slots/
 agents/*/.lock/
 agents/*/.dispatch.md
 
-# Hub operational mailboxes and knowledge (never public)
-inbox/
-outbox/
-user/
-journal/
-company/
-# Ops Knowledge Stack is hub-local; ship only framework playbook scaffold.
-knowledge-stack/*
-!knowledge-stack/playbooks/
-!knowledge-stack/playbooks/**
-library/
-agents/
-
-# Operator/product journals and sitemaps (ops hub only)
-.agent/
-sitemap.md
-
-# Operator-specific leak markers for publish-check
-scripts/publish-check.patterns
-
-# --- OPS_HUB_GITIGNORE (appended by detach-framework-remote.sh) ---
-# Operational hub tracks registry + agent standing docs + knowledge.
-# Override framework rules that ignore them for the *public* repo.
-!registry.json
-!cli.json
-!journal/
-!journal/**
-!company/
-!company/**
-!knowledge-stack/
-!knowledge-stack/**
-!agents/
-!agents/**
-# Still never commit live mail or lock noise under agents/
-agents/*/.lock/
-agents/*/.dispatch.md
-agents/*/inbox/
-agents/*/outbox/
-
-# Dependencies
+# --- Dependencies ---
 node_modules/
-package-lock.json
+
+# --- Nested git repos (separate clones with their own remotes) ---
+bizagent/
+
+# --- OS / editor noise ---
+.DS_Store
+*.swp
+*~
