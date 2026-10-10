@@ -299,28 +299,41 @@ function fdLimitFromShell() {
   }
 }
 
-/** Map provider name (registry settings.hub_agent.provider) → its key env var. */
-function providerKeyEnv(hub) {
+/** Resolve the hub's configured provider (registry settings.hub_agent) → { name, def } via cli.json. */
+function resolveHubProviderDef(hub) {
   const registry = readJson5(path.join(hub, 'registry.json'));
-  if (!registry) return '';
+  if (!registry) return null;
   const settings = registry.settings || {};
   const hubAgent = settings.hub_agent || {};
   let name = String(hubAgent.provider || hubAgent.cliName || settings.provider || '').trim();
-  if (!name) return '';
+  if (!name) return null;
   try {
     const { resolveProviderName, providerEntries, loadCliJson } = require('./cli-config');
     const cliJson = loadCliJson(hub);
     name = resolveProviderName(name, cliJson);
-    const def = providerEntries(cliJson)[name];
-    return (def && def.keyEnv) || '';
+    return { name, def: providerEntries(cliJson)[name] || null };
   } catch (_err) {
-    return '';
+    return null;
   }
+}
+
+/** Map provider name (registry settings.hub_agent.provider) → its key env var. */
+function providerKeyEnv(hub) {
+  const resolved = resolveHubProviderDef(hub);
+  return (resolved && resolved.def && resolved.def.keyEnv) || '';
+}
+
+/** Keyless providers (e.g. local Ollama) need no API key — health must not demand one. */
+function providerKeyOptional(hub) {
+  const resolved = resolveHubProviderDef(hub);
+  if (!resolved || !resolved.def) return false;
+  return resolved.def.optionalKey === true || resolved.name === 'ollama';
 }
 
 function providerKeyPresent(hub) {
   const keyEnv = providerKeyEnv(hub);
   if (!keyEnv) return null; // unknown provider → skip check
+  if (providerKeyOptional(hub)) return null; // keyless provider (local Ollama) → skip check
   if (process.env[keyEnv] && String(process.env[keyEnv]).trim()) return true;
   try {
     const envText = fs.readFileSync(path.join(hub, '.bizagent', 'env'), 'utf8');
@@ -650,6 +663,7 @@ module.exports = {
   heartbeatAgeMs,
   mitigate,
   postHealthChatLine,
+  providerKeyPresent,
   runHealthCheck,
   sample,
   updateHealthAlertFile,

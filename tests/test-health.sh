@@ -113,6 +113,48 @@ console.log("  ok: health classification");
 ' || fail "health classification"
 
 # ---------------------------------------------------------------------------
+# 1b. Provider key check: keyless (Ollama) skipped, paid provider still critical
+# ---------------------------------------------------------------------------
+NODE_EVAL '
+const health = require("./control-plane/lib/health.js");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const assert = (cond, msg) => { if (!cond) { console.error("FAIL: " + msg); process.exit(1); } };
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), "health-key-"));
+fs.mkdirSync(path.join(hub, ".bizagent"), { recursive: true });
+delete process.env.OLLAMA_API_KEY;
+delete process.env.XAI_API_KEY;
+
+// Ollama (keyless) with no OLLAMA_API_KEY → check skipped (null), not critical.
+fs.writeFileSync(path.join(hub, "registry.json"), JSON.stringify({
+  settings: { hub_agent: { provider: "ollama", model: "qwen3:4b" } },
+}));
+fs.writeFileSync(path.join(hub, "cli.json"), JSON.stringify({
+  ollama: { label: "Ollama (local)", baseURL: "http://127.0.0.1:11434/v1", keyEnv: "OLLAMA_API_KEY", optionalKey: true, models: ["llama3.2"] },
+}));
+assert(health.providerKeyPresent(hub) === null, "keyless ollama with no key should skip the check (null)");
+let r = health.evaluateChecks({ providerKeyPresent: health.providerKeyPresent(hub) });
+assert(!r.checks.some((c) => c.name === "provider_key"), "no provider_key check for keyless ollama");
+assert(r.level !== "critical", "keyless ollama with no key must not be critical, got " + r.level);
+
+// Paid provider (grok) with no key → still false → critical.
+fs.writeFileSync(path.join(hub, "registry.json"), JSON.stringify({
+  settings: { hub_agent: { provider: "grok", model: "grok-4.5" } },
+}));
+fs.writeFileSync(path.join(hub, "cli.json"), JSON.stringify({
+  grok: { label: "Grok (xAI)", baseURL: "https://api.x.ai/v1", keyEnv: "XAI_API_KEY", models: ["grok-4.5"] },
+}));
+assert(health.providerKeyPresent(hub) === false, "paid provider with no key should be false");
+r = health.evaluateChecks({ providerKeyPresent: health.providerKeyPresent(hub) });
+assert(r.checks.some((c) => c.name === "provider_key" && c.level === "critical"), "missing paid-provider key stays critical");
+
+fs.rmSync(hub, { recursive: true, force: true });
+console.log("  ok: provider key keyless/paid");
+' || fail "provider key keyless/paid"
+
+# ---------------------------------------------------------------------------
 # 2. Log caps: refuse bulky writes near the reserve; truncate to tail
 # ---------------------------------------------------------------------------
 NODE_EVAL '

@@ -163,7 +163,10 @@ mkdir -p "$HUB/.bizagent"
 if [[ ! -f "$HUB/.bizagent/env.example" && -f "$HUB/cli.json.example" ]]; then
   : # env.example may already exist from clone
 fi
-if [[ -n "${BIZAGENT_API_KEY:-}" && -n "$API_KEY_VAR" ]]; then
+if [[ "$PROVIDER" == "ollama" ]]; then
+  # Keyless provider (local Ollama) — no API key required; the runtime falls back.
+  ok "Ollama is local and needs no API key — skipping key setup"
+elif [[ -n "${BIZAGENT_API_KEY:-}" && -n "$API_KEY_VAR" ]]; then
   # Merge or create
   if [[ -f "$HUB/.bizagent/env" ]] && grep -q "^${API_KEY_VAR}=" "$HUB/.bizagent/env" 2>/dev/null; then
     grep -v "^${API_KEY_VAR}=" "$HUB/.bizagent/env" > "$HUB/.bizagent/env.tmp" || true

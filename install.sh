@@ -949,6 +949,12 @@ prompt_api_key() {
   SELECTED_API_KEY_VAR="$(api_key_var_for_cli "${SELECTED_PROVIDER:-grok}")"
   SELECTED_API_KEY=""
 
+  # Keyless providers (local Ollama) need no API key — the runtime falls back.
+  if [[ "${SELECTED_PROVIDER:-}" == "ollama" ]]; then
+    note "Ollama is local and needs no API key — skipping (the runtime handles it automatically)."
+    return
+  fi
+
   # Non-interactive / CI: BIZAGENT_API_KEY wins when set.
   if [[ -n "${BIZAGENT_API_KEY:-}" ]]; then
     if [[ -z "$SELECTED_API_KEY_VAR" ]]; then
