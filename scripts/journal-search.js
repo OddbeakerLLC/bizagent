@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Journal search CLI (spec: docs/2026-10-05-journal-search-mvp-spec.md §9).
+ * Journal search CLI (see docs/ARCHITECTURE.md, "Journal search").
  *
  *   scripts/journal-search.js --query "disk full" [--product slug]
  *     [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--limit N] [--hub PATH]
