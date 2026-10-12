@@ -18,7 +18,6 @@ const {
   createConversation,
   getActiveConversationId,
   getConversation,
-  getPendingAgentWorkConversationId,
   listConversations,
   postLaunchAck,
   postAgentCompletionNotice,
@@ -971,20 +970,13 @@ function launchAgent(config, slug, model = '', cliName = '') {
     }
   });
 
-  // Track the in-flight turn so the UI can stream this agent's thinking live.
-  try {
-    const cid =
-      getPendingAgentWorkConversationId(hub, slug) ||
-      getActiveConversationId(hub, 24 * 60 * 60 * 1000);
-    if (cid) {
-      // Visible thinking attachment on the bound conversation (launch-ack).
-      try { postLaunchAck(hub, cid); } catch (_ackErr) { /* best-effort */ }
-      recordThinking(hub, cid, slug, agentLog, logByteOffset(agentLog));
-      try { notifyConversationMutated(hub, cid); } catch (_pushErr) { /* best-effort */ }
-    }
-  } catch (_err) {
-    /* best-effort */
-  }
+  // Agent turns never attach to the operator chat (2026-10-12 operator report):
+  // no launch-ack, no thinking record, no conversation mutation. Only the hub
+  // may own a thinking bubble in the conversation view; agent logs remain in
+  // the fleet thinking viewer (/api/logs/stream), never in the chat pane.
+  // (Previously this posted a launch-ack + recordThinking for the agent slug,
+  // which rendered the agent's dispatch log as a chat thinking bubble that no
+  // hub reply would ever strip.)
 
   child.unref();
   logEvent(hub, {

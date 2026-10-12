@@ -333,8 +333,18 @@ grep -q "clearThinking" "$ROOT/control-plane/lib/hub-turn-safety.js" \
   || fail "hub turn completion does not clear stale thinking entry"
 # Thinking stream pin (2026-10-09): hub chat streams only dispatch-hub.log; an
 # agent dispatch bound to the active conversation must not steal the stream.
+# Hub-only chat stream (2026-10-12): agent thinking must never render as a chat
+# thinking bubble — no agent fallback in the stream, and agent dispatches never
+# post a launch-ack / thinking record into the conversation.
 grep -q 'getThinking(config.hub, convId, "hub")' "$ROOT/control-plane/server.js" \
   || fail "thinking stream does not pin the hub slug"
+thinking_stream_block=$(sed -n '/api\/thinking\/stream/,/api\/thinking\/stop/p' "$ROOT/control-plane/server.js")
+echo "$thinking_stream_block" | grep -q '|| getThinking(config.hub, convId)' \
+  && fail "thinking stream must not fall back to agent entries (agent thinking in chat)"
+grep -q 'postLaunchAck(hub, cid)' "$ROOT/control-plane/lib/dispatcher.js" \
+  && fail "agent dispatch must not post a chat launch-ack"
+grep -q 'recordThinking(hub, cid, slug' "$ROOT/control-plane/lib/dispatcher.js" \
+  && fail "agent dispatch must not record chat thinking state"
 grep -q "clearThinking(config.hub, convId, slug)" "$ROOT/control-plane/server.js" \
   || fail "thinking stream/stop must clear only its own slug entry"
 grep -q "clearThinking(hub, turn.conversationId, 'hub')" "$ROOT/control-plane/lib/hub-turn-safety.js" \
@@ -3482,6 +3492,14 @@ const pinned = getThinking(hub, conv, 'hub');
 if (!pinned || pinned.slug !== 'hub' || pinned.logFile !== '/tmp/hub.log') { console.error('pinned hub lookup failed', pinned); process.exit(8); }
 const missing = getThinking(hub, conv, 'no-such-slug');
 if (missing !== null) { console.error('pinned lookup must not fall back to latest slug', missing); process.exit(9); }
+// Hub-only chat stream (2026-10-12 leak): with only an agent entry recorded for
+// a conversation, the pinned hub lookup must return null — the fallback here is
+// what streamed an agent's dispatch log into the operator chat as a thinking
+// bubble that no hub reply ever stripped.
+const agentOnlyConv = '2026-10-12-agent-only';
+recordThinking(hub, agentOnlyConv, 'solo-agent', '/tmp/agent.log', 7);
+const hubOnly = getThinking(hub, agentOnlyConv, 'hub');
+if (hubOnly !== null) { console.error('hub lookup must not fall back to agent entries', hubOnly); process.exit(14); }
 // Pruning: stale/ended turns drop; fresh entries and sibling slugs survive.
 const stale = '2026-09-16T00:00:00.000Z';
 fs.writeFileSync(path.join(hub, '.bizagent', 'thinking.json'), JSON.stringify({

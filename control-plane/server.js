@@ -827,12 +827,12 @@ async function handleApi(config, req, res) {
   // --- Live "thinking" log (streams an in-flight turn's dispatch stdout) ---
   if (url.pathname === "/api/thinking/stream" && req.method === "GET") {
     const convId = (url.searchParams.get("conv") || "").trim();
-    // Pin to the hub's own entry so the chat pane always streams dispatch-hub.log.
-    // Agent logs stream only for agent-bound acks (no hub entry for this conv) —
-    // an agent dispatch bound to the active conversation must never steal the
-    // hub chat's stream on (re)connect.
+    // Chat stream is hub-only (2026-10-12 operator report): agent thinking must
+    // never render as a chat thinking bubble. Pinned strictly to the hub slug
+    // entry — no latest-slug fallback. Agent logs stream in the fleet thinking
+    // viewer (/api/logs/stream), never here.
     const thinking = convId
-      ? (getThinking(config.hub, convId, "hub") || getThinking(config.hub, convId))
+      ? getThinking(config.hub, convId, "hub")
       : null;
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -904,7 +904,9 @@ async function handleApi(config, req, res) {
   if (url.pathname === "/api/thinking/stop" && req.method === "POST") {
     const body = await parseBody(req);
     const convId = (body.conversationId || "").trim();
-    // Same pinned resolution as the stream: hub entry first, agent-bound fallback.
+    // Hub entry first; legacy agent-bound entries (pre-2026-10-12) still stop
+    // via the latest-slug fallback. New agent turns are never recorded, so the
+    // fallback only matters for residue, which pruneThinking ages out.
     const thinking = convId
       ? (getThinking(config.hub, convId, "hub") || getThinking(config.hub, convId))
       : null;
