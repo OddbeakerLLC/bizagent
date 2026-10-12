@@ -2456,6 +2456,8 @@ async function loadConversation(id) {
     animateConversationSwitch();
   }
   renderMessages(messages);
+  // Operator is now viewing this conversation — drop its waiting indicator.
+  clearCrossChatAlertsFor(id);
 }
 
 // --- Conversation-switch transition (subtle, ~250ms) ---
@@ -3238,5 +3240,69 @@ async function pollHealthBanner() {
 }
 pollHealthBanner();
 setInterval(pollHealthBanner, 30000);
+
+// --- Cross-conversation waiting indicator -------------------------------------
+// When an agent error lands in a conversation the operator is not viewing,
+// show a one-line badge here (never the full error dump). Clicking jumps to
+// the originating conversation, which clears the indicator server-side.
+let crossChatAlertsCache = [];
+
+function renderCrossChatAlerts() {
+  const el = document.getElementById('crossChatAlert');
+  if (!el) return;
+  const waiting = crossChatAlertsCache.filter(
+    (a) => a && a.conversationId && a.conversationId !== currentConversation,
+  );
+  if (!waiting.length) {
+    el.hidden = true;
+    el.innerHTML = '';
+    return;
+  }
+  const first = waiting[0];
+  const extra = waiting.length > 1 ? ` (+${waiting.length - 1} more)` : '';
+  const name = first.conversation_name || 'another conversation';
+  el.hidden = false;
+  el.innerHTML =
+    `<button type="button" class="cross-chat-alert-link" data-conv-id="${first.conversationId}">` +
+    `⚠ Agent error waiting in “${name}”${extra} — click to view</button>`;
+}
+
+async function pollCrossChatAlerts() {
+  try {
+    const res = await fetch('/api/cross-chat-alerts', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    crossChatAlertsCache = Array.isArray(data.alerts) ? data.alerts : [];
+    renderCrossChatAlerts();
+  } catch (_err) { /* server down — indicator state unchanged */ }
+}
+
+async function clearCrossChatAlertsFor(id) {
+  if (!id) return;
+  crossChatAlertsCache = crossChatAlertsCache.filter(
+    (a) => !a || a.conversationId !== id,
+  );
+  renderCrossChatAlerts();
+  try {
+    await fetch('/api/cross-chat-alerts/clear', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversationId: id }),
+    });
+  } catch (_err) { /* best-effort; entry ages out server-side */ }
+}
+
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest && ev.target.closest('.cross-chat-alert-link');
+  if (!btn) return;
+  const id = btn.getAttribute('data-conv-id');
+  if (!id) return;
+  const select = document.getElementById('conversationSelect');
+  if (select) select.value = id;
+  loadConversation(id).catch(() => {});
+});
+
+setInterval(pollCrossChatAlerts, 5000);
+pollCrossChatAlerts();
 
 boot();

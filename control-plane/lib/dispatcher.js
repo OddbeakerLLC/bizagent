@@ -18,9 +18,11 @@ const {
   createConversation,
   getActiveConversationId,
   getConversation,
+  getPendingAgentWorkConversationId,
   listConversations,
   postLaunchAck,
   postAgentCompletionNotice,
+  recordCrossChatAlert,
   STATUS_ERROR_KIND,
   writeFileUnique,
 } = require('./conversations');
@@ -216,10 +218,19 @@ function readStderrTail(stderrFile, maxBytes = 2500) {
 
 /**
  * Resolve a conversation to show operator-facing agent failures.
- * Prefer explicit id → active chat → most recently updated conversation.
+ * Prefer explicit id → originating conversation for this slug's outstanding
+ * work (pending-agent-work) → active chat → most recently updated conversation.
  */
-function resolveAlertConversationId(hub, conversationId) {
+function resolveAlertConversationId(hub, conversationId, slug) {
   if (conversationId && getConversation(hub, conversationId)) return conversationId;
+  // The conversation that dispatched this agent's work owns its errors —
+  // never broadcast into whatever chat the operator happens to have open.
+  try {
+    const origin = slug ? getPendingAgentWorkConversationId(hub, slug) : null;
+    if (origin && getConversation(hub, origin)) return origin;
+  } catch (_err) {
+    /* ignore */
+  }
   try {
     const active = getActiveConversationId(hub, 24 * 60 * 60 * 1000);
     if (active && getConversation(hub, active)) return active;
@@ -304,7 +315,7 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
     classified,
   });
 
-  const cid = resolveAlertConversationId(hub, conversationId);
+  const cid = resolveAlertConversationId(hub, conversationId, slug);
   const dateStr = new Date().toISOString().slice(0, 10);
   const subject = classified
     ? classified.kind === 'credits'
@@ -325,6 +336,16 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
       }
     } catch (_err) {
       postedToChat = false;
+    }
+    // Operator is in a different conversation: leave a lightweight one-line
+    // "error waiting in <conversation>" indicator there (never the full dump).
+    try {
+      const activeNow = getActiveConversationId(hub);
+      if (activeNow && activeNow !== cid) {
+        recordCrossChatAlert(hub, cid, slug, subject);
+      }
+    } catch (_err) {
+      /* ignore */
     }
   }
 

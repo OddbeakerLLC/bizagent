@@ -45,6 +45,7 @@ agents/*/outbox/
 .bizagent/active-conversation.json
 .bizagent/last-agent-error.json
 .bizagent/pending-agent-work.json
+.bizagent/cross-chat-alerts.json
 .bizagent/pending-hub-turns.json
 .bizagent/health-state.json
 .bizagent/health-chat-stamp.json

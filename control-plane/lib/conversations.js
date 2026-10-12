@@ -470,6 +470,76 @@ function clearPendingAgentWorkForConversation(hub, conversationId) {
   return changed;
 }
 
+// --- Cross-conversation waiting indicator -------------------------------------
+// When an agent error lands in a conversation the operator is NOT currently
+// viewing, other conversations get a lightweight one-line indicator (never the
+// full error dump). Entries clear when the operator opens the originating
+// conversation, or age out after a day.
+
+const CROSS_CHAT_ALERT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const CROSS_CHAT_ALERT_MAX_ENTRIES = 20;
+
+function crossChatAlertsFile(hub) {
+  return path.join(appDir(hub), 'cross-chat-alerts.json');
+}
+
+function readCrossChatAlerts(hub) {
+  const data = readJson(crossChatAlertsFile(hub), null);
+  return Array.isArray(data && data.alerts) ? data.alerts : [];
+}
+
+function writeCrossChatAlerts(hub, alerts) {
+  ensureDir(appDir(hub));
+  fs.writeFileSync(
+    crossChatAlertsFile(hub),
+    `${JSON.stringify({ alerts }, null, 2)}\n`,
+  );
+}
+
+/**
+ * Remember that conversationId has an unread agent error waiting.
+ * One entry per (conversation, slug); newest wins; bounded list.
+ */
+function recordCrossChatAlert(hub, conversationId, slug, title) {
+  if (!conversationId || !getConversation(hub, conversationId)) return false;
+  const alerts = readCrossChatAlerts(hub);
+  const next = alerts.filter(
+    (a) => !(a && a.conversationId === conversationId && a.slug === slug),
+  );
+  next.push({
+    conversationId: String(conversationId),
+    slug: String(slug || ''),
+    title: String(title || 'agent error').slice(0, 120),
+    ts: new Date().toISOString(),
+  });
+  writeCrossChatAlerts(hub, next.slice(-CROSS_CHAT_ALERT_MAX_ENTRIES));
+  return true;
+}
+
+/** Live alerts only: drops expired entries and entries whose conversation was deleted. */
+function listCrossChatAlerts(hub) {
+  const alerts = readCrossChatAlerts(hub);
+  const now = Date.now();
+  const live = alerts.filter((a) => {
+    if (!a || !a.conversationId) return false;
+    const ts = Date.parse(a.ts) || 0;
+    if (now - ts > CROSS_CHAT_ALERT_MAX_AGE_MS) return false;
+    return !!getConversation(hub, a.conversationId);
+  });
+  if (live.length !== alerts.length) writeCrossChatAlerts(hub, live);
+  return live;
+}
+
+/** Clear the waiting indicator once the operator opens the originating conversation. */
+function clearCrossChatAlerts(hub, conversationId) {
+  if (!conversationId) return false;
+  const alerts = readCrossChatAlerts(hub);
+  const next = alerts.filter((a) => a && a.conversationId !== conversationId);
+  if (next.length === alerts.length) return false;
+  writeCrossChatAlerts(hub, next);
+  return true;
+}
+
 /**
  * Insert conversation_id into YAML frontmatter if the key is absent.
  * Never invents an id; never overwrites a present conversation_id key
@@ -688,6 +758,7 @@ module.exports = {
   assertValidConversationId,
   conversationNameFromContent,
   clearPendingAgentWorkForConversation,
+  clearCrossChatAlerts,
   createConversation,
   deleteConversation,
   frontmatterValue,
@@ -706,11 +777,13 @@ module.exports = {
   LAUNCH_ACK_KIND,
   LAUNCH_ACK_TEXT,
   listConversations,
+  listCrossChatAlerts,
   pendingAgentWorkFile,
   postAgentCompletionNotice,
   postLaunchAck,
   readUserInboxMessages,
   recordPendingAgentWork,
+  recordCrossChatAlert,
   recordUserInboxDelivery,
   setActiveConversation,
   shouldStartNewConversation,

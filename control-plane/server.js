@@ -83,9 +83,11 @@ const {
   appendMessage,
   conversationNameFromContent,
   createConversation,
+  clearCrossChatAlerts,
   deleteConversation,
   getConversation,
   listConversations,
+  listCrossChatAlerts,
   readUserInboxMessages,
   setActiveConversation,
   shouldStartNewConversation,
@@ -1028,6 +1030,21 @@ async function handleApi(config, req, res) {
   if (url.pathname === "/api/conversations" && req.method === "POST") {
     const body = await parseBody(req);
     return send(res, 200, createConversation(config.hub, body.name));
+  }
+
+  // --- Cross-conversation waiting indicator (lightweight, one line) ---
+  if (url.pathname === "/api/cross-chat-alerts" && req.method === "GET") {
+    const alerts = listCrossChatAlerts(config.hub).map((a) => {
+      const conv = getConversation(config.hub, a.conversationId);
+      return { ...a, conversation_name: (conv && conv.name) || "" };
+    });
+    return send(res, 200, { alerts });
+  }
+
+  if (url.pathname === "/api/cross-chat-alerts/clear" && req.method === "POST") {
+    const body = await parseBody(req);
+    clearCrossChatAlerts(config.hub, body.conversationId);
+    return send(res, 200, { ok: true });
   }
 
   if (url.pathname === "/api/profile" && req.method === "GET") {

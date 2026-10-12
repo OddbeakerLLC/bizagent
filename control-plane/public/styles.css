@@ -1535,3 +1535,26 @@ button {
 .health-banner-yellow {
   background: #9a6b00;
 }
+
+/* --- Cross-conversation waiting indicator (one line, never the full dump) --- */
+.cross-chat-alert {
+  position: sticky;
+  top: 0;
+  z-index: 990;
+  padding: 6px 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  background: #9a6b00;
+  color: #fff;
+}
+.cross-chat-alert-link {
+  all: unset;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-decoration: underline;
+}
+.cross-chat-alert-link:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
