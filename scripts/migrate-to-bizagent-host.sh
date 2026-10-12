@@ -72,7 +72,8 @@ else
 fi
 
 log "Checking SSH to $TARGET ..."
-PUBKEY="$(cat "$HOME/.ssh/id_rsa.pub" 2>/dev/null || cat "$HOME/.ssh/id_ed25519.pub" 2>/dev/null || echo "(no default pubkey found)")"
+PUBKEY="$(cat "$HOME"/.ssh/id_*".pub" 2>/dev/null | head -n 1)"
+[ -n "$PUBKEY" ] || PUBKEY="(no default pubkey found)"
 if ! ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "$TARGET" 'echo OK $(whoami)@$(hostname)' </dev/null; then
   cat <<EOF
 
