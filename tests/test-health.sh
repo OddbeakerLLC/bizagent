@@ -320,4 +320,84 @@ fs.rmSync(hub, { recursive: true, force: true });
 console.log("  ok: HEALTH-ALERT.md lifecycle");
 ' || fail "HEALTH-ALERT lifecycle"
 
+# ---------------------------------------------------------------------------
+# 8. Safe-mode auto-exit: pure decision (reason gating + consecutive counting)
+# ---------------------------------------------------------------------------
+NODE_EVAL '
+const safeMode = require("./control-plane/lib/safe-mode.js");
+const assert = (cond, msg) => { if (!cond) { console.error("FAIL: " + msg); process.exit(1); } };
+const healthFlag = { active: true, reason: "health emergency: 2026-10-09T00:00:00.000Z" };
+const opFlag = { active: true, reason: "operator: maintenance window" };
+
+// Health-emergency flag: needs 2 consecutive ok runs by default.
+let d = safeMode.autoExitDecision({ level: "ok", flag: healthFlag, okStreak: 0, requiredRuns: 2 });
+assert(!d.exit && d.okStreak === 1, "first ok run should not exit, got " + JSON.stringify(d));
+d = safeMode.autoExitDecision({ level: "ok", flag: healthFlag, okStreak: 1, requiredRuns: 2 });
+assert(d.exit && d.okStreak === 2, "second consecutive ok run should exit, got " + JSON.stringify(d));
+
+// Non-ok levels never count and reset the streak.
+for (const level of ["warn", "critical", "emergency"]) {
+  d = safeMode.autoExitDecision({ level, flag: healthFlag, okStreak: 1, requiredRuns: 2 });
+  assert(!d.exit && d.okStreak === 0, level + " run should reset the streak, got " + JSON.stringify(d));
+}
+
+// Operator-set flags never auto-exit, even after many ok runs.
+d = safeMode.autoExitDecision({ level: "ok", flag: opFlag, okStreak: 99, requiredRuns: 2 });
+assert(!d.exit, "operator-set flag must stay manual");
+d = safeMode.autoExitDecision({ level: "ok", flag: null, okStreak: 5, requiredRuns: 2 });
+assert(!d.exit, "no flag → nothing to exit");
+
+// Env override: BIZAGENT_SAFE_MODE_EXIT_RUNS=1 exits on the first ok run.
+process.env.BIZAGENT_SAFE_MODE_EXIT_RUNS = "1";
+d = safeMode.autoExitDecision({ level: "ok", flag: healthFlag, okStreak: 0 });
+assert(d.exit && d.okStreak === 1, "env override 1 should exit on first ok run, got " + JSON.stringify(d));
+assert(safeMode.autoExitRuns() === 1, "autoExitRuns should honor env override");
+delete process.env.BIZAGENT_SAFE_MODE_EXIT_RUNS;
+assert(safeMode.autoExitRuns() === 2, "autoExitRuns default should be 2");
+process.env.BIZAGENT_SAFE_MODE_EXIT_RUNS = "0";
+assert(safeMode.autoExitRuns() === 2, "invalid env override falls back to default 2");
+delete process.env.BIZAGENT_SAFE_MODE_EXIT_RUNS;
+console.log("  ok: safe-mode auto-exit decision");
+' || fail "safe-mode auto-exit decision"
+
+# ---------------------------------------------------------------------------
+# 9. Safe-mode auto-exit: stateful exit via maybeAutoExitSafeMode
+# ---------------------------------------------------------------------------
+NODE_EVAL '
+const health = require("./control-plane/lib/health.js");
+const safeMode = require("./control-plane/lib/safe-mode.js");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const assert = (cond, msg) => { if (!cond) { console.error("FAIL: " + msg); process.exit(1); } };
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), "health-autoexit-"));
+const okReport = { level: "ok", ts: new Date().toISOString(), checks: [] };
+
+// Health-emergency flag: exits on the 2nd consecutive ok run.
+assert(safeMode.enterSafeMode(hub, "health emergency: 2026-10-09T00:00:00.000Z"), "enter safe mode");
+assert(!health.maybeAutoExitSafeMode(hub, okReport), "1st ok run must not exit yet");
+assert(safeMode.isSafeMode(hub), "flag still present after 1st ok run");
+assert(health.maybeAutoExitSafeMode(hub, okReport), "2nd consecutive ok run must exit");
+assert(!safeMode.isSafeMode(hub), "flag cleared after 2nd ok run");
+assert(!health.maybeAutoExitSafeMode(hub, okReport), "idempotent: no exit when flag already gone");
+
+// A warn run between ok runs resets the streak (no flapping).
+assert(safeMode.enterSafeMode(hub, "health emergency: 2026-10-09T00:01:00.000Z"), "re-enter safe mode");
+assert(!health.maybeAutoExitSafeMode(hub, okReport), "streak must not carry over from the prior incident");
+assert(safeMode.isSafeMode(hub), "flag still present after re-enter + 1st ok run");
+assert(!health.maybeAutoExitSafeMode(hub, { level: "warn", ts: new Date().toISOString(), checks: [] }), "warn run does not exit");
+assert(safeMode.isSafeMode(hub), "flag still present after warn run");
+assert(!health.maybeAutoExitSafeMode(hub, okReport), "streak was reset by the warn run: 1st ok run must not exit");
+assert(safeMode.isSafeMode(hub), "flag still present after reset streak");
+assert(health.maybeAutoExitSafeMode(hub, okReport), "2nd consecutive ok run after reset exits");
+assert(!safeMode.isSafeMode(hub), "flag cleared");
+
+// Operator-set flag stays manual even across many ok runs.
+assert(safeMode.enterSafeMode(hub, "operator: maintenance window"), "operator flag");
+for (let i = 0; i < 3; i++) assert(!health.maybeAutoExitSafeMode(hub, okReport), "operator flag never auto-exits");
+assert(safeMode.isSafeMode(hub), "operator flag still present");
+fs.rmSync(hub, { recursive: true, force: true });
+console.log("  ok: safe-mode auto-exit stateful");
+' || fail "safe-mode auto-exit stateful"
+
 echo "  ok: test-health"
