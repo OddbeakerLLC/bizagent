@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # journal-index.sh — (re)build the journal FTS index. Idempotent + incremental
 # (reindexes files whose size/mtime changed; drops vanished files).
-# Spec: docs/2026-10-05-journal-search-mvp-spec.md §7
+# See docs/ARCHITECTURE.md, "Journal search".
 #
 #   scripts/journal-index.sh [--hub PATH]
 #
