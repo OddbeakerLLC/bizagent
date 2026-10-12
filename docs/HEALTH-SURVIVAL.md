@@ -42,7 +42,7 @@ written, install/upgrade print the single command to run by hand.
 | Control-plane heartbeat | missed 1 min | missed 3 min | crash loop |
 | Hub daemon / lock / pid | stale lock | CP pid dead | cannot start |
 | Registry/env/auth readable | — | corrupt/unreadable | — |
-| Provider key present | — | missing | — |
+| Provider key present | — | missing (keyless providers — `optionalKey: true` or `ollama` — are skipped, never critical) | — |
 | Filesystem | — | — | read-only remount / unwritable hub dirs |
 | Clock | — | — | wall-clock jump >90s between probes |
 
@@ -77,6 +77,14 @@ present (set automatically on emergency, or by hand), the control plane only
 serves login/setup/logout, the health JSON, and a blocking banner. No agent
 launches, no mail routing, no multi-MB log appends, no session dumps. All other
 APIs get `503` with the health payload so the UI can banner it.
+
+**Auto-exit:** safe mode also exits itself once health has recovered. Only
+flags whose reason starts with `health emergency` are eligible (operator-set
+flags stay manual). The watchdog requires `ok` on N consecutive probe runs
+(default 2, `BIZAGENT_SAFE_MODE_EXIT_RUNS` to override); the streak persists in
+`.bizagent/safe-mode-exit-state.json` so the in-process tick and the
+out-of-process probe count together, and the exit is idempotent so concurrent
+probes cannot flap the flag.
 
 ## Alerts (none depend on a successful hub turn)
 
@@ -114,5 +122,7 @@ only).
 ## Tests
 
 `tests/test-health.sh` — classification tripwires, log-cap/refuse-write,
-safe-mode gate, fallback trigger (credits/auth/model vs network/rate-limit),
-out-of-process probe end-to-end, growth-rate sampling, HEALTH-ALERT lifecycle.
+safe-mode gate + auto-exit, keyless-provider check (ollama no-key → skipped,
+grok no-key → critical), fallback trigger (credits/auth/model vs
+network/rate-limit), out-of-process probe end-to-end, growth-rate sampling,
+HEALTH-ALERT lifecycle.

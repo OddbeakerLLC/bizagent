@@ -433,7 +433,11 @@ bizagent/
 └── docs/
     ├── ARCHITECTURE.md
     ├── DEFERRED-WAKE.md
-    └── LATENCY-OPTIMIZATION-PLAN.md
+    ├── HEALTH-SURVIVAL.md
+    ├── MCP-ONBOARD.md
+    ├── PLAYBOOKS-AND-CONSULT.md
+    ├── TTS-CONSOLE.md
+    └── diagrams/           PlantUML architecture diagrams
 ```
 
 Cloning gives you the template. Running the PTL interview adds your `registry.json`

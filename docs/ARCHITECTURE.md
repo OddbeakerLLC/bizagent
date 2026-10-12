@@ -176,6 +176,28 @@ returns one string; the parent reviews and is the only writer.
 - Dispatch sets `BIZAGENT_HUB` and `BIZAGENT_AGENT_SLUG` so the parent is attributed on the slot.
 - Design: `docs/2026-09-22-standby-helper-pool.md`.
 
+### Journal search (historical recall)
+
+Built-in `journal_search` tool (same tool list as `grep_search` / `read_file`):
+keyword full-text search over the **hub journal** (`journal/*.md`) plus every
+registered product project's `.agent/journal/*.md`. SQLite FTS5 via the
+`sqlite3` CLI (no npm deps), with a ripgrep fallback that returns the same
+result shape. Index lives at `<hub>/.bizagent/journal-fts.sqlite` — a
+gitignored cache that is always safe to delete; it is rebuilt incrementally
+(size/mtime) and stale-on-query, and `scripts/nightly.sh` refreshes it nightly.
+
+- **Parameters:** `query` (required), `product_slug`, `since` / `until`
+  (`YYYY-MM-DD`), `limit` (default 8, clamped 1–20). Returns short dated
+  snippets (~240 chars, ≤8k output total); `no journal hits` on zero.
+- **Scope is fail-closed:** product agents search **their own product's**
+  journals only (a model-passed other slug is ignored); the hub — or any
+  caller without a product slug — searches all sources.
+- **CLI:** `scripts/journal-search.sh` for humans/tests;
+  `scripts/journal-index.sh --rebuild` forces a full rebuild.
+- **Prompt contract:** templates tell agents to use `journal_search` for
+  "what did we decide / learn about X?" questions instead of grepping, and to
+  keep reading the latest 1–2 journal files only for *current* context.
+
 LLM selection is **registry + `cli.json`** (single runtime):
 
 - **Runtime:** always `bizagent-agent` (`agent-runtime/`, launcher
