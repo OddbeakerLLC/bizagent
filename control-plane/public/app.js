@@ -3226,6 +3226,7 @@ function renderHealthBanner(h) {
   el.innerHTML =
     `<strong>${title}</strong>` +
     (details ? `<span class="health-banner-detail">${details}</span>` : '') +
+    (safeMode ? `<span class="health-banner-detail">Current health: ${level}. The hub will exit safe mode automatically once health is back to ok.</span>` : '') +
     (fallback && !safeMode ? '<span class="health-banner-detail">Fix the paid provider (top up / new key) to restore normal turns.</span>' : '');
 }
 async function pollHealthBanner() {

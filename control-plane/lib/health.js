@@ -630,6 +630,60 @@ function mitigate(hub, report) {
 }
 
 /**
+ * Auto-exit safe mode once health has recovered.
+ *
+ * Only flags whose reason starts with "health emergency" are eligible
+ * (operator-set flags stay manual). Requires `ok` on N consecutive probe runs
+ * (default 2, BIZAGENT_SAFE_MODE_EXIT_RUNS override); the streak persists in
+ * .bizagent/safe-mode-exit-state.json so the in-process timer and the
+ * out-of-process probe count together. Non-ok runs reset the streak, and the
+ * exit itself is idempotent (exitSafeMode on an already-cleared flag is a
+ * no-op success), so concurrent probes cannot flap or corrupt state.
+ * Returns true when this run cleared the flag.
+ */
+function maybeAutoExitSafeMode(hub, report) {
+  const flag = safeMode.readFlag(hub);
+  const stateFile = path.join(hub, '.bizagent', 'safe-mode-exit-state.json');
+  const readStreak = () => {
+    try {
+      const s = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      return Number(s && s.okStreak) || 0;
+    } catch (_err) {
+      return 0;
+    }
+  };
+  const decision = safeMode.autoExitDecision({
+    level: report && report.level,
+    flag,
+    okStreak: readStreak(),
+  });
+  // Persist the streak atomically (tmp + rename) so concurrent probes see a
+  // whole number; a lost update at worst delays the exit by one run.
+  try {
+    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+    const tmp = `${stateFile}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify({ okStreak: decision.okStreak, ts: new Date().toISOString() })}\n`, 'utf8');
+    fs.renameSync(tmp, stateFile);
+  } catch (_err) { /* unwritable disk — exit simply waits for a later run */ }
+  if (!decision.exit) return false;
+  if (!safeMode.exitSafeMode(hub)) return false;
+  try {
+    const { logEvent } = require('./log');
+    logEvent(hub, {
+      event: 'safe_mode_auto_exit',
+      status: 'ok',
+      level: report && report.level,
+      ok_streak: decision.okStreak,
+      required_runs: safeMode.autoExitRuns(),
+    });
+  } catch (_err) { /* ignore */ }
+  try {
+    console.log(`${new Date().toISOString()} health: safe mode auto-exit after ${decision.okStreak} ok run(s) (health recovered)`);
+  } catch (_err) { /* ignore */ }
+  return true;
+}
+
+/**
  * One watchdog pass: sample → evaluate → write files → alert → mitigate.
  * Used by both the in-process timer and the out-of-process probe.
  */
@@ -651,6 +705,9 @@ function runHealthCheck(hub, { mitigate: doMitigate = true } = {}) {
     try {
       actions = mitigate(hub, report);
     } catch (_err) { /* ignore */ }
+    try {
+      if (maybeAutoExitSafeMode(hub, report)) actions.push('safe_mode_exited');
+    } catch (_err) { /* ignore */ }
   }
   report.mitigation = actions;
   return report;
@@ -661,9 +718,10 @@ module.exports = {
   THRESHOLDS,
   evaluateChecks,
   heartbeatAgeMs,
+  providerKeyPresent,
+  maybeAutoExitSafeMode,
   mitigate,
   postHealthChatLine,
-  providerKeyPresent,
   runHealthCheck,
   sample,
   updateHealthAlertFile,
