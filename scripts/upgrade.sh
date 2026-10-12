@@ -148,6 +148,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "upgrade: DRY-RUN — no files will be changed, control plane will not restart"
   log "upgrade: would backup under $HUB/.bizagent/backups/factory-reset-repair-*"
   log "upgrade: would stop control plane, restore framework paths from source, npm install, restart"
+  log "upgrade: would ensure ops .gitignore (OPS_HUB_GITIGNORE section) via factory-reset repair"
   log "upgrade: would ensure health probe timer (scripts/install-health-timer.sh — systemd user timer or cron)"
   if [[ -d "$SOURCE_LABEL" ]]; then
     for path in "${FRAMEWORK_PATHS[@]}"; do

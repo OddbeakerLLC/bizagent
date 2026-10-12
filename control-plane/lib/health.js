@@ -718,6 +718,7 @@ module.exports = {
   THRESHOLDS,
   evaluateChecks,
   heartbeatAgeMs,
+  providerKeyPresent,
   maybeAutoExitSafeMode,
   mitigate,
   postHealthChatLine,
