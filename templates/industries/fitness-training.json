@@ -1,0 +1,45 @@
+{
+  "template_version": 1,
+  "industry": "fitness-training",
+  "display_name": "Solo Fitness Trainer",
+  "variables": [
+    { "key": "business_name", "question": "What's your business called?", "required": true },
+    { "key": "owner_name", "question": "Your name?", "required": true },
+    { "key": "client_roster", "question": "Where do your client records live (file/app/path)?", "required": true },
+    { "key": "sms_number", "question": "Number to text clients from (leave blank to skip SMS)?", "required": false }
+  ],
+  "products": [
+    {
+      "slug": "assistant-coach",
+      "name": "Assistant Coach",
+      "agent_name": "Agent AC",
+      "model": "",
+      "provider": "",
+      "system_prompt_file": "industries/fitness-training/assistant-coach.md",
+      "autonomy": "maintenance-only"
+    }
+  ],
+  "mcp": {
+    "servers": [
+      { "name": "client-db", "transport": "stdio", "command": "node", "args": ["mcp/sqlite"], "env": { "DB_PATH": "{{client_roster}}" }, "required": true },
+      { "name": "calendar", "transport": "stdio", "command": "mcp-calendar", "required": true },
+      { "name": "sms", "transport": "stdio", "command": "mcp-sms", "env": { "SMS_NUMBER": "{{sms_number}}" }, "required": false },
+      { "name": "pdf-export", "transport": "stdio", "command": "mcp-pdf", "required": true }
+    ]
+  },
+  "behaviors": [
+    { "agent": "assistant-coach", "routine": "draft-programs", "trigger": "weekly", "detail": "Draft next month's meal plan + workout per client for owner review." },
+    { "agent": "assistant-coach", "routine": "deliver-programs", "trigger": "schedule", "detail": "Deliver approved plans on time, in one place." },
+    { "agent": "assistant-coach", "routine": "checkin-sweep", "trigger": "daily", "detail": "Flag any client silent 3+ days; draft a follow-up for approval." },
+    { "agent": "assistant-coach", "routine": "progress-report", "trigger": "monthly", "detail": "Build per-client progress report, one-click send." }
+  ],
+  "guardrails": {
+    "outbound_approval_required": true,
+    "local_only_data": true,
+    "never_contact_client_without_owner": true
+  },
+  "knowledge_stack": {
+    "seed_docs": ["industries/fitness-training/docs/*.md"],
+    "playbooks": []
+  }
+}

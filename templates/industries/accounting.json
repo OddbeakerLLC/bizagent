@@ -1,0 +1,45 @@
+{
+  "template_version": 1,
+  "industry": "accounting",
+  "display_name": "Solo Accountant / Bookkeeper",
+  "variables": [
+    { "key": "business_name", "question": "What's your practice called?", "required": true },
+    { "key": "owner_name", "question": "Your name?", "required": true },
+    { "key": "ledger_location", "question": "Where do client ledgers/transactions live (file/app/path)?", "required": true },
+    { "key": "client_email", "question": "Email account to draft client mail from (leave blank to skip email)?", "required": false }
+  ],
+  "products": [
+    {
+      "slug": "bookkeeping-assistant",
+      "name": "Bookkeeping Assistant",
+      "agent_name": "Agent BK",
+      "model": "",
+      "provider": "",
+      "system_prompt_file": "industries/accounting/bookkeeping-assistant.md",
+      "autonomy": "maintenance-only"
+    }
+  ],
+  "mcp": {
+    "servers": [
+      { "name": "ledger-db", "transport": "stdio", "command": "node", "args": ["mcp/sqlite"], "env": { "DB_PATH": "{{ledger_location}}" }, "required": true },
+      { "name": "calendar", "transport": "stdio", "command": "mcp-calendar", "required": true },
+      { "name": "email", "transport": "stdio", "command": "mcp-email", "env": { "EMAIL_ACCOUNT": "{{client_email}}" }, "required": false },
+      { "name": "tax-tables", "transport": "stdio", "command": "mcp-taxkb", "required": true }
+    ]
+  },
+  "behaviors": [
+    { "agent": "bookkeeping-assistant", "routine": "categorize-transactions", "trigger": "daily", "detail": "Draft transaction categorizations per client; owner reviews before anything posts." },
+    { "agent": "bookkeeping-assistant", "routine": "recurring-reminders", "trigger": "weekly", "detail": "Draft recurring client reminders (missing docs, upcoming quarters) for approval." },
+    { "agent": "bookkeeping-assistant", "routine": "deadline-calendar", "trigger": "daily", "detail": "Maintain the filing-deadline calendar; flag anything inside 14 days." },
+    { "agent": "bookkeeping-assistant", "routine": "doc-chasers", "trigger": "weekly", "detail": "List clients with outstanding document requests; draft one polite chaser each." }
+  ],
+  "guardrails": {
+    "outbound_approval_required": true,
+    "local_only_data": true,
+    "never_contact_client_without_owner": true
+  },
+  "knowledge_stack": {
+    "seed_docs": ["industries/accounting/docs/*.md"],
+    "playbooks": []
+  }
+}

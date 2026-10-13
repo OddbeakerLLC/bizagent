@@ -22,6 +22,12 @@
 #   BIZAGENT_SKIP_TTS=1            Skip oddbeaker-tts install (console TTS stays browser-only)
 #   BIZAGENT_SKIP_HEALTH_TIMER=1   Skip the out-of-process health probe timer install
 #   BIZAGENT_NONINTERACTIVE=1      No prompts (provider/key/voice use env/defaults)
+#
+# Industry templates (vertical configuration, e.g. fitness-training):
+#   install.sh --template fitness-training --answers answers.json
+#   (env equivalents: BIZAGENT_TEMPLATE=<slug>, BIZAGENT_ANSWERS=<file.json>;
+#   without --answers the installer runs the template's variable interview.
+#   See docs/industry-templates.md.)
 
 set -euo pipefail
 
@@ -1425,6 +1431,26 @@ ensure_health_timer() {
   fi
 }
 
+# --- optional industry template (vertical configuration) ---
+# Runs AFTER registry.json is seeded so the template merges into a real registry.
+# On success the registry has products, so the first-run seed treats the hub as
+# configured (non-destructive welcome — no re-interview).
+apply_industry_template() {
+  if [[ -z "$TEMPLATE_SLUG" ]]; then
+    return 0
+  fi
+  step "Industry template ($TEMPLATE_SLUG)"
+  local args=(--template "$TEMPLATE_SLUG" --hub "$INSTALL_DIR")
+  if [[ -n "$ANSWERS_FILE" ]]; then
+    args+=(--answers "$ANSWERS_FILE")
+    note "unattended answers: $ANSWERS_FILE"
+  fi
+  if ! bash "$INSTALL_DIR/scripts/apply-template.sh" "${args[@]}"; then
+    die "Industry template '$TEMPLATE_SLUG' failed to apply. Fix the issue above and re-run, or install without --template."
+  fi
+  ok "hub configured for '$TEMPLATE_SLUG'"
+}
+
 # --- clone + handoff ---
 DEFAULT_DIR="$HOME/bizagent"
 BIZAGENT_SOURCE_EXPLICIT=0
@@ -1500,6 +1526,42 @@ choose_dir() {
 clone_repo() {
   [[ "$ALREADY_CLONED" == "1" ]] && return
   validate_source "$BIZAGENT_SOURCE"
+  # USB-stick bundles: a repo tarball (made with `tar czf bizagent-bundle.tgz`
+  # from a clone, .git included) is extracted to a temp dir and cloned from
+  # there — no internet needed for the framework itself (model/API access still
+  # requires connectivity).
+  local tar_src=""
+  case "$BIZAGENT_SOURCE" in
+    *.tar.gz|*.tgz)
+      if [[ -f "$BIZAGENT_SOURCE" ]]; then
+        tar_src="$BIZAGENT_SOURCE"
+      fi
+      ;;
+  esac
+  if [[ -n "$tar_src" ]]; then
+    have tar || die "tar is required to extract the bundle tarball: $tar_src"
+    local extract_dir
+    extract_dir="$(mktemp -d "${TMPDIR:-/tmp}/bizagent-bundle.XXXXXX")"
+    note "extracting bundle $tar_src ..."
+    if ! tar -xzf "$tar_src" -C "$extract_dir"; then
+      rm -rf "$extract_dir"
+      die "Failed to extract bundle tarball: $tar_src"
+    fi
+    # The repo root is whichever extracted dir holds AGENT.md (bundle may or may
+    # not have a top-level directory).
+    local repo_dir
+    if [[ -f "$extract_dir/AGENT.md" ]]; then
+      repo_dir="$extract_dir"
+    else
+      repo_dir="$(find "$extract_dir" -maxdepth 2 -name AGENT.md -print -quit 2>/dev/null | xargs -r dirname)"
+    fi
+    if [[ -z "$repo_dir" || ! -d "$repo_dir/.git" ]]; then
+      rm -rf "$extract_dir"
+      die "Bundle tarball does not contain a bizagent git checkout (expected a directory with .git and AGENT.md): $tar_src"
+    fi
+    BIZAGENT_SOURCE="$repo_dir"
+    ok "bundle extracted to $repo_dir"
+  fi
   note "cloning bizagent into $INSTALL_DIR..."
   if ! git clone --quiet -- "$BIZAGENT_SOURCE" "$INSTALL_DIR" 2>/dev/null; then
     rm -rf "$INSTALL_DIR" 2>/dev/null || true
@@ -1573,6 +1635,37 @@ PY
 }
 
 # --- main ---
+TEMPLATE_SLUG="${BIZAGENT_TEMPLATE:-}"
+ANSWERS_FILE="${BIZAGENT_ANSWERS:-}"
+
+usage() {
+  cat <<'EOF'
+Usage: install.sh [--template <slug>] [--answers <file.json>]
+
+  --template <slug>   Configure the hub for an industry vertical after install
+                      (templates/industries/<slug>.json). Equivalent env var:
+                      BIZAGENT_TEMPLATE=<slug>
+  --answers <file>    JSON object of template variable answers for unattended
+                      installs (door-to-door: pre-fill before the site visit).
+                      Equivalent env var: BIZAGENT_ANSWERS=<file>
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --template)  TEMPLATE_SLUG="${2:-}"; shift 2 ;;
+    --template=*) TEMPLATE_SLUG="${1#*=}"; shift ;;
+    --answers)   ANSWERS_FILE="${2:-}"; shift 2 ;;
+    --answers=*) ANSWERS_FILE="${1#*=}"; shift ;;
+    -h|--help)   usage; exit 0 ;;
+    *) die "Unknown option: $1 (supported: --template <slug>, --answers <file.json>, --help)" ;;
+  esac
+done
+
+if [[ -n "$ANSWERS_FILE" && ! -f "$ANSWERS_FILE" ]]; then
+  die "--answers file not found: $ANSWERS_FILE"
+fi
+
 main() {
   banner
 
@@ -1612,6 +1705,7 @@ main() {
   write_cli_json
   write_registry_seed
   write_env_file
+  apply_industry_template
   ensure_oddbeaker_tts
   ensure_health_timer
 
