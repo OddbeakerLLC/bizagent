@@ -1197,6 +1197,12 @@ d = json.load(open(src))
 d["org"] = ""
 d["products"] = []
 d["cross_product_edges"] = []
+# Drop the example MCP server — a fresh install ships no servers; industry
+# templates (scripts/apply-template.sh) add real ones and set enabled=true.
+mcp = d.get("settings", {}).get("mcp")
+if isinstance(mcp, dict):
+    mcp["servers"] = []
+    mcp["enabled"] = False
 if "hub" in d and isinstance(d["hub"], dict):
     d["hub"]["name"] = "BizAgent"
 settings = d.setdefault("settings", {})
