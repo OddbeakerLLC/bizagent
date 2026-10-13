@@ -83,7 +83,7 @@ else
 fi
 
 # --- 0c. refresh journal search index --------------------------------------
-# Keyword FTS over hub + product journals (docs/2026-10-05-journal-search-mvp-spec.md).
+# Keyword FTS over hub + product journals (see docs/ARCHITECTURE.md, journal_search).
 # Incremental + idempotent; stale-on-query also rebuilds before searches.
 if [ -x "$HUB/scripts/journal-index.sh" ]; then
   echo "nightly: refreshing journal search index..."

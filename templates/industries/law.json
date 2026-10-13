@@ -1,0 +1,44 @@
+{
+  "template_version": 1,
+  "industry": "law",
+  "display_name": "Solo Attorney / Small Firm",
+  "variables": [
+    { "key": "business_name", "question": "What's your firm called?", "required": true },
+    { "key": "attorney_name", "question": "Your name (attorney of record)?", "required": true },
+    { "key": "document_store", "question": "Where do client documents/case files live (path/app)?", "required": true },
+    { "key": "bar_jurisdiction", "question": "Your bar jurisdiction(s)?", "required": true }
+  ],
+  "products": [
+    {
+      "slug": "legal-assistant",
+      "name": "Legal Assistant",
+      "agent_name": "Agent LA",
+      "model": "",
+      "provider": "",
+      "system_prompt_file": "industries/law/legal-assistant.md",
+      "autonomy": "maintenance-only"
+    }
+  ],
+  "mcp": {
+    "servers": [
+      { "name": "document-store", "transport": "stdio", "command": "node", "args": ["mcp/sqlite"], "env": { "DB_PATH": "{{document_store}}" }, "required": true },
+      { "name": "calendar", "transport": "stdio", "command": "mcp-calendar", "required": true },
+      { "name": "e-filing", "transport": "stdio", "command": "mcp-efiling", "env": { "EFILING_MODE": "read-only" }, "required": false }
+    ]
+  },
+  "behaviors": [
+    { "agent": "legal-assistant", "routine": "intake-drafting", "trigger": "daily", "detail": "Draft new-client intake summaries and engagement-letter shells for attorney review." },
+    { "agent": "legal-assistant", "routine": "deadline-calendar", "trigger": "daily", "detail": "Maintain court/filing deadline calendar; flag anything inside 14 days." },
+    { "agent": "legal-assistant", "routine": "document-assembly", "trigger": "schedule", "detail": "Assemble first-draft documents from firm templates; attorney reviews before filing." },
+    { "agent": "legal-assistant", "routine": "conflict-check", "trigger": "weekly", "detail": "Run conflict-check notes on new intakes against the existing client/matter list." }
+  ],
+  "guardrails": {
+    "outbound_approval_required": true,
+    "local_only_data": true,
+    "never_contact_client_without_owner": true
+  },
+  "knowledge_stack": {
+    "seed_docs": ["industries/law/docs/*.md"],
+    "playbooks": []
+  }
+}

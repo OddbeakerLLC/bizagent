@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Journal search (MVP spec: docs/2026-10-05-journal-search-mvp-spec.md).
+ * Journal search (see docs/ARCHITECTURE.md, "Journal search").
  *
  * Keyword FTS over journals only — SQLite FTS5 via the sqlite3 CLI when
  * available, ripgrep fallback over the same corpus otherwise. No embeddings,
