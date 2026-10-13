@@ -175,7 +175,9 @@ for p in products:
     check_str("products[]", p, "agent_name")
     prompt_file = check_str("products[]", p, "system_prompt_file")
     p["system_prompt_file"] = prompt_file
-    abs_prompt = os.path.join(tdir, prompt_file)
+    # Template file paths are relative to templates/ (e.g.
+    # "industries/<slug>/assistant-coach.md"), per the design doc.
+    abs_prompt = os.path.join(hub, "templates", prompt_file)
     if not os.path.isfile(abs_prompt):
         die("products[]: system_prompt_file not found: %s" % abs_prompt)
     p.setdefault("autonomy", "maintenance-only")
@@ -235,7 +237,7 @@ seed_files = []
 for pattern in seed_docs:
     if not isinstance(pattern, str) or not pattern.strip():
         die("knowledge_stack.seed_docs: patterns must be non-empty strings")
-    matches = sorted(globmod.glob(os.path.join(tdir, pattern)))
+    matches = sorted(globmod.glob(os.path.join(hub, "templates", pattern)))
     if not matches:
         die("knowledge_stack.seed_docs: pattern matched no files: %s" % pattern)
     seed_files.extend(matches)
@@ -259,7 +261,7 @@ def collect(obj):
 collect(t)
 prompt_texts = {}
 for p in products:
-    text = open(os.path.join(tdir, p["system_prompt_file"]), encoding="utf-8").read()
+    text = open(os.path.join(hub, "templates", p["system_prompt_file"]), encoding="utf-8").read()
     prompt_texts[p["slug"]] = text
     used.update(PH.findall(text))
 undeclared = sorted(used - set(declared))
