@@ -17,10 +17,13 @@ specifies, and nothing more:
    detect the day's commits.
 
 3. For each project with activity, spawn its product agent to refresh root
-   `sitemap.md` and add a `.agent/journal/YYYY-MM-DD.md` entry — plain English,
-   one bullet per meaningful change, with `Challenge:` / `Lesson:` lines where
-   warranted. After the agent finishes, if that project repo has a git remote,
-   ensure journal/sitemap changes are committed (agent or you).
+   `sitemap.md`, reconcile the project's docs with the day's code changes
+   (update README/`docs/` where behavior changed; delete or rewrite docs for
+   removed/deprecated features), and add a `.agent/journal/YYYY-MM-DD.md`
+   entry — plain English, one bullet per meaningful change, with `Challenge:` /
+   `Lesson:` lines where warranted. After the agent finishes, if that project
+   repo has a git remote, ensure journal/sitemap changes are committed (agent
+   or you).
 
 4. If any work was done this run, add a hub journal entry under `journal/`.
 
