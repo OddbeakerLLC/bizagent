@@ -329,7 +329,10 @@ In order: run `scripts/nightly.sh` (pull project repos and hub if they have
 remotes; route queued messages; archive messages left _unactioned_ past the
 stale threshold; prune old archives); for each project run
 `git log --since=midnight` to detect the day's commits; for each project with
-activity, spawn its agent to refresh `sitemap.md` and add a journal entry; if
+activity, spawn its agent to refresh `sitemap.md`, reconcile the project's docs
+with the day's code changes (update README/`docs/` where behavior changed;
+delete or rewrite docs for removed/deprecated features), and add a journal
+entry; if
 anything happened, add a hub journal entry; finally run
 `scripts/nightly.sh push` to commit and push **product project** repos that
 have remotes **and the hub ops repo** when it has a **private** remote
