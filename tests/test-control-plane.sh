@@ -2449,13 +2449,20 @@ if (!olStart.includes('<ol start="10">') || !olStart.includes('<li value="10">te
   console.error('ol start/value broken:', olStart); process.exit(164);
 }
 
-// TTS markdown fence: ```tts renders as a real code block; speaks ≤2 sentences.
+// TTS markdown fence: ```tts renders as a labeled spoken-summary aside; speaks ≤2 sentences.
 const ttsFence = sandbox.renderMarkdown('```tts\nSpoken one. Spoken two.\n```\n\n## Body\n\nMore detail.');
-if (!ttsFence.includes('<pre><code>Spoken one. Spoken two.</code></pre>')) {
-  console.error('tts fence should render as a code block:', ttsFence); process.exit(18);
+if (!ttsFence.includes('<div class="spoken-aside">')
+    || !ttsFence.includes('Spoken summary')
+    || !ttsFence.includes('<div class="spoken-aside-body">Spoken one. Spoken two.</div>')) {
+  console.error('tts fence should render as a spoken aside:', ttsFence); process.exit(18);
 }
-if (ttsFence.includes('```') || !ttsFence.includes('<h2>Body</h2>')) {
+if (ttsFence.includes('<pre><code>Spoken') || ttsFence.includes('```') || !ttsFence.includes('<h2>Body</h2>')) {
   console.error('tts fence leaked markers or lost body:', ttsFence); process.exit(19);
+}
+// Non-tts fences still render as code blocks.
+const plainFence = sandbox.renderMarkdown('```\nplain code\n```');
+if (!plainFence.includes('<pre><code>plain code</code></pre>')) {
+  console.error('plain fence should still be a code block:', plainFence); process.exit(18);
 }
 const ttsSpoken = sandbox.buildSpokenSummary('```tts\nSpoken one. Spoken two.\n```\n\n## Body\n\nMore detail that must not be spoken.');
 if (ttsSpoken !== 'Spoken one. Spoken two.') {
