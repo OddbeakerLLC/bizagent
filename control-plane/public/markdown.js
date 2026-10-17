@@ -148,9 +148,13 @@ function renderInline(text) {
   s = s.replace(/\$([^\s$])\$/g, (_, src) => pushMath(src, false));
   s = escapeHtml(s);
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
   s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  s = s.replace(/_([^_]+)_/g, '<em>$1</em>');
+  // Intraword underscores never make emphasis (CommonMark left/right-flanking
+  // rule): require a non-word char (or string edge) outside each delimiter, so
+  // snake_case tokens like file_name_v2 render literally. Lookbehind/lookahead
+  // (not consuming groups) so adjacent spans like _a_ _b_ both still match.
+  s = s.replace(/(?<!\w)__([^_]+)__(?!\w)/g, '<strong>$1</strong>');
+  s = s.replace(/(?<!\w)_([^_]+)_(?!\w)/g, '<em>$1</em>');
   s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (match, alt, url) => (
     isSafeImageSrc(url)
       ? `<img src="${url}" alt="${alt}" loading="lazy">`

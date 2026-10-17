@@ -2449,6 +2449,20 @@ if (!olStart.includes('<ol start="10">') || !olStart.includes('<li value="10">te
   console.error('ol start/value broken:', olStart); process.exit(164);
 }
 
+// Intraword underscores never make emphasis (CommonMark flanking rule):
+// snake_case identifiers/filenames render literally, underscores visible.
+const intra = sandbox.renderMarkdown('underscore_not_italic and file_name_v2 stay literal.');
+if (intra.includes('<em>') || intra.includes('<strong>')
+    || !intra.includes('underscore_not_italic') || !intra.includes('file_name_v2')) {
+  console.error('intraword underscores should render literally:', intra); process.exit(165);
+}
+// Legitimate underscore emphasis still works, including adjacent pairs.
+const emph = sandbox.renderMarkdown('this is _real emphasis_ and __bold__ too, plus _a_ _b_ pairs.');
+if (!emph.includes('<em>real emphasis</em>') || !emph.includes('<strong>bold</strong>')
+    || !emph.includes('<em>a</em>') || !emph.includes('<em>b</em>')) {
+  console.error('legitimate underscore emphasis broken:', emph); process.exit(166);
+}
+
 // TTS markdown fence: ```tts renders as a labeled spoken-summary aside; speaks ≤2 sentences.
 const ttsFence = sandbox.renderMarkdown('```tts\nSpoken one. Spoken two.\n```\n\n## Body\n\nMore detail.');
 if (!ttsFence.includes('<div class="spoken-aside">')
