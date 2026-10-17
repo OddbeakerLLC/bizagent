@@ -2452,7 +2452,7 @@ if (!olStart.includes('<ol start="10">') || !olStart.includes('<li value="10">te
 // TTS markdown fence: ```tts renders as a labeled spoken-summary aside; speaks ≤2 sentences.
 const ttsFence = sandbox.renderMarkdown('```tts\nSpoken one. Spoken two.\n```\n\n## Body\n\nMore detail.');
 if (!ttsFence.includes('<div class="spoken-aside">')
-    || !ttsFence.includes('Spoken summary')
+    || !ttsFence.includes('<span>Summary</span>')
     || !ttsFence.includes('<div class="spoken-aside-body">Spoken one. Spoken two.</div>')) {
   console.error('tts fence should render as a spoken aside:', ttsFence); process.exit(18);
 }
