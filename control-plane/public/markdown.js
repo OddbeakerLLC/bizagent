@@ -168,8 +168,8 @@ function renderInline(text) {
 
 function renderMarkdown(text) {
   // Hub TTS markers (speak path reads raw body before render):
-  // 1) Preferred: fenced ```tts block — rendered as a real code block by the
-  //    fence handler below (operator preference; speak path unaffected).
+  // 1) Preferred: fenced ```tts block — rendered as a labeled "Spoken summary"
+  //    aside (not a code block) by the fence handler below; speak path unaffected.
   // 2) Legacy: <tts-summary>…</tts-summary> — unwrap tags, keep inner text.
   const cleaned = String(text || '')
     .replace(/<tts-summary\b[^>]*>([\s\S]*?)<\/tts-summary>/gi, '$1')
@@ -336,6 +336,7 @@ function renderMarkdown(text) {
     if (/^```/.test(line)) {
       flushParagraph();
       flushList();
+      const lang = /^```(.*)$/.exec(line)[1].trim().toLowerCase();
       const codeLines = [];
       i++;
       while (i < lines.length && !/^```/.test(lines[i])) {
@@ -343,7 +344,22 @@ function renderMarkdown(text) {
         i++;
       }
       i++;
-      htmlParts.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      if (lang === 'tts') {
+        // Spoken summary aside: labeled, tinted, hard-wrapped (never a
+        // scrollable code box, even for long unbroken strings).
+        const body = escapeHtml(codeLines.join('\n').trim());
+        htmlParts.push(
+          '<div class="spoken-aside">'
+          + '<div class="spoken-aside-header">'
+          + '<svg class="spoken-aside-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>'
+          + '<span>Spoken summary</span>'
+          + '</div>'
+          + `<div class="spoken-aside-body">${body}</div>`
+          + '</div>'
+        );
+      } else {
+        htmlParts.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      }
       continue;
     }
 
