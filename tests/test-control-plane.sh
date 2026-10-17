@@ -2449,13 +2449,13 @@ if (!olStart.includes('<ol start="10">') || !olStart.includes('<li value="10">te
   console.error('ol start/value broken:', olStart); process.exit(164);
 }
 
-// TTS markdown fence: ```tts keeps inner prose, not a code block; speaks ≤2 sentences.
+// TTS markdown fence: ```tts renders as a real code block; speaks ≤2 sentences.
 const ttsFence = sandbox.renderMarkdown('```tts\nSpoken one. Spoken two.\n```\n\n## Body\n\nMore detail.');
-if (ttsFence.includes('<pre>') || ttsFence.includes('```')) {
-  console.error('tts fence should not render as code/fence:', ttsFence); process.exit(18);
+if (!ttsFence.includes('<pre><code>Spoken one. Spoken two.</code></pre>')) {
+  console.error('tts fence should render as a code block:', ttsFence); process.exit(18);
 }
-if (!ttsFence.includes('Spoken one. Spoken two.') || !ttsFence.includes('<h2>Body</h2>')) {
-  console.error('tts fence unwrap lost prose/body:', ttsFence); process.exit(19);
+if (ttsFence.includes('```') || !ttsFence.includes('<h2>Body</h2>')) {
+  console.error('tts fence leaked markers or lost body:', ttsFence); process.exit(19);
 }
 const ttsSpoken = sandbox.buildSpokenSummary('```tts\nSpoken one. Spoken two.\n```\n\n## Body\n\nMore detail that must not be spoken.');
 if (ttsSpoken !== 'Spoken one. Spoken two.') {
