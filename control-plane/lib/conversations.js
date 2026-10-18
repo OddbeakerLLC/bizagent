@@ -182,6 +182,10 @@ function appendMessage(hub, id, role, content, meta = {}) {
   }
   const msg = { role, content, created_at: new Date().toISOString() };
   if (meta.kind) msg.kind = meta.kind;
+  // DGen form-request / form-submitted metadata (no secrets — specs and ids only).
+  for (const key of ['form_id', 'agent', 'form']) {
+    if (meta[key] !== undefined) msg[key] = meta[key];
+  }
   if (Array.isArray(meta.attachments) && meta.attachments.length) {
     msg.attachments = meta.attachments.map((a) => ({
       name: a.name || '',

@@ -720,10 +720,237 @@ function renderAgents(agents) {
 function messageClassName(msg) {
   if (msg.role === 'user') return 'message user';
   if (msg.role === 'status') {
+    if (msg.kind === 'form-request') return 'message status form-request';
+    if (msg.kind === 'form-submitted') return 'message status form-submitted';
     const kind = msg.kind === 'error' ? 'error' : (msg.kind === 'launch-ack' ? 'launch-ack' : '');
     return `message status${kind ? ` ${kind}` : ''}`;
   }
   return 'message system';
+}
+
+// --- DGen form requests (sensitive input; bypasses chat history) -----------
+// The server parses the agent's DGen markup; the browser only ever sees the
+// parsed JSON. Submitted values POST to /api/forms/submit and are written to
+// an ephemeral 0600 file for the requesting agent — never into the chat.
+
+let pendingFormRequest = null;
+
+function submittedFormIds(messages) {
+  const ids = new Set();
+  (messages || []).forEach((m) => {
+    if (m && m.role === 'status' && m.kind === 'form-submitted' && m.form_id) {
+      ids.add(m.form_id);
+    }
+  });
+  return ids;
+}
+
+function buildFormRequestCard(msg, submitted) {
+  const card = document.createElement('div');
+  card.className = 'form-request-card';
+  const head = document.createElement('div');
+  head.className = 'form-request-head';
+  const title = document.createElement('strong');
+  title.textContent = (msg.form && msg.form.title) || 'Information request';
+  head.appendChild(title);
+  const agent = document.createElement('span');
+  agent.className = 'form-request-agent';
+  agent.textContent = `requested by ${msg.agent || 'hub'}`;
+  head.appendChild(agent);
+  card.appendChild(head);
+  if (msg.form && msg.form.description) {
+    const desc = document.createElement('div');
+    desc.className = 'form-request-desc';
+    desc.textContent = msg.form.description;
+    card.appendChild(desc);
+  }
+  const fields = (msg.form && Array.isArray(msg.form.fields)) ? msg.form.fields : [];
+  const names = fields.map((f) => f.label || f.id).filter(Boolean);
+  if (names.length) {
+    const list = document.createElement('div');
+    list.className = 'form-request-fields';
+    list.textContent = `Fields: ${names.join(', ')}`;
+    card.appendChild(list);
+  }
+  const note = document.createElement('div');
+  note.className = 'form-request-note';
+  note.textContent = 'Values bypass the chat history and are deleted after the agent uses them.';
+  card.appendChild(note);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'form-request-open';
+  btn.textContent = submitted ? 'Submitted ✓' : 'Provide information';
+  btn.disabled = !!submitted;
+  btn.addEventListener('click', () => {
+    if (!submitted) openFormModal(msg);
+  });
+  card.appendChild(btn);
+  return card;
+}
+
+function formModalInputForField(field) {
+  const wrap = document.createElement('div');
+  wrap.className = 'form-field';
+  const id = `formField_${field.id}`;
+  const isCheck = field.type === 'checkbox';
+  let input;
+  if (isCheck) {
+    wrap.className = 'form-field form-field--check';
+    input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !!field.default;
+    const label = document.createElement('label');
+    label.htmlFor = id;
+    label.textContent = field.inline || field.label || field.id;
+    input.id = id;
+    input.dataset.formField = field.id;
+    wrap.appendChild(input);
+    wrap.appendChild(label);
+    return wrap;
+  }
+  const label = document.createElement('label');
+  label.htmlFor = id;
+  label.textContent = field.label || field.id;
+  wrap.appendChild(label);
+  if (field.type === 'textarea') {
+    input = document.createElement('textarea');
+    input.rows = field.rows || 3;
+  } else if (field.type === 'dropdown') {
+    input = document.createElement('select');
+    (field.options || []).forEach((opt) => {
+      const option = document.createElement('option');
+      option.value = opt.value;
+      option.textContent = opt.label;
+      input.appendChild(option);
+    });
+    if (field.default) input.value = field.default;
+  } else if (field.type === 'number') {
+    input = document.createElement('input');
+    input.type = 'number';
+    if (field.min !== undefined) input.min = field.min;
+    if (field.max !== undefined) input.max = field.max;
+  } else {
+    input = document.createElement('input');
+    input.type = field.type === 'password' ? 'password' : 'text';
+    if (field.type === 'password') {
+      input.autocomplete = 'off';
+    }
+  }
+  if (field.type === 'link') {
+    // Links are display-only; nothing is submitted.
+    const a = document.createElement('a');
+    a.href = field.default || '#';
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = field.default || field.label || 'Link';
+    a.id = id;
+    wrap.appendChild(a);
+    return wrap;
+  }
+  input.id = id;
+  input.dataset.formField = field.id;
+  if (field.maxlen) input.maxLength = field.maxlen;
+  if (field.default !== undefined && field.default !== '' && field.type !== 'dropdown') {
+    input.value = field.default;
+  }
+  wrap.appendChild(input);
+  return wrap;
+}
+
+function openFormModal(msg) {
+  const modal = document.getElementById('formModal');
+  const title = document.getElementById('formModalTitle');
+  const desc = document.getElementById('formModalDesc');
+  const container = document.getElementById('formModalFields');
+  const status = document.getElementById('formModalStatus');
+  const submitBtn = document.getElementById('formModalSubmit');
+  const cancelBtn = document.getElementById('formModalCancel');
+  if (!modal || !container) return;
+  const form = msg.form || {};
+  pendingFormRequest = {
+    formId: msg.form_id,
+    agent: msg.agent || 'hub',
+    form,
+  };
+  title.textContent = form.title || 'Information request';
+  if (desc) {
+    desc.hidden = !form.description;
+    desc.textContent = form.description || '';
+  }
+  container.innerHTML = '';
+  (form.fields || []).forEach((field) => {
+    if (field.type === 'button' || field.type === 'link') return;
+    container.appendChild(formModalInputForField(field));
+  });
+  if (status) {
+    status.hidden = true;
+    status.textContent = '';
+  }
+  // Footer buttons from the DGen spec: a `cancel` button closes; the last
+  // non-cancel button labels the submit action.
+  const buttons = (form.buttons || []).filter((b) => b.id !== 'cancel');
+  const cancelSpec = (form.buttons || []).find((b) => b.id === 'cancel');
+  if (cancelBtn) cancelBtn.textContent = (cancelSpec && cancelSpec.label) || 'Cancel';
+  if (submitBtn) {
+    submitBtn.textContent = buttons.length ? (buttons[buttons.length - 1].label || 'Submit') : 'Submit';
+    submitBtn.dataset.buttonId = buttons.length ? buttons[buttons.length - 1].id : 'submit';
+  }
+  if (!modal.dataset.bound) {
+    modal.dataset.bound = '1';
+    const close = () => hideFormModal();
+    const closeBtn = document.getElementById('formModalClose');
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    if (cancelBtn) cancelBtn.addEventListener('click', close);
+    if (submitBtn) submitBtn.addEventListener('click', submitFormModal);
+  }
+  modal.hidden = false;
+  const first = container.querySelector('input, select, textarea');
+  if (first) first.focus();
+}
+
+function hideFormModal() {
+  const modal = document.getElementById('formModal');
+  if (modal) modal.hidden = true;
+  pendingFormRequest = null;
+}
+
+async function submitFormModal() {
+  if (!pendingFormRequest) return;
+  const container = document.getElementById('formModalFields');
+  const status = document.getElementById('formModalStatus');
+  const submitBtn = document.getElementById('formModalSubmit');
+  const fields = {};
+  container.querySelectorAll('[data-form-field]').forEach((el) => {
+    fields[el.dataset.formField] = el.type === 'checkbox' ? el.checked : el.value;
+  });
+  if (submitBtn) submitBtn.disabled = true;
+  if (status) {
+    status.hidden = false;
+    status.textContent = 'Submitting…';
+    status.dataset.kind = 'pending';
+  }
+  try {
+    await api('/api/forms/submit', {
+      method: 'POST',
+      body: JSON.stringify({
+        form_id: pendingFormRequest.formId,
+        agent: pendingFormRequest.agent,
+        button: (submitBtn && submitBtn.dataset.buttonId) || 'submit',
+        fields,
+        conversation_id: currentConversation || '',
+      }),
+    });
+    hideFormModal();
+    if (currentConversation) softReloadConversation(currentConversation).catch(() => {});
+  } catch (err) {
+    if (status) {
+      status.hidden = false;
+      status.textContent = err.message || 'Submit failed';
+      status.dataset.kind = 'warn';
+    }
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
 }
 
 // --- Console TTS (oddbeaker-tts HTTP preferred; browser speechSynthesis fallback) ---
@@ -1436,8 +1663,10 @@ function ensureSpokenSentence(sentence) {
  * Extract a TTS summary marker from a hub reply (speak path only).
  * Preferred: fenced markdown ```tts … ``` (info string "tts").
  * Legacy: <tts-summary>…</tts-summary>.
- * Captures up to two complete sentences from the marker body. Returns null
- * when absent. Renderer keeps the inner prose and drops only the fence/tags.
+ * Captures the COMPLETE marker body — every sentence in the fence is spoken,
+ * since the fence is the agent-authored summary (no two-sentence cap).
+ * Returns null when absent. Renderer keeps the inner prose and drops only the
+ * fence/tags.
  */
 function extractTtsSummaryTag(text) {
   const raw = String(text || '');
@@ -1459,11 +1688,13 @@ function extractTtsSummaryTag(text) {
   body = body.replace(/^(?:\*\*\s*)?(?:TL\s*;\s*DR|TLDR)(?:\s*\*\*)?\s*:\s*/i, '').trim();
   if (!body) return null;
 
+  // Speak the ENTIRE marker body — the fence is the agent-authored summary,
+  // so every sentence in it is spoken (no two-sentence cap here). The
+  // two-sentence limit only applies to the legacy TLDR / prose fallbacks.
   const sentences = splitSpeechSentences(body)
     .map((s) => scrubDenseSpeechTokens(s))
     .map((s) => s.replace(/^\W+/, '').trim())
     .filter((s) => s && s.length > 1)
-    .slice(0, 2)
     .map((s) => ensureSpokenSentence(s))
     .filter(Boolean);
   if (!sentences.length) return null;
@@ -2180,6 +2411,11 @@ function renderMessages(messages) {
       log.setAttribute('data-thinking-ack', String(msg.created_at || ''));
       body.appendChild(label);
       body.appendChild(log);
+    } else if (msg.role === 'status' && msg.kind === 'form-request') {
+      body.innerHTML = '';
+      body.appendChild(buildFormRequestCard(msg, submittedFormIds(messages)));
+    } else if (msg.role === 'status' && msg.kind === 'form-submitted') {
+      body.innerHTML = renderMarkdown('✅ Form submitted — values were delivered to the requesting agent without entering the chat.');
     } else {
       body.innerHTML = renderMarkdown(msg.content);
     }

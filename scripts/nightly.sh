@@ -96,6 +96,10 @@ fi
 # --- 1. route -------------------------------------------------------------
 "$HUB/scripts/router.sh"
 
+# --- 1b. sweep expired DGen form responses (sensitive; never persist) ------
+node "$HUB/scripts/bizagent-control-plane.js" form-sweep --hub "$HUB" 2>/dev/null \
+  || echo "nightly: form sweep failed (continuing)"
+
 # --- 2. archive stale inbox messages -------------------------------------
 DAYS="$(python3 -c '
 import json

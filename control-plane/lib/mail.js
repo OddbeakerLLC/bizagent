@@ -3,6 +3,7 @@ const path = require('path');
 const { agentsFromRegistry, appDir, ensureDir, loadRegistry } = require('./config');
 const {
   getStampConversationId,
+  appendMessage,
   postAgentCompletionNotice,
   recordPendingAgentWork,
   recordUserInboxDelivery,
@@ -10,6 +11,7 @@ const {
   userInbox,
 } = require('./conversations');
 const { logEvent, appendLog } = require('./log');
+const { newFormId, parseFormRequestMessage } = require('./forms');
 
 function frontmatterValue(text, key) {
   const match = text.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, 'm'));
@@ -199,6 +201,47 @@ function isValidSingleRecipient(to) {
   return typeof to === 'string' && /^[A-Za-z0-9_-]+$/.test(to);
 }
 
+/**
+ * DGen form-request outbox messages are never delivered as mail. The markup is
+ * parsed server-side and surfaced as a modal card in the originating
+ * conversation; the outbox file is consumed. Returns true when handled.
+ */
+function handleFormRequestOutbox(hub, { file, text, from }) {
+  let form;
+  try {
+    form = parseFormRequestMessage(text);
+  } catch (err) {
+    quarantineOutboxFile(hub, file, `form-request-parse:${err.message}`);
+    logEvent(hub, { event: 'form_request_error', from: from || '', error: err.message });
+    return true;
+  }
+  const cid = getStampConversationId(hub, from && from !== 'hub' ? from : undefined);
+  if (!cid) return false; // no originating conversation — fall through to normal routing
+  const formId = newFormId();
+  const title = form.title || 'Information request';
+  try {
+    appendMessage(hub, cid, 'status', `Information requested by ${from || 'hub'}: ${title}`, {
+      kind: 'form-request',
+      form_id: formId,
+      agent: from || 'hub',
+      form,
+    });
+  } catch (err) {
+    quarantineOutboxFile(hub, file, `form-request-append:${err.message}`);
+    logEvent(hub, { event: 'form_request_error', from: from || '', error: err.message });
+    return true;
+  }
+  fs.unlinkSync(file);
+  logEvent(hub, {
+    event: 'form_request',
+    form_id: formId,
+    agent: from || 'hub',
+    conversation_id: cid,
+    title,
+  });
+  return true;
+}
+
 function routeOutboxes(hub) {
   let delivered = 0;
   let warnings = 0;
@@ -232,6 +275,17 @@ function routeOutboxes(hub) {
         quarantined += 1;
         warnings += 1;
         continue;
+      }
+
+      // DGen form requests: parse server-side, surface as a conversation card,
+      // consume the outbox file. Never delivered as mail (chat bypass).
+      if (frontmatterValue(text, 'kind') === 'form-request') {
+        if (handleFormRequestOutbox(hub, { file, text, from })) {
+          delivered += 1;
+          continue;
+        }
+        // No originating conversation — fall through to normal routing so the
+        // hub turn (or user inbox) can recover the request.
       }
 
       if (to === 'user' && !canRouteToUser(hub, outbox)) {
@@ -427,12 +481,14 @@ function writeOutboxMessage(hub, opts = {}) {
   }
 
   const date = opts.date || new Date().toISOString().slice(0, 10);
+  const kind = String(opts.kind || '').trim();
   const header = [
     '---',
     `from: ${from}`,
     `to: ${to}`,
     `date: ${date}`,
     `subject: ${subject}`,
+    kind ? `kind: ${kind}` : '',
     conversationId ? `conversation_id: ${conversationId}` : '',
     '---',
   ].filter((line) => line !== '').join('\n');

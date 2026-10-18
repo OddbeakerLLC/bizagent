@@ -18,7 +18,9 @@ function usage() {
     '  auth-init: --username USER --password PASS',
     '  append-hub-turn: --conversation ID --content TEXT|--content-file PATH',
     '  write-message: --to SLUG --subject TEXT [--from SLUG] [--conversation ID]',
-    '                 [--content TEXT|--content-file PATH]  (body also via stdin)',
+    '                 [--kind KIND] [--content TEXT|--content-file PATH]  (body also via stdin)',
+    '  form-answer:   FORM_ID — print a submitted form response (JSON) and delete it',
+    '  form-sweep:    delete unclaimed form responses older than 24h',
     '  enterprise-init: requires settings.enterprise.enabled; delegates to package',
   ].join('\n'));
   process.exit(2);
@@ -37,6 +39,11 @@ function parseArgs(argv) {
     else if (arg === '--to') opts.to = argv[++i];
     else if (arg === '--from') opts.from = argv[++i];
     else if (arg === '--subject') opts.subject = argv[++i];
+    else if (arg === '--kind') opts.kind = argv[++i];
+    else if (!arg.startsWith('--')) {
+      if (!Array.isArray(opts.positional)) opts.positional = [];
+      opts.positional.push(arg);
+    }
     else if (arg === '--user-id' || arg === '--user_id') opts.userId = argv[++i];
     else usage();
   }
@@ -110,8 +117,33 @@ async function main() {
       body,
       conversationId: opts.conversation || '',
       userId: opts.userId || '',
+      kind: opts.kind || '',
     });
     console.log(`wrote ${result.file}`);
+    return null;
+  }
+  if (opts.command === 'form-sweep') {
+    const { sweepExpiredFormResponses } = require('../control-plane/lib/forms');
+    const removed = sweepExpiredFormResponses(config.hub);
+    console.log(`form-sweep: removed ${removed} expired response(s)`);
+    return null;
+  }
+  if (opts.command === 'form-answer') {
+    const formId = (opts.positional && opts.positional[0]) || '';
+    if (!formId) usage();
+    const { claimFormResponse } = require('../control-plane/lib/forms');
+    let data;
+    try {
+      data = claimFormResponse(config.hub, formId);
+    } catch (err) {
+      console.error(`form-answer: ${err.message}`);
+      process.exit(1);
+    }
+    if (!data) {
+      console.error(`form-answer: no response for form ${formId} (already claimed or expired)`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify(data, null, 2));
     return null;
   }
   if (opts.command === 'auth-init') {

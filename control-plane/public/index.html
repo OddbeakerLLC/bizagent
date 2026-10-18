@@ -101,6 +101,24 @@
     </div>
   </div>
 
+  <div id="formModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="formModalTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="formModalTitle">Information request</h3>
+        <button id="formModalClose" type="button" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="formModalDesc" class="form-modal-desc" hidden></p>
+        <div id="formModalFields"></div>
+        <p id="formModalStatus" class="modal-status auth-status" hidden></p>
+      </div>
+      <div class="modal-footer">
+        <button id="formModalCancel" type="button" class="btn-secondary">Cancel</button>
+        <button id="formModalSubmit" type="button">Submit</button>
+      </div>
+    </div>
+  </div>
+
   <div id="companyModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="companyModalTitle">
     <div class="modal-content modal-content--wide">
       <div class="modal-header">

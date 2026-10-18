@@ -12,6 +12,15 @@ Process every message in {{inbox}} and ignore archive/. Do the work, write repli
 
 Mail with `kind: defer-wake` is a scheduled self/hub reminder — do the checklist in the body, archive it, and reschedule with `scripts/defer.sh` + the same `--once-key` only if still waiting. Prefer `scripts/defer.sh` over sleeping in-process or inventing crons.
 
+**Sensitive input (passwords, API keys, tokens, SSH secrets):** never ask for these in chat or mail — request a DGen form instead, so the values bypass chat history entirely:
+
+```bash
+scripts/write-message.sh --to hub --from {{PRODUCT_SLUG}} --kind form-request \
+  --subject "form-request: <short title>" --body-file /tmp/form.md
+```
+
+`/tmp/form.md` holds prose plus a ` ```dgen ` fenced block: rows `<{...}>`; first row = title; fields `[T:id,maxlen=default]` text, `[P:id,maxlen]` masked password, `[A:id,rows=default]` textarea, `[N:id,min,max=default]` number, `[X:id]` checkbox, `[D:id,v|Label,...=default]` dropdown, `[L:Label=url]` link; last row = buttons `[B:cancel,Cancel][B:submit,Submit]`. The console renders it as a modal for the operator. The answer arrives as a `form-response: <id>` mail pointing at `.bizagent/forms/<id>.json` — read it, use the values, then **delete the file immediately** (`scripts/form-answer.sh <id>` prints and deletes in one step). Never paste those values into chat, mail, journals, or logs; unclaimed files are auto-deleted after 24 hours.
+
 Exactly one outbox file per logical completion event: never emit two identical (or near-identical) "done / pushed / finished" mails for the same work. If you already wrote the agent→hub completion for this task, do not write it again on re-entry.
 
 Optional `hire_helper` (research/search/summarize/test-extract) is a cheap in-turn worker that returns text you must review. Helpers cannot write, mail, or hire. If hire fails or the pool is full, do the work yourself. Do not hire for architecture, ownership, commits, or operator-facing replies.

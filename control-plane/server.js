@@ -127,6 +127,13 @@ const {
   MAX_UPLOAD_BYTES: UPLOAD_MAX_BYTES,
 } = require("./lib/uploads");
 const {
+  assertAgentSlug,
+  assertFormId,
+  sanitizeFields,
+  saveFormResponse,
+  sweepExpiredFormResponses,
+} = require("./lib/forms");
+const {
   conversationIdsFromSafetyResults,
   setOnConversationMutated,
 } = require("./lib/hub-turn-safety");
@@ -137,7 +144,7 @@ const {
   ttsFetchAudio,
   rewriteAudioUrl,
 } = require("./lib/tts-proxy");
-const { agentMailStatus, routeOutboxes } = require("./lib/mail");
+const { agentMailStatus, routeOutboxes, writeOutboxMessage } = require("./lib/mail");
 const enterpriseClient = require("./lib/enterprise-server-client");
 const { getProfile, setProfile } = require("./lib/profile");
 const health = require("./lib/health");
@@ -1606,6 +1613,73 @@ async function handleApi(config, req, res) {
       const status = /too large|not allowed|invalid|empty|escape|missing/i.test(msg)
         ? 400
         : 500;
+      return send(res, status, { error: msg });
+    }
+  }
+
+  // --- DGen form responses (sensitive input; bypasses chat history) ---
+  // Values are written once to .bizagent/forms/<id>.json (0600) and deleted on
+  // claim / TTL sweep. Never logged, never appended to the conversation.
+  if (url.pathname === "/api/forms/submit" && req.method === "POST") {
+    const start = Date.now();
+    try {
+      const body = await parseBody(req);
+      const formId = assertFormId(body.form_id);
+      const agent = assertAgentSlug(config.hub, body.agent);
+      const fields = sanitizeFields(body.fields);
+      const button = String(body.button || "submit").slice(0, 64);
+      saveFormResponse(config.hub, { formId, agent, button, fields });
+      // Secret-free pointer mail — also wakes the requesting agent via dispatch.
+      writeOutboxMessage(config.hub, {
+        from: "hub",
+        to: agent,
+        subject: `form-response: ${formId}`,
+        body: [
+          `The operator submitted the form you requested (form \`${formId}\`).`,
+          "",
+          `Response file: \`.bizagent/forms/${formId}.json\``,
+          "Shape: `{ form_id, agent, button, fields }`",
+          "",
+          "Handle it now:",
+          `1. Read the file and use the values.`,
+          `2. Delete it immediately afterwards: \`rm .bizagent/forms/${formId}.json\``,
+          `   (or print-and-delete in one step: \`scripts/form-answer.sh ${formId}\`)`,
+          "3. Never paste these values into chat, mail, journals, or logs.",
+          "",
+          "Unclaimed response files are auto-deleted after 24 hours.",
+        ].join("\n"),
+      });
+      // Neutral chat marker (no values) so the UI marks the card submitted.
+      let conv = null;
+      const cid = String(body.conversation_id || "").trim();
+      if (cid) {
+        try {
+          conv = appendMessage(config.hub, cid, "status", "Form submitted.", {
+            kind: "form-submitted",
+            form_id: formId,
+          });
+        } catch (_err) {
+          /* conversation gone — marker is best-effort */
+        }
+      }
+      sweepExpiredFormResponses(config.hub);
+      logEvent(config.hub, {
+        event: "form_response",
+        form_id: formId,
+        agent,
+        button,
+        conversation_id: cid,
+        duration_ms: Math.round((Date.now() - start) * 100) / 100,
+      });
+      didChangeState();
+      if (conv && cid) {
+        try { broadcastConv(cid, conv); } catch (_) {}
+        try { wsBroadcastConv(cid, conv); } catch (_) {}
+      }
+      return send(res, 200, { ok: true, form_id: formId });
+    } catch (err) {
+      const msg = err.message || "form submit failed";
+      const status = /invalid|unknown|too many|too large|empty|must be/i.test(msg) ? 400 : 500;
       return send(res, status, { error: msg });
     }
   }
