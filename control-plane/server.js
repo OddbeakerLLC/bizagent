@@ -1,5 +1,7 @@
 const fs = require("fs");
 const http = require("http");
+const https = require("https");
+const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
@@ -1962,9 +1964,73 @@ function runTick(config) {
   }
 }
 
+// --- Optional TLS (opt-in, self-signed fallback) ---------------------------
+// The console gets a secure context (PWA install, clipboard, service worker)
+// when served over https. TLS is enabled only when configured:
+//   registry settings.control_plane.tls.{enabled,key,cert} or
+//   env BIZAGENT_TLS_KEY / BIZAGENT_TLS_CERT.
+// When enabled but the key/cert files are missing, a self-signed certificate
+// (CN=<hostname>, ~10y) is generated on first start into <hub>/.bizagent/tls/
+// (key chmod 0600). With no TLS config the server stays plain HTTP.
+function tlsSettings(config) {
+  const cp =
+    (config.registry && config.registry.settings && config.registry.settings.control_plane) || {};
+  return cp.tls || {};
+}
+
+function tlsEnabled(config) {
+  const tls = tlsSettings(config);
+  return Boolean(
+    process.env.BIZAGENT_TLS_KEY ||
+      process.env.BIZAGENT_TLS_CERT ||
+      tls.enabled ||
+      tls.key ||
+      tls.cert,
+  );
+}
+
+function generateSelfSignedCert(dir, hostname) {
+  fs.mkdirSync(dir, { recursive: true });
+  const keyPath = path.join(dir, "tls.key");
+  const certPath = path.join(dir, "tls.crt");
+  if (fs.existsSync(keyPath) && fs.existsSync(certPath)) return { keyPath, certPath };
+  execFileSync(
+    "openssl",
+    [
+      "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+      "-keyout", keyPath,
+      "-out", certPath,
+      "-days", "3650",
+      "-subj", `/CN=${hostname}`,
+    ],
+    { stdio: "ignore" },
+  );
+  try { fs.chmodSync(keyPath, 0o600); } catch (_err) { /* best effort */ }
+  return { keyPath, certPath };
+}
+
+function resolveTlsOptions(config) {
+  if (!tlsEnabled(config)) return null;
+  const tls = tlsSettings(config);
+  const keyPath = process.env.BIZAGENT_TLS_KEY || tls.key;
+  const certPath = process.env.BIZAGENT_TLS_CERT || tls.cert;
+  if (keyPath && certPath && fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+    return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
+  }
+  // TLS enabled but cert material missing/unreadable → self-signed on first start.
+  const generated = generateSelfSignedCert(
+    path.join(config.hub, ".bizagent", "tls"),
+    os.hostname(),
+  );
+  return {
+    key: fs.readFileSync(generated.keyPath),
+    cert: fs.readFileSync(generated.certPath),
+  };
+}
+
 function createServer(config) {
-  const server = http.createServer((req, res) => {
-    if (req.url.startsWith("/api/")) {
+  const tlsOptions = resolveTlsOptions(config);
+  const server = (tlsOptions ? https : http).createServer(tlsOptions || {}, (req, res) => {    if (req.url.startsWith("/api/")) {
       handleApi(config, req, res).catch((err) =>
         send(res, 500, { error: err.message }),
       );
@@ -1972,6 +2038,8 @@ function createServer(config) {
     }
     if (!serveStatic(req, res)) send(res, 404, "not found");
   });
+  // Exposed for the startup log in start() (scheme selection).
+  server.tlsActive = Boolean(tlsOptions);
 
   // Attach WebSocket feeds (preferred subscribe model) if 'ws' is available.
   // Auth: same bizagent_session cookie as REST. OSS: full visibility for the sole session.
@@ -2138,19 +2206,21 @@ function start(hubInput) {
   healthTick();
   setInterval(healthTick, 45 * 1000);
   server.listen(config.port, config.host, () => {
-    const bindUrl = `http://${config.host}:${config.port}`;
-    const openUrl = config.host === '0.0.0.0' ? `http://localhost:${config.port}` : bindUrl;
+    const scheme = server.tlsActive ? "https" : "http";
+    const bindUrl = `${scheme}://${config.host}:${config.port}`;
+    const openUrl = config.host === '0.0.0.0' ? `${scheme}://localhost:${config.port}` : bindUrl;
     const logLine = openUrl !== bindUrl
       ? `bizagent-control-plane listening on ${config.host}:${config.port} poll=${config.pollSeconds}s (open ${openUrl})`
       : `bizagent-control-plane listening on ${bindUrl} poll=${config.pollSeconds}s`;
-    
+
     logEvent(config.hub, {
       event: 'control_plane_start',
       status: 'ok',
       host: config.host,
       port: config.port,
       poll_seconds: config.pollSeconds,
-      bind_url: bindUrl
+      bind_url: bindUrl,
+      tls: Boolean(server.tlsActive)
     });
     console.log(`${new Date().toISOString()} ${logLine}`);
   });
