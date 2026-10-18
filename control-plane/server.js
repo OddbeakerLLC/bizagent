@@ -237,7 +237,12 @@ function serveStatic(req, res) {
     ".html": "text/html",
     ".css": "text/css",
     ".js": "application/javascript",
+    ".json": "application/json",
+    ".png": "image/png",
   };
+  let contentType = types[ext] || "application/octet-stream";
+  if (file.endsWith("manifest.json")) contentType = "application/manifest+json";
+  if (file.endsWith("sw.js")) contentType = "text/javascript";
   // HTML entrypoints: no-store so cache-bust query on css/js is always seen.
   // Assets: short no-cache revalidate (ETag-less stream; browsers revalidate).
   const cacheControl =
@@ -245,7 +250,7 @@ function serveStatic(req, res) {
       ? "no-store"
       : "no-cache, must-revalidate";
   res.writeHead(200, {
-    "Content-Type": types[ext] || "application/octet-stream",
+    "Content-Type": contentType,
     "Cache-Control": cacheControl,
   });
   fs.createReadStream(file).pipe(res);
