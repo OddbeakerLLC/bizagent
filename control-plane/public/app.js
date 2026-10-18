@@ -2413,7 +2413,7 @@ function renderMessages(messages) {
       body.appendChild(log);
     } else if (msg.role === 'status' && msg.kind === 'form-request') {
       body.innerHTML = '';
-      body.appendChild(buildFormRequestCard(msg, submittedFormIds(messages)));
+      body.appendChild(buildFormRequestCard(msg, submittedFormIds(messages).has(msg.form_id)));
     } else if (msg.role === 'status' && msg.kind === 'form-submitted') {
       body.innerHTML = renderMarkdown('✅ Form submitted — values were delivered to the requesting agent without entering the chat.');
     } else {
