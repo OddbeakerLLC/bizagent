@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# pre-push guard: the public GitHub remote (OddbeakerLLC/bizagent) must never
+# receive operational data (registry, conversations, journals, company/,
+# knowledge-stack, prompts/turns). Local-instance tracking for the private
+# origin is unaffected.
+#
+# Activate with:  git config core.hooksPath hooks
+set -u
+
+remote_name=${1:-}
+remote_url=${2:-}
+
+case "$remote_url" in
+  *github.com/OddbeakerLLC/bizagent*) ;;
+  *) exit 0 ;;  # only guard the public repo
+esac
+
+# Paths that must never appear in any commit pushed to the public repo.
+FORBIDDEN='^(registry\.json|registry\.json\.bak|backburner\.json|HEALTH-ALERT\.md|journal/|\.agent/journal/|company/|knowledge-stack/|\.bizagent/(conversations/|prompts/|hub-session\.md|profile\.json))'
+ZERO=0000000000000000000000000000000000000000
+
+offenders=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$ZERO" ] && continue   # deletion, nothing to check
+  if [ "$remote_sha" = "$ZERO" ]; then
+    range=$(git rev-list "$local_sha" --not --remotes)
+  else
+    range=$(git rev-list "$remote_sha..$local_sha")
+  fi
+  [ -z "$range" ] && continue
+  for commit in $range; do
+    files=$(git ls-tree -r --name-only "$commit" || true)
+    [ -z "$files" ] && continue
+    hits=$(
+      printf '%s\n' "$files" | grep -E "$FORBIDDEN"
+      printf '%s\n' "$files" | grep '^\.bizagent/' | grep -v '^\.bizagent/env\.example$'
+    )
+    [ -n "$hits" ] && offenders="$offenders$commit
+$hits
+"
+  done
+done
+
+if [ -n "$offenders" ]; then
+  echo "pre-push guard: REFUSING push to public repo ($remote_url)." >&2
+  echo "Operational data found in outgoing history:" >&2
+  echo "$offenders" >&2
+  echo "Push a filtered branch instead (see sitemap.md / journal 2026-10-19)." >&2
+  exit 1
+fi
+
+exit 0
