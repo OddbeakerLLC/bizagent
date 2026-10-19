@@ -23,7 +23,9 @@ offenders=""
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ "$local_sha" = "$ZERO" ] && continue   # deletion, nothing to check
   if [ "$remote_sha" = "$ZERO" ]; then
-    range=$(git rev-list "$local_sha" --not --remotes)
+    # New branch: check everything not already known to THIS remote.
+    # (Not --remotes: commits known only to the private origin must be checked.)
+    range=$(git rev-list "$local_sha" --not --remotes="$remote_name")
   else
     range=$(git rev-list "$remote_sha..$local_sha")
   fi
