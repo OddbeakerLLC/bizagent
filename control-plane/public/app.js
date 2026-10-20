@@ -84,6 +84,7 @@ function bindNavDrawer() {
       const target = event.target;
       if (!target || !target.closest) return;
       if (target.closest('#ttsToggle')) return;
+      if (target.closest('#concurrencyToggle')) return;
       if (target.closest('a.nav-drawer-link, button')) setNavDrawerOpen(false);
     });
   }
@@ -110,6 +111,9 @@ function setAuthenticated(isAuthenticated, message) {
   if (thinkingLogsBtn) thinkingLogsBtn.hidden = !isAuthenticated;
   const ttsBtn = document.getElementById('ttsToggle');
   if (ttsBtn) ttsBtn.hidden = !isAuthenticated;
+  const concurrencyBtn = document.getElementById('concurrencyToggle');
+  if (concurrencyBtn) concurrencyBtn.hidden = !isAuthenticated;
+  if (isAuthenticated) refreshConcurrencyToggle();
   if (!isAuthenticated) {
     document.getElementById('namePanel').hidden = true;
     hideCompanyModal();
@@ -2334,6 +2338,74 @@ function refreshTtsServerProbe() {
   probeTtsServer(true).then(() => updateTtsToggleUi()).catch(() => {});
 }
 
+let allowConcurrency = true;
+let concurrencyEnvForcedOff = false;
+let concurrencyBusy = false;
+
+function updateConcurrencyToggleUi() {
+  const btn = document.getElementById('concurrencyToggle');
+  if (!btn || !btn.classList) return;
+  btn.classList.toggle('active', allowConcurrency);
+  const label = btn.querySelector('.nav-drawer-link-label');
+  if (label) label.textContent = allowConcurrency ? 'Allow concurrency ✓' : 'Allow concurrency';
+  if (typeof btn.setAttribute === 'function') {
+    btn.setAttribute('aria-pressed', allowConcurrency ? 'true' : 'false');
+    btn.setAttribute('aria-checked', allowConcurrency ? 'true' : 'false');
+  }
+  if (concurrencyEnvForcedOff) {
+    btn.title = 'Concurrency forced off (BIZAGENT_ALLOW_CONCURRENCY=0)';
+    btn.classList.add('concurrency-forced-off');
+  } else {
+    btn.classList.remove('concurrency-forced-off');
+    btn.title = allowConcurrency
+      ? 'Allow concurrency ON (multiple agents may run at once)'
+      : 'Allow concurrency OFF (only one agent at a time)';
+  }
+}
+
+async function refreshConcurrencyToggle() {
+  const btn = document.getElementById('concurrencyToggle');
+  if (!btn) return;
+  try {
+    const data = await api('/api/settings/dispatch');
+    allowConcurrency = data.allow_concurrency !== false;
+    concurrencyEnvForcedOff = !!data.env_forced_off;
+    updateConcurrencyToggleUi();
+  } catch (_) {
+    updateConcurrencyToggleUi();
+  }
+}
+
+async function setAllowConcurrency(on) {
+  if (concurrencyBusy) return;
+  concurrencyBusy = true;
+  const next = !!on;
+  try {
+    const data = await api('/api/settings/dispatch', {
+      method: 'POST',
+      body: JSON.stringify({ allow_concurrency: next }),
+    });
+    allowConcurrency = data.allow_concurrency !== false;
+    concurrencyEnvForcedOff = !!data.env_forced_off;
+    updateConcurrencyToggleUi();
+  } catch (_) {
+    updateConcurrencyToggleUi();
+  } finally {
+    concurrencyBusy = false;
+  }
+}
+
+function bindConcurrencyToggle() {
+  updateConcurrencyToggleUi();
+  const btn = document.getElementById('concurrencyToggle');
+  if (!btn || btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', (event) => {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+    setAllowConcurrency(!allowConcurrency);
+  });
+}
+
 function bindTtsToggle() {
   ttsEnabled = loadTtsEnabled();
   updateTtsToggleUi();
@@ -3188,6 +3260,7 @@ bindLibraryPage();
 bindThinkingLogsPage();
 bindNavDrawer();
 bindTtsToggle();
+bindConcurrencyToggle();
 bindComposerAttachments();
 bindComposerPaste();
 document.getElementById('newConversation').addEventListener('click', async () => {
