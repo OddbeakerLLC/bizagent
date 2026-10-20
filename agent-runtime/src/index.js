@@ -471,7 +471,16 @@ if (require.main === module) {
         console.error(line);
         // Operator-facing one-liner (also lands in dispatch-*.stderr for CP alerts).
         const lower = String(body).toLowerCase();
-        if (
+        const code = err && err.code;
+        if (code === 'CIRCUIT_OPEN') {
+          console.error(
+            `FATAL: ${body}`,
+          );
+        } else if (code === 'RETRIES_EXHAUSTED') {
+          console.error(
+            'FATAL: LLM API request failed after all retries. Check provider status and network connectivity.',
+          );
+        } else if (
           /used all available credits|spending limit|purchase more credits|insufficient.?credit|payment required|usage balance exhausted/.test(
             lower,
           )
