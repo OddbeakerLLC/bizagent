@@ -2,168 +2,12 @@
 
 const OpenAI = require('openai');
 
-// ---------------------------------------------------------------------------
-// Circuit breaker state (per baseURL)
-// ---------------------------------------------------------------------------
-const circuitState = new Map(); // baseURL -> { failures, openedAt, halfOpen }
-
-function circuitBreakerConfig() {
-  return {
-    threshold: Math.max(1, Number(process.env.BIZAGENT_AGENT_CIRCUIT_THRESHOLD || 3)),
-    cooldownMs: Math.max(1000, Number(process.env.BIZAGENT_AGENT_CIRCUIT_COOLDOWN_MS || 30000)),
-  };
-}
-
-function getCircuitKey(client) {
-  return client && client.baseURL ? client.baseURL : '__default__';
-}
-
-/**
- * Check whether the circuit is open for a given client.
- * Returns true (open — fail fast) or false (closed/half-open — allow).
- * Auto-transitions half-open → closed on success via recordSuccess.
- */
-function isCircuitOpen(client) {
-  const key = getCircuitKey(client);
-  const state = circuitState.get(key);
-  if (!state) return false;
-  const { threshold, cooldownMs } = circuitBreakerConfig();
-  if (state.failures < threshold) return false;
-  // Circuit is open — check if cooldown has elapsed
-  if (Date.now() - state.openedAt >= cooldownMs) {
-    // Transition to half-open: allow one probe request
-    state.halfOpen = true;
-    return false;
-  }
-  return true;
-}
-
-function recordFailure(client) {
-  const key = getCircuitKey(client);
-  const { threshold } = circuitBreakerConfig();
-  let state = circuitState.get(key);
-  if (!state) {
-    state = { failures: 0, openedAt: 0, halfOpen: false };
-    circuitState.set(key, state);
-  }
-  state.failures += 1;
-  if (state.failures >= threshold) {
-    state.openedAt = Date.now();
-    state.halfOpen = false;
-  }
-}
-
-function recordSuccess(client) {
-  const key = getCircuitKey(client);
-  circuitState.delete(key); // full reset on success
-}
-
-// ---------------------------------------------------------------------------
-// Transient error classification
-// ---------------------------------------------------------------------------
-
-/**
- * Returns true if the error is transient and worth retrying.
- * Transient: 429 (rate limit), 5xx (server errors), network/timeout errors.
- */
-function isTransientError(err) {
-  if (!err) return false;
-  const status =
-    err.status ||
-    err.statusCode ||
-    (err.response && err.response.status) ||
-    0;
-  if (status === 429) return true;
-  if (status >= 500 && status < 600) return true;
-  const msg = String(err.message || err.code || '');
-  return /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ECONNRESET|fetch failed|socket hang up|network|eai_again|request timed out/i.test(
-    msg,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Retry with exponential backoff + jitter
-// ---------------------------------------------------------------------------
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Compute delay for a given attempt (0-based).
- * Exponential backoff: baseDelay * 2^attempt + random jitter up to 25%.
- */
-function backoffDelay(attempt, baseDelayMs) {
-  const exp = baseDelayMs * Math.pow(2, attempt);
-  const jitter = exp * 0.25 * Math.random();
-  return Math.round(exp + jitter);
-}
-
-/**
- * Wrap an async function with retry logic.
- *
- * @param {Function} fn - async function to retry
- * @param {object} [opts]
- * @param {number} [opts.maxRetries=3] - max retry attempts (0 = no retry)
- * @param {number} [opts.baseDelayMs=1000] - base backoff delay in ms
- * @param {Function} [opts.shouldRetry] - optional custom classifier, defaults to isTransientError
- * @param {Function} [opts.onRetry] - optional callback (attempt, error, delayMs)
- * @returns {Promise<any>} - result of fn
- */
-async function retryWithBackoff(fn, opts = {}) {
-  const maxRetries = Math.max(
-    0,
-    Number(opts.maxRetries != null ? opts.maxRetries : process.env.BIZAGENT_AGENT_MAX_RETRIES || 3),
-  );
-  const baseDelayMs = Math.max(
-    100,
-    Number(opts.baseDelayMs != null ? opts.baseDelayMs : process.env.BIZAGENT_AGENT_RETRY_BASE_MS || 1000),
-  );
-  const shouldRetry = opts.shouldRetry || isTransientError;
-  const onRetry = opts.onRetry || null;
-
-  let lastError;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const result = await fn();
-      return result;
-    } catch (err) {
-      lastError = err;
-      if (attempt < maxRetries && shouldRetry(err)) {
-        const delay = backoffDelay(attempt, baseDelayMs);
-        if (onRetry) {
-          try {
-            onRetry(attempt, err, delay);
-          } catch (_) {
-            /* ignore callback errors */
-          }
-        }
-        console.error(
-          `[retry] attempt ${attempt + 1}/${maxRetries} failed: ${err.status || ''} ${(err.error && err.error.message) || err.message || err}. Retrying in ${delay}ms...`,
-        );
-        await sleep(delay);
-      } else {
-        throw err;
-      }
-    }
-  }
-  throw lastError; // unreachable but satisfies static analysis
-}
-
-// ---------------------------------------------------------------------------
-// Client creation
-// ---------------------------------------------------------------------------
-
 function createClient({ apiKey, baseURL }) {
   return new OpenAI({
     apiKey,
     baseURL,
   });
 }
-
-// ---------------------------------------------------------------------------
-// Message sanitization
-// ---------------------------------------------------------------------------
 
 /**
  * Normalize one message for the wire.
@@ -256,10 +100,6 @@ function sanitizeMessages(messages) {
   return messages.map(sanitizeMessage).filter(Boolean);
 }
 
-// ---------------------------------------------------------------------------
-// Chat completion with retry + circuit breaker
-// ---------------------------------------------------------------------------
-
 /**
  * @param {import('openai').OpenAI} client
  * @param {string} model
@@ -285,60 +125,7 @@ async function chatCompletion(client, model, messages, tools, opts = {}) {
   const maxTokens = Number(process.env.BIZAGENT_AGENT_MAX_TOKENS || 0);
   if (maxTokens > 0) body.max_tokens = maxTokens;
 
-  // Circuit breaker: fast-fail if the provider is down
-  if (isCircuitOpen(client)) {
-    const key = getCircuitKey(client);
-    const state = circuitState.get(key);
-    const err = new Error(
-      `LLM API circuit breaker open for ${key}: ${state ? state.failures : '?'} consecutive failures. ` +
-        `Cooldown active. Set BIZAGENT_AGENT_CIRCUIT_COOLDOWN_MS to adjust (default 30000ms).`,
-    );
-    err.status = 503;
-    err.code = 'CIRCUIT_OPEN';
-    throw err;
-  }
-
-  const doRequest = () => client.chat.completions.create(body);
-
-  try {
-    const result = await retryWithBackoff(doRequest, {
-      onRetry: (_attempt, _err, _delay) => {
-        // Each retry attempt is a failure for circuit breaker purposes
-        recordFailure(client);
-      },
-    });
-    // Success resets the circuit breaker
-    recordSuccess(client);
-    return result;
-  } catch (err) {
-    // Record the final failure for circuit breaker
-    recordFailure(client);
-    // Enhance the error message for graceful degradation
-    if (isTransientError(err)) {
-      const enhanced = new Error(
-        `LLM API request failed after retries: ${err.status || ''} ${(err.error && err.error.message) || err.message || err}. ` +
-          `All retries exhausted. Check provider status and network connectivity.`,
-      );
-      enhanced.status = err.status || 0;
-      enhanced.code = 'RETRIES_EXHAUSTED';
-      enhanced.originalError = err;
-      throw enhanced;
-    }
-    // Non-transient errors pass through as-is
-    throw err;
-  }
+  return client.chat.completions.create(body);
 }
 
-module.exports = {
-  createClient,
-  chatCompletion,
-  sanitizeMessages,
-  // Exported for testing
-  isTransientError,
-  retryWithBackoff,
-  backoffDelay,
-  isCircuitOpen,
-  recordFailure,
-  recordSuccess,
-  circuitState,
-};
+module.exports = { createClient, chatCompletion, sanitizeMessages };

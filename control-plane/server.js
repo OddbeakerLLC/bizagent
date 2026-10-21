@@ -59,15 +59,12 @@ function wsBroadcastConv(id, conv) {
 }
 const {
   agentsFromRegistry,
-  envForcesConcurrencyOff,
   loadHubEnv,
   loadRegistry,
   loadRuntimeConfig,
   readJson,
   refreshRuntimeConfig,
-  resolveAllowConcurrency,
   updateAgentConfig,
-  writeRegistry,
 } = require("./lib/config");
 const {
   createSession,
@@ -1062,35 +1059,6 @@ async function handleApi(config, req, res) {
     const body = await parseBody(req);
     clearCrossChatAlerts(config.hub, body.conversationId);
     return send(res, 200, { ok: true });
-  }
-
-  if (url.pathname === "/api/settings/dispatch" && req.method === "GET") {
-    const dispatch =
-      (config.registry && config.registry.settings && config.registry.settings.dispatch) || {};
-    return send(res, 200, {
-      allow_concurrency: resolveAllowConcurrency(dispatch),
-      env_forced_off: envForcesConcurrencyOff(),
-    });
-  }
-
-  if (url.pathname === "/api/settings/dispatch" && req.method === "POST") {
-    const body = await parseBody(req);
-    if (typeof body.allow_concurrency !== "boolean") {
-      return send(res, 400, { error: "allow_concurrency must be a boolean" });
-    }
-    const registry = loadRegistry(config.hub);
-    if (!registry.settings || typeof registry.settings !== "object") registry.settings = {};
-    if (!registry.settings.dispatch || typeof registry.settings.dispatch !== "object") {
-      registry.settings.dispatch = {};
-    }
-    registry.settings.dispatch.allow_concurrency = body.allow_concurrency;
-    writeRegistry(config.hub, registry);
-    refreshRuntimeConfig(config);
-    const dispatch = (config.registry.settings && config.registry.settings.dispatch) || {};
-    return send(res, 200, {
-      allow_concurrency: resolveAllowConcurrency(dispatch),
-      env_forced_off: envForcesConcurrencyOff(),
-    });
   }
 
   if (url.pathname === "/api/profile" && req.method === "GET") {

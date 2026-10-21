@@ -97,7 +97,7 @@
   },
   "ollama": {
     "label": "Ollama (Jobe)",
-    "baseURL": "http://192.168.40.52:11434/v1",
+    "baseURL": "http://<ollama-host>:11434/v1",
     "keyEnv": "OLLAMA_API_KEY",
     "optionalKey": true,
     "models": [

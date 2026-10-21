@@ -150,13 +150,9 @@ The design is deliberately minimal:
   Defaults: `hub_slots=1`, `agent_slots` = `max_concurrency` (default **8**).
   Agents over the product cap wait for the next tick. Per-agent locks still
   ensure at most one live instance per slug.
-- **Allow concurrency** (nav drawer, default on): `settings.dispatch.allow_concurrency`
-  omit/true = concurrent turns as above. `false` serializes so at most one live
-  turn runs at a time (hub or product agent). Env `BIZAGENT_ALLOW_CONCURRENCY=0`
-  forces off. Console: GET/POST `/api/settings/dispatch` `{ allow_concurrency }`.
 
 Lease and caps are configurable via env (`BIZAGENT_*`) or
-`settings.dispatch.{poll_seconds,max_concurrency,hub_slots,agent_slots,allow_concurrency,lock_lease_secs}`
+`settings.dispatch.{poll_seconds,max_concurrency,hub_slots,agent_slots,lock_lease_secs}`
 in `registry.json`.
 
 ### Standby helper pool (in-turn workers)

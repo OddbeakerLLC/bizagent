@@ -31,6 +31,17 @@ function classifyProviderError(text) {
     };
   }
 
+  if (/no user query found in messages/i.test(t)) {
+    return {
+      kind: 'request',
+      title: 'LLM request rejected — no user query',
+      summary:
+        'The model server rejected the request: the message payload contained no user query (Ollama 500 "no user query found in messages").',
+      fix:
+        'Retry the dispatch. If it recurs, check the conversation history / prompt assembly being sent to the model (a turn with only system/assistant messages).',
+    };
+  }
+
   if (
     /429|rate.?limit|too many requests|slow down/i.test(t) &&
     !/credits|spending limit/i.test(t)
@@ -96,20 +107,11 @@ function formatProviderFailureMessage({ slug, exitCode, text, classified }) {
   } else {
     lines.push(`**Agent failure**${slug ? `: \`${slug}\`` : ''}${exitCode != null ? ` (exit ${exitCode})` : ''}`);
     lines.push('');
-    lines.push('The run ended without a clean success. See details below.');
+    lines.push('The run ended without a clean success.');
   }
-  const snip = String(text || '')
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l && !/^Warning:\s*The 'NO_COLOR'/i.test(l) && !/^\(node:\d+\)/i.test(l))
-    .join('\n')
-    .trim();
-  if (snip) {
-    lines.push('');
-    lines.push('```');
-    lines.push(snip.length > 800 ? snip.slice(-800) : snip);
-    lines.push('```');
-  }
+  // Operator request (2026-10-18): failure notices state that an error
+  // occurred but never inline raw log output — it reads like agent thinking
+  // in the console. Full output stays in the dispatch logs on disk.
   lines.push('');
   lines.push(`Logs: \`logs/dispatch-${slug || 'hub'}.log\` / \`.stderr\``);
   return lines.join('\n');

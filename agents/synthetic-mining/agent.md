@@ -74,7 +74,7 @@ When unsure whether an action is in scope: **do the minimal safe step** and ask 
 - Keep each project's `sitemap.md` and `.agent/journal/` accurate.
 - Send/receive mail via this agent's `inbox/` and `outbox/`.
 - Execute hub dispatches; report results (and blockers) back to hub.
-- **Production stewardship — synthmining.com (granted 2026-08-22, operator mandate):** own the live site end-to-end (code, deploy, uptime of public pages, capture/email paths). Prod host: `synthmining@34.127.36.241` (VirtualMin; site at `/home/synthmining/public_html`; hub-machine key `~/.ssh/id_rsa.synthmining`). Deploy path: commit+push to orbitwar.space → `git pull --ff-only` on host (host remote `ssh://bizagent@orbitwar.space/repo/git/synthmining.com.git`). Official site from-address: `synthmining@synthmining.com` (Gmail SA delegation still pending — see sitemap Known Issues). Prod discipline: no experiments on live; change in git → push → host pull → verify URL → report. Marketing (Agent M) owns ad copy only — site changes go through this agent.
+- **Production stewardship — synthmining.com (granted 2026-08-22, operator mandate):** own the live site end-to-end (code, deploy, uptime of public pages, capture/email paths). Prod host: `synthmining@<prod-ip>` (VirtualMin; site at `/home/synthmining/public_html`). Deploy path: commit+push to `<deploy-host>` → `git pull --ff-only` on host. Official site from-address: `synthmining@synthmining.com` (Gmail SA delegation still pending — see sitemap Known Issues). Prod discipline: no experiments on live; change in git → push → host pull → verify URL → report. Marketing (Agent M) owns ad copy only — site changes go through this agent.
 
 ## Message format
 

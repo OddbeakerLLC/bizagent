@@ -296,7 +296,13 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
     2500,
   );
   const combined = [stderrTail, stdoutTail].filter(Boolean).join('\n');
-  const classified = classifyProviderError(combined);
+  // Classify the real error output (stderr) first. The stdout log is the
+  // agent's own transcript — thinking/tool output can mention "rate limit",
+  // "429", or API keys without any provider error, which misclassified real
+  // failures as provider errors (2026-10-19 operator report). Only fall back
+  // to the transcript when stderr contributed nothing at all.
+  const classified = classifyProviderError(stderrTail) ||
+    (stderrTail ? null : classifyProviderError(combined));
   const kind = classified ? classified.kind : 'error';
   if (shouldSkipDuplicateAgentError(hub, slug, exitCode, kind)) return;
 
@@ -305,7 +311,7 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   // launch-time override, and tells the operator what to fix. Never for
   // product agents, never a network outage.
   try {
-    ollamaFallback.maybeTriggerFallback(hub, { slug, text: combined });
+    ollamaFallback.maybeTriggerFallback(hub, { slug, text: stderrTail || combined });
   } catch (_err) { /* ignore */ }
 
   const errorMsg = formatProviderFailureMessage({
@@ -1399,22 +1405,18 @@ function launchHubCold(config, ctx) {
 function dispatchPendingAgents(config) {
   const agents = agentsFromRegistry(config.registry);
   // Phase 2 tiers: hub and product agents use separate slot pools.
-  // allow_concurrency=false (or BIZAGENT_ALLOW_CONCURRENCY=0): at most one live
-  // turn at a time across hub + product agents (serial; useful for local CPU).
-  const allowConcurrency = config.allowConcurrency !== false;
-  const hubSlots = allowConcurrency ? Math.max(1, Number(config.hubSlots || 1)) : 1;
-  const agentSlots = allowConcurrency ? Math.max(1, Number(config.agentSlots || config.maxConcurrency || 8)) : 1;
+  const hubSlots = Math.max(1, Number(config.hubSlots || 1));
+  const agentSlots = Math.max(1, Number(config.agentSlots || config.maxConcurrency || 8));
   let hubRunning = liveHubCount(config.hub, config.lockLeaseSecs);
   let agentRunning = liveAgentCount(config.hub, config.lockLeaseSecs);
   let launched = 0;
   let skippedLocked = 0;
   let skippedCap = 0;
   const retrySecs = dispatchRetrySecs(config);
-  const serialBusy = () => !allowConcurrency && (hubRunning + agentRunning) >= 1;
 
   const hubNew = pendingUndispatchedMail(config.hub, 'hub', retrySecs, config.lockLeaseSecs);
   if (hubNew.length > 0) {
-    if (serialBusy() || hubRunning >= hubSlots) {
+    if (hubRunning >= hubSlots) {
       skippedCap += 1;
     } else if (tryLock(config.hub, 'hub', config.lockLeaseSecs)) {
       markMailDispatched(config.hub, 'hub', hubNew, retrySecs, config.lockLeaseSecs);
@@ -1442,7 +1444,7 @@ function dispatchPendingAgents(config) {
     if (fresh.length === 0) {
       continue;
     }
-    if (serialBusy() || agentRunning >= agentSlots) {
+    if (agentRunning >= agentSlots) {
       skippedCap += 1;
       continue;
     }
@@ -1465,7 +1467,6 @@ function dispatchPendingAgents(config) {
     agentRunning,
     hubSlots,
     agentSlots,
-    allowConcurrency,
   };
 }
 
