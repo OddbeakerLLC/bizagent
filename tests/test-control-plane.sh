@@ -571,7 +571,9 @@ grep -q "sha256" "$ROOT/scripts/install-control-plane.sh" \
   || fail "control-plane installer service name is not path-stable"
 grep -q "bizagent-control-plane" "$ROOT/README.md" \
   || fail "README does not document the control plane"
-grep -qE '^\.bizagent(/\*|/)?$' "$ROOT/.gitignore" \
+# .gitignore runs in local-instance mode (adb52c9): operational data is
+# tracked, but control-plane runtime artifacts must still be excluded.
+grep -qE '^\.bizagent/(\*\.pid|hub\.lock/)$' "$ROOT/.gitignore" \
   || fail ".gitignore does not exclude control-plane runtime state"
 grep -q "^agents/\\*/.dispatch.md" "$ROOT/.gitignore" \
   || fail ".gitignore does not exclude generated agent prompts"
@@ -2490,6 +2492,18 @@ if (legacyHtml.includes('tts-summary') || !legacyHtml.includes('Legacy one. Lega
 const legacySpoken = sandbox.buildSpokenSummary('<tts-summary>Legacy one. Legacy two.</tts-summary>\n\nAfter.');
 if (legacySpoken !== 'Legacy one. Legacy two.') {
   console.error('legacy tts-summary speak mismatch:', legacySpoken); process.exit(22);
+}
+// Regression (operator report 2026-10-21): a two-sentence summary containing
+// multiple periods (versions/abbreviations) must be spoken IN FULL — never
+// clipped at the second period. Covers the ```tts fence and the labeled TLDR.
+const multiPeriod = 'Shipped build 3.2.1 to beakerboard.net e.g. the live hub. Rollback is not needed, tests pass.';
+const fenceMulti = sandbox.buildSpokenSummary('```tts\n' + multiPeriod + '\n```\n\nBody.');
+if (fenceMulti !== multiPeriod) {
+  console.error('tts fence clipped a multi-period summary:', fenceMulti); process.exit(23);
+}
+const tldrMulti = sandbox.buildSpokenSummary('TLDR: ' + multiPeriod + '\n\nBody.');
+if (tldrMulti !== multiPeriod) {
+  console.error('labeled TLDR clipped a multi-period summary:', tldrMulti); process.exit(24);
 }
 NODE
   then

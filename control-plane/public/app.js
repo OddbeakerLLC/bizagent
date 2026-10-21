@@ -1583,10 +1583,11 @@ function scrubDenseSpeechTokens(text) {
  * splitters do not treat bare "." as end-of-sentence. Inverse: restoreProtectedDots.
  */
 function protectSpeechDots(text) {
-  return String(text || '').replace(
-    /(\d)\.(\d)|([A-Za-z0-9])\.([A-Za-z0-9])/g,
-    (_, d1, d2, a, b) => (d1 != null ? `${d1}\uE000${d2}` : `${a}\uE000${b}`)
-  );
+  return String(text || '')
+    // Digit chains (3.2.1): protect every digit-preceded dot followed by a
+    // digit — lookahead keeps overlapping dots (3.2.1, 1.2.3.4) fully covered.
+    .replace(/(\d)\.(?=\d)/g, '$1\uE000')
+    .replace(/([A-Za-z0-9])\.([A-Za-z0-9])/g, (_, a, b) => `${a}\uE000${b}`);
 }
 
 function restoreProtectedDots(text) {
@@ -1690,7 +1691,7 @@ function extractTtsSummaryTag(text) {
 
   // Speak the ENTIRE marker body — the fence is the agent-authored summary,
   // so every sentence in it is spoken (no two-sentence cap here). The
-  // two-sentence limit only applies to the legacy TLDR / prose fallbacks.
+  // two-sentence limit only applies to the unlabeled prose fallback.
   const sentences = splitSpeechSentences(body)
     .map((s) => scrubDenseSpeechTokens(s))
     .map((s) => s.replace(/^\W+/, '').trim())
@@ -1706,8 +1707,12 @@ function extractTtsSummaryTag(text) {
 /**
  * Extract a leading labeled TLDR block from a hub reply (speak path only).
  * Accepts **TLDR:** / TLDR: / **TL;DR:** / TL;DR: (case-insensitive) at the
- * start of the reply. Captures up to two complete sentences from that block
- * only; strips the label word so it is not spoken. Returns null when absent.
+ * start of the reply. Speaks the ENTIRE TLDR block — the label is the
+ * agent-authored summary, so every sentence in it is spoken (the two-sentence
+ * brevity is enforced when the summary is written, not by clipping playback;
+ * operator report 2026-10-21: a two-sentence summary with internal periods,
+ * e.g. "v2.1" / "e.g.", was clipped at the second period). Strips the label
+ * word so it is not spoken. Returns null when absent.
  */
 function extractLabeledTldr(text) {
   const raw = String(text || '').replace(/^\uFEFF/, '').trimStart();
@@ -1727,11 +1732,15 @@ function extractLabeledTldr(text) {
   body = body.replace(/^(?:TL\s*;\s*DR|TLDR)\s*:\s*/i, '').trim();
   if (!body) return null;
 
+  // Speak the ENTIRE TLDR block — the label marks the agent-authored summary,
+  // so every sentence in it is spoken. Sentence splitters see abbreviation
+  // periods ("e.g.", "v2.1") as boundaries, so a two-sentence summary can
+  // yield more than two chunks; capping chunks clipped the summary at the
+  // second period (operator report 2026-10-21).
   const sentences = splitSpeechSentences(body)
     .map((s) => scrubDenseSpeechTokens(s))
     .map((s) => s.replace(/^\W+/, '').trim())
     .filter((s) => s && s.length > 1)
-    .slice(0, 2)
     .map((s) => ensureSpokenSentence(s))
     .filter(Boolean);
   if (!sentences.length) return null;
@@ -1742,7 +1751,7 @@ function extractLabeledTldr(text) {
 
 /**
  * Hub-reply TTS summary: prefer ```tts fence (or legacy <tts-summary>), then a
- * leading labeled two-sentence TLDR, otherwise the first two complete sentences
+ * leading labeled TLDR (entire block spoken), otherwise the first two complete sentences
  * of the cleaned prose lead. Never a mid-sentence clip or full multi-paragraph
  * body dump. Full markdown stays on screen (fence/tags unwrapped by renderer).
  * Returns null when nothing usable remains (caller uses minimal fallback —
@@ -2104,8 +2113,8 @@ function speakViaBrowserTts(spokenText, gen) {
  * @param {{ raw?: boolean, summary?: boolean }} [opts]
  *   raw=true skips preprocess (confirmation phrases).
  *   summary=true (hub replies) speaks ```tts fence contents when present
- *   (legacy <tts-summary> still accepted), else a leading labeled TLDR (up to
- *   two complete sentences, label not spoken), else the first two complete
+ *   (legacy <tts-summary> still accepted), else a leading labeled TLDR
+ *   (entire block, label not spoken), else the first two complete
  *   lead sentences — never a mid-sentence clip and never the full
  *   multi-paragraph body. Short single-sentence acks stay one sentence. On
  *   summary failure uses TTS_REPLY_FALLBACK (or silence if even that is empty)
@@ -2207,7 +2216,7 @@ function speakTtsText(text, opts) {
 function speakHubReply(text) {
   // Hub replies: full markdown stays in the console UI; TTS gets
   // ```tts fence body (or legacy <tts-summary>) when present, else labeled
-  // TLDR (≤2 sentences), else first two complete lead sentences.
+  // TLDR (entire block), else first two complete lead sentences.
   logTtsDebug('speakHubReply', { chars: String(text || '').length, mode: 'summary' });
   speakTtsText(text, { summary: true });
 }
