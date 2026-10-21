@@ -276,4 +276,83 @@ then
   fail "allow_concurrency serial dispatch checks failed"
 fi
 
+# Fleet-wide rate-limit cooldown (operator request 2026-10-21): a 429 pauses
+# every launch until the window expires; each new 429 extends it.
+if ! node - "$ROOT" <<'NODE'
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const root = process.argv[2];
+const { loadRuntimeConfig } = require(path.join(root, 'control-plane/lib/config'));
+const dispatcher = require(path.join(root, 'control-plane/lib/dispatcher'));
+
+function fail(code, msg) {
+  console.error(msg);
+  process.exit(code);
+}
+
+const prevDry = process.env.BIZAGENT_DRY_RUN;
+process.env.BIZAGENT_DRY_RUN = '1';
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-rate-limit-cooldown-'));
+fs.mkdirSync(path.join(hub, 'inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'templates'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents/alpha/inbox/archive'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents/alpha/outbox'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'templates/dispatch.md.template'), "You are '{{slug}}'.\n");
+fs.writeFileSync(path.join(hub, 'agents/alpha/agent.md'), '# Alpha\n');
+fs.writeFileSync(path.join(hub, 'cli.json'), JSON.stringify({
+  _runtime: { executable: 'scripts/bizagent-agent', promptFlag: '-f', flags: { extra: '-y' } },
+  grok: { baseURL: 'https://api.x.ai/v1', keyEnv: 'XAI_API_KEY', models: ['grok-4.5'] },
+}));
+fs.writeFileSync(path.join(hub, 'agents/alpha/inbox/2026-10-21-alpha.md'), [
+  '---', 'from: hub', 'to: alpha', 'date: 2026-10-21', 'subject: status', '---', '', 'alpha please', '',
+].join('\n'));
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: {
+    dispatch: { max_concurrency: 8, agent_slots: 8, hub_slots: 1, lock_lease_secs: 60 },
+    hub_agent: { provider: 'grok', cliName: 'grok', model: 'grok-4.5' },
+  },
+  products: [{ slug: 'alpha', name: 'Alpha', agent_name: 'Agent A', provider: 'grok', cliName: 'grok', projects: [] }],
+}));
+
+// Cooldown secs: default 120, clamped to [30, 3600].
+if (dispatcher.rateLimitCooldownSecs(undefined) !== 120) fail(1, 'cooldown secs default must be 120');
+if (dispatcher.rateLimitCooldownSecs({ settings: { dispatch: { rate_limit_cooldown_secs: 5 } } }) !== 30) fail(2, 'cooldown secs must clamp to min 30');
+if (dispatcher.rateLimitCooldownSecs({ settings: { dispatch: { rate_limit_cooldown_secs: 99999 } } }) !== 3600) fail(3, 'cooldown secs must clamp to max 3600');
+
+// No cooldown file -> remaining 0, dispatch proceeds.
+if (dispatcher.rateLimitCooldownRemaining(hub) !== 0) fail(4, 'remaining must be 0 with no cooldown file');
+const before = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (before.launched !== 1) fail(5, `dispatch should launch without cooldown, got ${JSON.stringify(before)}`);
+
+// Marking a cooldown gates every launch and reports the window.
+const waited = dispatcher.markRateLimitCooldown(hub, 120);
+if (waited !== 120) fail(6, `markRateLimitCooldown should wait 120s, got ${waited}`);
+if (dispatcher.rateLimitCooldownRemaining(hub) <= 0) fail(7, 'remaining must be > 0 during cooldown');
+const gated = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (gated.launched !== 0) fail(8, `cooldown must gate launches, got ${JSON.stringify(gated)}`);
+if (!gated.rateLimitCooldownSecs) fail(9, `cooldown result should report the window, got ${JSON.stringify(gated)}`);
+
+// A new 429 extends (never shortens) the window.
+const extended = dispatcher.markRateLimitCooldown(hub, 120);
+if (extended < 120) fail(10, `new 429 must extend the window, got ${extended}`);
+
+// Expired window clears the gate.
+const file = path.join(hub, '.bizagent', 'rate-limit-cooldown.json');
+const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+data.until = Math.floor(Date.now() / 1000) - 1;
+fs.writeFileSync(file, JSON.stringify(data));
+if (dispatcher.rateLimitCooldownRemaining(hub) !== 0) fail(11, 'expired cooldown must report 0 remaining');
+
+fs.rmSync(hub, { recursive: true, force: true });
+if (prevDry === undefined) delete process.env.BIZAGENT_DRY_RUN;
+else process.env.BIZAGENT_DRY_RUN = prevDry;
+NODE
+then
+  fail "rate-limit cooldown dispatch checks failed"
+fi
+
 echo "  ok: bizagent-dispatch.sh"

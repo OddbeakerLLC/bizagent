@@ -2,7 +2,7 @@ const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
-const { agentsFromRegistry, appDir, loadHubEnv } = require('./config');
+const { agentsFromRegistry, appDir, loadHubEnv, loadRegistry } = require('./config');
 const { compileAgentCommand, getCliSettings } = require('./cli-config');
 const {
   buildAgentTurnPrompt,
@@ -306,6 +306,15 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   const kind = classified ? classified.kind : 'error';
   if (shouldSkipDuplicateAgentError(hub, slug, exitCode, kind)) return;
 
+  // Operator request (2026-10-21): on the first rate-limit error, stop the
+  // whole fleet for a cooldown window instead of immediately retrying into
+  // another 429. dispatchPendingAgents() gates on this file every tick.
+  if (classified && classified.kind === 'rate_limit') {
+    try {
+      markRateLimitCooldown(hub, rateLimitCooldownSecs(loadRegistry(hub)));
+    } catch (_err) { /* best-effort */ }
+  }
+
   // Hub-only Ollama fallback: paid provider reachable but refused (credits /
   // auth / model). Background — classifies, checks Ollama, activates the
   // launch-time override, and tells the operator what to fix. Never for
@@ -447,6 +456,62 @@ function notifyAgentExitFromLogs(hub, slug, exitCode) {
     path.join(hub, 'logs', `dispatch-${slug}.stderr`),
   );
   recordAgentError(hub, slug, exitCode, stderrTail, null);
+}
+
+function rateLimitCooldownFile(hub) {
+  return path.join(appDir(hub), 'rate-limit-cooldown.json');
+}
+
+/**
+ * Registry settings.dispatch.rate_limit_cooldown_secs (default 120, clamp 30–3600).
+ * On the first rate-limit error every dispatch (hub + product agents) pauses
+ * for this long before any turn may launch again.
+ */
+function rateLimitCooldownSecs(registry) {
+  const dispatch = (registry && registry.settings && registry.settings.dispatch) || {};
+  const n = Number(dispatch.rate_limit_cooldown_secs);
+  if (!Number.isFinite(n)) return 120;
+  return Math.max(30, Math.min(3600, Math.floor(n)));
+}
+
+/**
+ * Record/extend a fleet-wide rate-limit cooldown. Each new rate-limit error
+ * pushes the pause out (max of existing until vs now+secs) so repeated 429s
+ * keep everybody stopped instead of retry-storming the provider.
+ */
+function markRateLimitCooldown(hub, secs = 120) {
+  const target = rateLimitCooldownFile(hub);
+  const now = Math.floor(Date.now() / 1000);
+  let until = now + secs;
+  try {
+    const prev = JSON.parse(fs.readFileSync(target, 'utf8'));
+    if (prev && Number(prev.until || 0) > until) until = Number(prev.until);
+  } catch (_err) { /* first cooldown */ }
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `${JSON.stringify({ until, secs, at: now, t: nowIso() })}\n`, 'utf8');
+  } catch (_err) { /* best-effort */ }
+  try {
+    logEvent(hub, {
+      event: 'rate_limit_cooldown',
+      until_epoch: until,
+      secs: until - now,
+      t: nowIso(),
+    });
+  } catch (_err) { /* ignore */ }
+  return until - now;
+}
+
+/** Seconds remaining in the fleet-wide rate-limit cooldown (0 = clear). */
+function rateLimitCooldownRemaining(hub) {
+  try {
+    const data = JSON.parse(fs.readFileSync(rateLimitCooldownFile(hub), 'utf8'));
+    const until = Number(data.until || 0);
+    if (!until) return 0;
+    return Math.max(0, until - Math.floor(Date.now() / 1000));
+  } catch (_err) {
+    return 0;
+  }
 }
 
 function promptFileFor(hub, slug) {
@@ -1403,6 +1468,23 @@ function launchHubCold(config, ctx) {
 }
 
 function dispatchPendingAgents(config) {
+  // Fleet-wide rate-limit cooldown: after a 429, pause every launch (hub +
+  // product agents) until the window expires instead of retry-storming the
+  // provider. Operator request (2026-10-21).
+  const cooldownSecs = rateLimitCooldownRemaining(config.hub);
+  if (cooldownSecs > 0) {
+    return {
+      launched: 0,
+      skippedLocked: 0,
+      skippedCap: 0,
+      running: liveRunCount(config.hub, config.lockLeaseSecs),
+      hubRunning: liveHubCount(config.hub, config.lockLeaseSecs),
+      agentRunning: liveAgentCount(config.hub, config.lockLeaseSecs),
+      hubSlots: Math.max(1, Number(config.hubSlots || 1)),
+      agentSlots: Math.max(1, Number(config.agentSlots || config.maxConcurrency || 8)),
+      rateLimitCooldownSecs: cooldownSecs,
+    };
+  }
   const agents = agentsFromRegistry(config.registry);
   // Phase 2 tiers: hub and product agents use separate slot pools.
   // allow_concurrency=false (or BIZAGENT_ALLOW_CONCURRENCY=0): at most one live
@@ -1505,10 +1587,13 @@ module.exports = {
   isProtectedStopPid,
   markMailDispatched,
   markOperatorStop,
+  markRateLimitCooldown,
   notifyAgentExitFromLogs,
   pendingUndispatchedMail,
   preferWarmDaemon,
   promptFileFor,
+  rateLimitCooldownRemaining,
+  rateLimitCooldownSecs,
   readStderrTail,
   recordAgentError,
   requestHubDaemon,

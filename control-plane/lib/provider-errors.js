@@ -50,7 +50,8 @@ function classifyProviderError(text) {
       kind: 'rate_limit',
       title: 'LLM API rate limit',
       summary: 'The provider rate-limited the request (HTTP 429 or equivalent).',
-      fix: 'Wait and retry, reduce concurrency, or raise rate limits with the provider.',
+      fix:
+        'Hub paused all dispatches for 2 minutes (auto-resumes); it will retry after the cooldown. Reduce concurrency or raise rate limits with the provider if this keeps happening.',
     };
   }
 
