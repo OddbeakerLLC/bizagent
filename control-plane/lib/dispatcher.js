@@ -514,6 +514,12 @@ function notifyAgentExitFromLogs(hub, slug, exitCode) {
     path.join(hub, 'logs', `dispatch-${slug}.stderr`),
   );
   recordAgentError(hub, slug, exitCode, stderrTail, null);
+  // Failed turn: do not let its fresh dispatch markers pin the inbox for the
+  // whole lease — shorten them to the failure backoff so the dispatcher
+  // retries automatically (operator report 2026-10-21, "green light" bug).
+  try {
+    backoffFailedDispatch(hub, slug, agentRetrySecs(hub));
+  } catch (_err) { /* ignore */ }
 }
 
 function rateLimitCooldownFile(hub) {
@@ -717,6 +723,58 @@ function clearDispatchState(hub, slug) {
   } catch (_err) {
     /* ignore */
   }
+}
+
+/**
+ * After a failed agent turn, shrink the dispatch markers' remaining
+ * suppression window to a short backoff instead of the full lock lease.
+ * Operator report (2026-10-21): a run that died early (connection/auth error)
+ * left its markers active for up to `dispatchRetrySecs` (default 30m), so the
+ * dispatcher ignored that inbox — green light, nobody home — with no signal
+ * for when it should stop ignoring. Failed turns now re-dispatch after
+ * AGENT_FAILURE_BACKOFF_SECS automatically (rate-limit failures additionally
+ * gate the whole fleet via markRateLimitCooldown, so this does not 429-storm).
+ */
+const AGENT_FAILURE_BACKOFF_SECS = 60;
+
+function backoffFailedDispatch(hub, slug, retrySecs, backoffSecs = AGENT_FAILURE_BACKOFF_SECS) {
+  const target = dispatchStateFile(hub, slug);
+  let state;
+  try {
+    state = JSON.parse(fs.readFileSync(target, 'utf8'));
+  } catch (_err) {
+    return; // no markers to relax — next tick decides fresh
+  }
+  if (!state || !Array.isArray(state.handled) || state.handled.length === 0) return;
+  const now = Math.floor(Date.now() / 1000);
+  const inboxDir = path.join(hub, 'agents', slug, 'inbox');
+  const shifted = now - Math.max(0, Number(retrySecs || 0) - Math.max(1, Number(backoffSecs || 0)));
+  state.handled = state.handled.map((item) => (
+    fs.existsSync(path.join(inboxDir, item.file)) ? { ...item, dispatchedAt: shifted } : item
+  ));
+  try {
+    fs.writeFileSync(target, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  } catch (_err) {
+    /* ignore */
+  }
+  try {
+    logEvent(hub, {
+      event: 'dispatch_failure_backoff',
+      slug,
+      backoff_secs: backoffSecs,
+      t: nowIso(),
+    });
+  } catch (_err) { /* ignore */ }
+}
+
+/** dispatchRetrySecs without a full config object (registry/env lookup). */
+function agentRetrySecs(hub) {
+  let leaseSecs = 1800;
+  try {
+    const dispatch = (loadRegistry(hub).settings || {}).dispatch || {};
+    leaseSecs = Number(process.env.BIZAGENT_LOCK_LEASE_SECS || dispatch.lock_lease_secs || 1800);
+  } catch (_err) { /* default lease */ }
+  return dispatchRetrySecs({ lockLeaseSecs: leaseSecs });
 }
 
 function lockAgeSecs(lock) {
@@ -1117,6 +1175,12 @@ function launchAgent(config, slug, model = '', cliName = '') {
     if (code !== 0 && code !== null && !wasOperatorStopped(hub, slug)) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, slug, code, stderrTail, null);
+      // Mirror the cold-path recovery: shorten dispatch markers to the
+      // failure backoff so a crashed run retries instead of idling out
+      // the full lease (operator report 2026-10-21).
+      try {
+        backoffFailedDispatch(config.hub, slug, dispatchRetrySecs(config));
+      } catch (_err) { /* ignore */ }
     }
   });
 
@@ -1642,6 +1706,8 @@ module.exports = {
   liveRunCount,
   clearDispatchState,
   clearDispatchStateUnlessOperatorStop,
+  backoffFailedDispatch,
+  agentRetrySecs,
   isProtectedStopPid,
   markMailDispatched,
   markOperatorStop,
