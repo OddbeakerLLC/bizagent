@@ -54,7 +54,7 @@ body {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 9px 8px;
+  padding: 2px 8px;
   border-radius: 6px;
   cursor: pointer;
 }
@@ -99,8 +99,8 @@ body {
 }
 .agent-cli-line {
   display: block;
-  margin-top: 2px;
-  padding: 0;
+  margin: 0;
+  padding: 4px 10px 6px;
   border: 0;
   background: transparent;
   font: inherit;
@@ -135,7 +135,7 @@ body {
 .agent-detail {
   background: #0f1826;
   border-left: 2px solid #4b5563;
-  margin: 0 8px 4px;
+  margin: 0 8px;
   border-radius: 0 0 4px 4px;
   overflow: hidden;
   max-height: 0;
@@ -1573,6 +1573,19 @@ button {
 }
 .health-banner-yellow {
   background: #9a6b00;
+}
+/* Recent error entries inside the banner (one line each, newest first). */
+.health-banner-error {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 4px 0 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.25);
+  font-size: 12px;
+}
+.health-banner-error strong {
+  font-size: 12px;
 }
 
 /* --- Cross-conversation waiting indicator (one line, never the full dump) --- */

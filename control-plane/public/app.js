@@ -639,25 +639,11 @@ function renderAgents(agents) {
     product.textContent = agent.name || agent.agentName || agent.slug;
     labels.appendChild(product);
 
-    // Line 2 (middle): agent name.
+    // Line 2: agent name.
     const name = document.createElement('span');
     name.className = 'agent-name';
     name.textContent = agent.active ? `${agent.agentName} running` : agent.agentName;
     labels.appendChild(name);
-
-    // Line 3 (beneath, small): model (click opens config; does not toggle expand).
-    const cliLine = document.createElement('button');
-    cliLine.type = 'button';
-    cliLine.className = 'agent-cli-line';
-    const modelName = agent.model || '(unset)';
-    cliLine.textContent = modelName;
-    cliLine.title = 'Change LLM and model';
-    cliLine.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      showAgentConfigModal(agent);
-    });
-    labels.appendChild(cliLine);
 
     const chevron = document.createElement('span');
     chevron.className = 'expand-chevron';
@@ -678,6 +664,20 @@ function renderAgents(agents) {
     if (typeof renderAgentProjects === 'function') {
       renderAgentProjects(detail, agent.projects);
     }
+
+    // Model link lives inside the expanded accordion (click opens config).
+    const cliLine = document.createElement('button');
+    cliLine.type = 'button';
+    cliLine.className = 'agent-cli-line';
+    const modelName = agent.model || '(unset)';
+    cliLine.textContent = modelName;
+    cliLine.title = 'Change LLM and model';
+    cliLine.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showAgentConfigModal(agent);
+    });
+    detail.appendChild(cliLine);
 
     let loaded = false;
     const toggle = () => {
@@ -3518,7 +3518,25 @@ document.addEventListener('keydown', (e) => {
 
 // --- Health banner (survival instinct): red = cannot run / disk critical;
 // yellow = heading there or provider fallback active. Persisted by the server
-// state itself — the banner stays until the check is green again. ---
+// state itself — the banner stays until the check is green again. Since
+// 2026-10-21 the banner also surfaces recent connection / rate-limit /
+// provider errors (server-fed ring buffer) and browser-side hub disconnects. ---
+function bannerEscape(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function bannerTimeAgo(ts) {
+  const secs = Math.max(1, Math.floor((Date.now() - Number(ts || 0)) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 function renderHealthBanner(h) {
   const el = document.getElementById('healthBanner');
   if (!el) return;
@@ -3526,8 +3544,13 @@ function renderHealthBanner(h) {
   const safeMode = !!h.safe_mode;
   const fallback = !!h.provider_fallback_active;
   const bad = (h.checks || []).filter((c) => c.level && c.level !== 'ok');
+  const recentErrors = h && Array.isArray(h.recent_errors) ? h.recent_errors : [];
+  const cooldown = h && Number(h.rate_limit_cooldown_secs) > 0
+    ? Number(h.rate_limit_cooldown_secs)
+    : 0;
   const red = safeMode || level === 'critical' || level === 'emergency';
-  const yellow = !red && (level === 'warn' || fallback || level === 'unknown');
+  const yellow = !red && (level === 'warn' || fallback || level === 'unknown' ||
+    recentErrors.length > 0 || cooldown > 0);
   if (!red && !yellow) {
     el.hidden = true;
     el.innerHTML = '';
@@ -3541,20 +3564,57 @@ function renderHealthBanner(h) {
       ? `Hub health: ${level} — agent runs may fail`
       : fallback
         ? 'Paid LLM provider refused; hub turns running on local Ollama (provider_fallback_active)'
-        : `Hub health: ${level}`;
+        : recentErrors.length
+          ? `Recent agent errors (${recentErrors.length})`
+          : cooldown
+            ? 'Dispatches paused — rate-limit cooldown'
+            : `Hub health: ${level}`;
   const details = bad.slice(0, 4).map((c) => `${c.name}: ${c.detail}`).join(' · ');
+  const cooldownHtml = cooldown > 0
+    ? `<span class="health-banner-detail">Fleet dispatches paused for ${cooldown}s (rate-limit cooldown) — auto-resumes.</span>`
+    : '';
+  const errorsHtml = recentErrors.slice(0, 5).map((e) => {
+    const agent = e.slug ? ` — ${bannerEscape(e.slug)}` : '';
+    const fix = e.fix ? ` Fix: ${bannerEscape(e.fix)}` : '';
+    return (
+      `<div class="health-banner-error">` +
+      `<strong>${bannerEscape(e.title || 'Agent error')}</strong>${agent} ` +
+      `<span class="health-banner-detail">${bannerEscape(bannerTimeAgo(e.ts))}${fix}</span>` +
+      `</div>`
+    );
+  }).join('');
   el.innerHTML =
     `<strong>${title}</strong>` +
     (details ? `<span class="health-banner-detail">${details}</span>` : '') +
+    cooldownHtml +
+    errorsHtml +
     (safeMode ? `<span class="health-banner-detail">Current health: ${level}. The hub will exit safe mode automatically once health is back to ok.</span>` : '') +
     (fallback && !safeMode ? '<span class="health-banner-detail">Fix the paid provider (top up / new key) to restore normal turns.</span>' : '');
 }
+
+function renderConnectionLostBanner() {
+  const el = document.getElementById('healthBanner');
+  if (!el) return;
+  el.hidden = false;
+  el.className = 'health-banner health-banner-red';
+  el.innerHTML =
+    '<strong>Connection to hub lost</strong>' +
+    '<span class="health-banner-detail">The console cannot reach the hub server — retrying…</span>';
+}
+
+let healthConnFailures = 0;
 async function pollHealthBanner() {
   try {
     const res = await fetch('/api/health', { cache: 'no-store' });
-    if (!res.ok) return;
+    if (!res.ok) throw new Error(`health ${res.status}`);
+    healthConnFailures = 0;
     renderHealthBanner(await res.json());
-  } catch (_err) { /* server down — banner state unchanged */ }
+  } catch (_err) {
+    // Server unreachable / connection error — show it in the banner after two
+    // consecutive failures (avoids flicker on a single dropped request).
+    healthConnFailures++;
+    if (healthConnFailures >= 2) renderConnectionLostBanner();
+  }
 }
 pollHealthBanner();
 setInterval(pollHealthBanner, 30000);

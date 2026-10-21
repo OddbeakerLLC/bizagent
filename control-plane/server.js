@@ -104,6 +104,8 @@ const {
   dispatchPendingAgents,
   drainHubTurnSafety,
   isAgentActive,
+  rateLimitCooldownRemaining,
+  readRecentErrors,
   stopAgentTurn,
 } = require("./lib/dispatcher");
 const {
@@ -716,6 +718,10 @@ async function handleApi(config, req, res) {
       safe_mode: safeMode.isSafeMode(config.hub),
       provider_fallback_active: ollamaFallback.isFallbackActive(config.hub),
       checks: report ? report.checks : [],
+      // Operator request (2026-10-21): the banner also shows recent
+      // connection / rate-limit / provider errors and the fleet cooldown.
+      recent_errors: readRecentErrors(config.hub),
+      rate_limit_cooldown_secs: rateLimitCooldownRemaining(config.hub),
       ts: report ? report.ts : new Date().toISOString(),
     });
   }

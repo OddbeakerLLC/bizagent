@@ -286,6 +286,47 @@ function shouldSkipDuplicateAgentError(hub, slug, exitCode, kind) {
   return false;
 }
 
+const RECENT_ERRORS_LIMIT = 20;
+
+function recentErrorsFile(hub) {
+  return path.join(appDir(hub), 'recent-errors.json');
+}
+
+/**
+ * Ring buffer of recent classified agent/hub errors, surfaced by the console
+ * health banner (operator request 2026-10-21: connection / rate-limit /
+ * provider errors should be visible at the top of the page, not only as
+ * in-chat status messages). Best-effort — never blocks dispatch.
+ */
+function recordRecentError(hub, entry) {
+  try {
+    let list = [];
+    try { list = JSON.parse(fs.readFileSync(recentErrorsFile(hub), 'utf8')); } catch (_err) { /* first */ }
+    if (!Array.isArray(list)) list = [];
+    list.push(entry);
+    fs.mkdirSync(path.dirname(recentErrorsFile(hub)), { recursive: true });
+    fs.writeFileSync(
+      recentErrorsFile(hub),
+      `${JSON.stringify(list.slice(-RECENT_ERRORS_LIMIT), null, 2)}\n`,
+      'utf8',
+    );
+  } catch (_err) { /* ignore */ }
+}
+
+/** Recent errors, newest first, within the last `maxAgeMs` (default 24h). */
+function readRecentErrors(hub, maxAgeMs = 24 * 60 * 60 * 1000) {
+  try {
+    const list = JSON.parse(fs.readFileSync(recentErrorsFile(hub), 'utf8'));
+    const cutoff = Date.now() - maxAgeMs;
+    return (Array.isArray(list) ? list : [])
+      .filter((e) => e && Number(e.ts || 0) >= cutoff)
+      .slice(-RECENT_ERRORS_LIMIT)
+      .reverse();
+  } catch (_err) {
+    return [];
+  }
+}
+
 /**
  * Notify the operator in the web console when an agent (or hub cold path) fails.
  * Posts a status error into the active chat so credit/quota failures are never log-only.
@@ -331,6 +372,23 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   });
 
   const cid = resolveAlertConversationId(hub, conversationId, slug);
+
+  // Operator request (2026-10-21): feed the console health banner so recent
+  // connection / rate-limit / provider errors are visible at the top of the
+  // page even when the operator is in another conversation.
+  try {
+    recordRecentError(hub, {
+      ts: Date.now(),
+      slug,
+      exitCode,
+      kind,
+      title: classified ? classified.title : 'Agent failure',
+      summary: classified ? classified.summary : 'The run ended without a clean success.',
+      fix: classified ? classified.fix : `See logs/dispatch-${slug}.log`,
+      conversationId: cid || '',
+    });
+  } catch (_err) { /* ignore */ }
+
   const dateStr = new Date().toISOString().slice(0, 10);
   const subject = classified
     ? classified.kind === 'credits'
@@ -1594,6 +1652,7 @@ module.exports = {
   promptFileFor,
   rateLimitCooldownRemaining,
   rateLimitCooldownSecs,
+  readRecentErrors,
   readStderrTail,
   recordAgentError,
   requestHubDaemon,
