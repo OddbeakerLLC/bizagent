@@ -170,6 +170,33 @@ function clampInt(value, min, max, fallback) {
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
+/**
+ * Env BIZAGENT_ALLOW_CONCURRENCY=0 forces serial dispatch (at most one live turn).
+ * Other values / unset do not override registry.
+ */
+function envForcesConcurrencyOff() {
+  const raw = process.env.BIZAGENT_ALLOW_CONCURRENCY;
+  if (raw == null || raw === "") return false;
+  return String(raw).trim() === "0";
+}
+
+/**
+ * settings.dispatch.allow_concurrency — omit/true = allow concurrent turns.
+ */
+function registryAllowsConcurrency(dispatch) {
+  if (!dispatch || typeof dispatch !== "object") return true;
+  if (dispatch.allow_concurrency === undefined || dispatch.allow_concurrency === null) {
+    return true;
+  }
+  return dispatch.allow_concurrency !== false;
+}
+
+/** Effective flag: env=0 wins (off); otherwise registry omit/true = on. */
+function resolveAllowConcurrency(dispatch) {
+  if (envForcesConcurrencyOff()) return false;
+  return registryAllowsConcurrency(dispatch);
+}
+
 // Fields derived from registry.json that should stay in sync with the file
 // on disk for the lifetime of a long-running process (e.g. the control-plane
 // server), without requiring a process restart. See refreshRegistry().
@@ -215,6 +242,7 @@ function deriveRegistrySettings(registry) {
     maxConcurrency,
     hubSlots,
     agentSlots,
+    allowConcurrency: resolveAllowConcurrency(dispatch),
     lockLeaseSecs: clampInt(
       process.env.BIZAGENT_LOCK_LEASE_SECS || dispatch.lock_lease_secs || 1800,
       60,
@@ -324,6 +352,10 @@ function refreshCliConfig(config) {
 function refreshRuntimeConfig(config) {
   refreshRegistry(config);
   refreshCliConfig(config);
+  // Env BIZAGENT_ALLOW_CONCURRENCY=0 can change without a registry mtime bump.
+  config.allowConcurrency = resolveAllowConcurrency(
+    (config.registry && config.registry.settings && config.registry.settings.dispatch) || {},
+  );
   return config;
 }
 
@@ -510,11 +542,14 @@ module.exports = {
   agentsFromRegistry,
   applyHubCliName,
   ensureDir,
+  envForcesConcurrencyOff,
   hubPath,
   loadCliJson,
   loadHubEnv,
   loadRegistry,
   loadRuntimeConfig,
+  registryAllowsConcurrency,
+  resolveAllowConcurrency,
   expandUserPath,
   isGitBackedProject,
   isGitWorkTree,

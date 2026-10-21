@@ -1090,6 +1090,14 @@ body.nav-drawer-open {
   border-color: #f59e0b;
   color: #b45309;
 }
+.auth-controls a.concurrency-toggle.active,
+.nav-drawer-controls a.concurrency-toggle.active {
+  color: #86efac;
+}
+.auth-controls a.concurrency-toggle.concurrency-forced-off,
+.nav-drawer-controls a.concurrency-toggle.concurrency-forced-off {
+  color: #fdba74;
+}
 .auth-controls {
   display: flex;
   align-items: center;

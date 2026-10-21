@@ -323,6 +323,7 @@ Multiple BizAgent hubs can run on one machine. Set
     "max_concurrency": 8,
     "hub_slots": 1,
     "agent_slots": 8,
+    "allow_concurrency": true,
     "lock_lease_secs": 1800
   },
   "tuning": {
@@ -331,7 +332,7 @@ Multiple BizAgent hubs can run on one machine. Set
 }
 ```
 
-`poll_seconds` (1–30) controls how often the control plane wakes. Separate hub/agent slot pools keep operator turns responsive even under heavy fan-out. Archive pruning removes old `*/archive/` mail automatically on the nightly (or on demand).
+`poll_seconds` (1–30) controls how often the control plane wakes. Separate hub/agent slot pools keep operator turns responsive even under heavy fan-out. Uncheck **Allow concurrency** in the nav drawer (or set `allow_concurrency: false` / `BIZAGENT_ALLOW_CONCURRENCY=0`) to run at most one live turn at a time. Archive pruning removes old `*/archive/` mail automatically on the nightly (or on demand).
 
 ### Upgrading the hub framework
 

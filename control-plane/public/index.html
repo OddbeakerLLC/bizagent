@@ -10,7 +10,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="BizAgent">
-  <link rel="stylesheet" href="/styles.css?v=20261017-summary-label">
+  <link rel="stylesheet" href="/styles.css?v=20261021-allow-concurrency">
 </head>
 <body>
   <div id="healthBanner" class="health-banner" hidden></div>
@@ -46,6 +46,7 @@
           <a id="thinkingLogsBtn" href="/logs.html" class="nav-drawer-link" hidden title="Live-tail what agents are thinking (dispatch logs)">Thinking...</a>
           <a id="companyFilesBtn" href="#company" class="nav-drawer-link" hidden title="Upload files to company/ for the Knowledge Stack">Company</a>
           <a id="ttsToggle" href="#tts" class="nav-drawer-link tts-toggle" hidden title="Text-to-speech for hub replies (off)" role="switch" aria-checked="false" aria-pressed="false"><span class="nav-drawer-link-label">TTS</span></a>
+          <a id="concurrencyToggle" href="#concurrency" class="nav-drawer-link concurrency-toggle" hidden title="Allow concurrent agent turns (on)" role="switch" aria-checked="true" aria-pressed="true"><span class="nav-drawer-link-label">Allow concurrency</span></a>
           <a id="editDisplayName" href="#name" class="nav-drawer-link" hidden title="Change your display name">Name</a>
           <a id="logout" href="#logout" class="nav-drawer-link" hidden>Logout</a>
         </div>
