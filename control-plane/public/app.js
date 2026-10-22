@@ -597,13 +597,13 @@ function renderAgents(agents) {
   root.innerHTML = '';
   lastAgentsList = Array.isArray(agents) ? agents : [];
   updateAttachRecipientOptions();
-  // Sort agents alphabetically by agentName, keeping PTL first
+  // Sort agents alphabetically by product name, keeping PTL first
   const sorted = [...agents].sort((a, b) => {
     const aIsPTL = a.agentName === 'Agent PTL' || a.slug === 'hub';
     const bIsPTL = b.agentName === 'Agent PTL' || b.slug === 'hub';
     if (aIsPTL && !bIsPTL) return -1;
     if (!aIsPTL && bIsPTL) return 1;
-    return (a.agentName || a.slug || '').localeCompare(b.agentName || b.slug || '');
+    return (a.name || a.agentName || a.slug || '').localeCompare(b.name || b.agentName || b.slug || '');
   });
   sorted.forEach((agent) => {
     const isExpanded = expandedAgentSlugs.has(agent.slug);
