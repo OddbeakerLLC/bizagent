@@ -51,7 +51,7 @@ function classifyProviderError(text) {
       title: 'LLM API rate limit',
       summary: 'The provider rate-limited the request (HTTP 429 or equivalent).',
       fix:
-        'Hub paused all dispatches for 2 minutes (auto-resumes); it will retry after the cooldown. Reduce concurrency or raise rate limits with the provider if this keeps happening.',
+        'Hub paused dispatches for this provider until the cooldown expires (auto-resumes); agents on other providers keep running. Reduce concurrency or raise rate limits with the provider if this keeps happening.',
     };
   }
 
@@ -92,6 +92,20 @@ function classifyProviderError(text) {
 }
 
 /**
+ * Name the provider in a rate-limit classification (2026-10-22 per-provider
+ * cooldowns): the error card should say WHICH provider hit the 429. Returns
+ * the classification unchanged when the provider is unknown.
+ */
+function nameProviderInClassification(classified, provider) {
+  if (!classified || classified.kind !== 'rate_limit' || !provider) return classified;
+  return {
+    ...classified,
+    summary: `The \`${provider}\` provider rate-limited the request (HTTP 429 or equivalent).`,
+    fix: `Hub paused \`${provider}\` dispatches until the cooldown expires (auto-resumes); agents on other providers keep running. Reduce concurrency or raise rate limits with the provider if this keeps happening.`,
+  };
+}
+
+/**
  * Build a short operator-facing markdown body.
  */
 function formatProviderFailureMessage({ slug, exitCode, text, classified }) {
@@ -121,4 +135,5 @@ function formatProviderFailureMessage({ slug, exitCode, text, classified }) {
 module.exports = {
   classifyProviderError,
   formatProviderFailureMessage,
+  nameProviderInClassification,
 };

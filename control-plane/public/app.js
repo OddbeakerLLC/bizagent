@@ -3583,7 +3583,7 @@ function renderHealthBanner(h) {
             : `Hub health: ${level}`;
   const details = bad.slice(0, 4).map((c) => `${c.name}: ${c.detail}`).join(' · ');
   const cooldownHtml = cooldown > 0
-    ? `<span class="health-banner-detail">Fleet dispatches paused for ${cooldown}s (rate-limit cooldown) — auto-resumes.</span>`
+    ? `<span class="health-banner-detail">Dispatches paused for ${cooldown}s (rate-limit cooldown) — auto-resumes.</span>`
     : '';
   const errorsHtml = visibleErrors.slice(0, 5).map((e) => {
     const agent = e.slug ? ` — ${bannerEscape(e.slug)}` : '';

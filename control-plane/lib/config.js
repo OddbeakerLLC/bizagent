@@ -236,12 +236,26 @@ function deriveRegistrySettings(registry) {
     32,
     maxConcurrency,
   );
+  // Per-provider slot caps (2026-10-22): settings.dispatch.agent_slots may be
+  // either a number (legacy — that number becomes the default cap for every
+  // provider, including ones not listed) or a map like { "venice": 3,
+  // "openai": 2 }. Providers missing from the map use the numeric default
+  // (BIZAGENT_AGENT_SLOTS env > numeric agent_slots > max_concurrency).
+  const agentSlotsByProvider = {};
+  const rawAgentSlots = dispatch.agent_slots;
+  if (rawAgentSlots && typeof rawAgentSlots === "object" && !Array.isArray(rawAgentSlots)) {
+    for (const [key, val] of Object.entries(rawAgentSlots)) {
+      if (val === undefined || val === null) continue;
+      agentSlotsByProvider[String(key).trim().toLowerCase()] = clampInt(val, 1, 32, agentSlots);
+    }
+  }
 
   return {
     pollSeconds,
     maxConcurrency,
     hubSlots,
     agentSlots,
+    agentSlotsByProvider,
     allowConcurrency: resolveAllowConcurrency(dispatch),
     lockLeaseSecs: clampInt(
       process.env.BIZAGENT_LOCK_LEASE_SECS || dispatch.lock_lease_secs || 1800,

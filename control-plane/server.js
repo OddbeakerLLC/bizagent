@@ -104,7 +104,7 @@ const {
   dispatchPendingAgents,
   drainHubTurnSafety,
   isAgentActive,
-  rateLimitCooldownRemaining,
+  maxRateLimitCooldownRemaining,
   readRecentErrors,
   stopAgentTurn,
 } = require("./lib/dispatcher");
@@ -721,7 +721,9 @@ async function handleApi(config, req, res) {
       // Operator request (2026-10-21): the banner also shows recent
       // connection / rate-limit / provider errors and the fleet cooldown.
       recent_errors: readRecentErrors(config.hub),
-      rate_limit_cooldown_secs: rateLimitCooldownRemaining(config.hub),
+      // Max across per-provider cooldown files (2026-10-22) so the banner
+      // shows while any provider bucket is paused.
+      rate_limit_cooldown_secs: maxRateLimitCooldownRemaining(config.hub),
       ts: report ? report.ts : new Date().toISOString(),
     });
   }

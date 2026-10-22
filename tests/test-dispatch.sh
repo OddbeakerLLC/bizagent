@@ -355,4 +355,112 @@ then
   fail "rate-limit cooldown dispatch checks failed"
 fi
 
+# Per-provider rate-limit cooldowns + slot buckets (2026-10-22): a 429 on one
+# provider freezes only that provider's bucket; other providers keep running.
+if ! node - "$ROOT" <<'NODE'
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const root = process.argv[2];
+const { loadRuntimeConfig } = require(path.join(root, 'control-plane/lib/config'));
+const dispatcher = require(path.join(root, 'control-plane/lib/dispatcher'));
+
+function fail(code, msg) {
+  console.error(msg);
+  process.exit(code);
+}
+
+const prevDry = process.env.BIZAGENT_DRY_RUN;
+process.env.BIZAGENT_DRY_RUN = '1';
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-provider-buckets-'));
+fs.mkdirSync(path.join(hub, 'inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'templates'), { recursive: true });
+for (const slug of ['alpha', 'beta', 'gamma']) {
+  fs.mkdirSync(path.join(hub, `agents/${slug}/inbox/archive`), { recursive: true });
+  fs.mkdirSync(path.join(hub, `agents/${slug}/outbox`), { recursive: true });
+  fs.writeFileSync(path.join(hub, `agents/${slug}/agent.md`), `# ${slug}\n`);
+  fs.writeFileSync(path.join(hub, `agents/${slug}/inbox/2026-10-22-${slug}.md`), [
+    '---', 'from: hub', 'to: ' + slug, 'date: 2026-10-22', 'subject: status', '---', '', slug + ' please', '',
+  ].join('\n'));
+}
+fs.writeFileSync(path.join(hub, 'templates/dispatch.md.template'), "You are '{{slug}}'.\n");
+fs.writeFileSync(path.join(hub, 'cli.json'), JSON.stringify({
+  _runtime: { executable: 'scripts/bizagent-agent', promptFlag: '-f', flags: { extra: '-y' } },
+  venice: { baseURL: 'https://api.venice.ai/api/v1', keyEnv: 'VENICE_API_KEY', models: ['venice-model'] },
+  grok: { baseURL: 'https://api.x.ai/v1', keyEnv: 'XAI_API_KEY', models: ['grok-4.5'] },
+}));
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: {
+    dispatch: { agent_slots: { venice: 2, grok: 1 }, hub_slots: 1, lock_lease_secs: 60 },
+    hub_agent: { provider: 'venice', model: 'venice-model' },
+  },
+  products: [
+    { slug: 'alpha', name: 'Alpha', provider: 'venice', projects: [] },
+    { slug: 'beta', name: 'Beta', provider: 'venice', projects: [] },
+    { slug: 'gamma', name: 'Gamma', provider: 'grok', projects: [] },
+  ],
+}));
+
+// Provider resolution from registry fields.
+const registry = JSON.parse(fs.readFileSync(path.join(hub, 'registry.json'), 'utf8'));
+if (dispatcher.agentProvider(registry, 'alpha') !== 'venice') fail(1, 'alpha provider must resolve to venice');
+if (dispatcher.agentProvider(registry, 'gamma') !== 'grok') fail(1, 'gamma provider must resolve to grok');
+if (dispatcher.agentProvider(registry, 'hub') !== 'venice') fail(2, 'hub provider must resolve from hub_agent');
+if (dispatcher.agentProvider(registry, 'ghost') !== '') fail(3, 'unknown slug provider must be empty');
+
+// Per-provider slot caps from the agent_slots map: venice cap 2 launches
+// alpha+beta; grok cap 1 launches gamma. No global pool starving either.
+const first = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (first.launched !== 3) fail(4, `per-provider caps should launch all three, got ${JSON.stringify(first)}`);
+if (first.runningByProvider.venice !== 2 || first.runningByProvider.grok !== 1) {
+  fail(5, `running counts must be per provider, got ${JSON.stringify(first.runningByProvider)}`);
+}
+
+// A Venice 429 freezes only the venice bucket: hub (venice) and alpha/beta
+// are gated, gamma (grok) still launches.
+const waited = dispatcher.markRateLimitCooldown(hub, 120, 'venice');
+if (waited !== 120) fail(6, `venice cooldown should wait 120s, got ${waited}`);
+if (dispatcher.rateLimitCooldownRemaining(hub, 'venice') <= 0) fail(7, 'venice remaining must be > 0');
+if (dispatcher.rateLimitCooldownRemaining(hub, 'grok') !== 0) fail(8, 'grok must be unaffected');
+// Fresh pending mail for the next round.
+for (const slug of ['alpha', 'beta', 'gamma']) {
+  fs.writeFileSync(path.join(hub, `agents/${slug}/inbox/2026-10-22-${slug}-2.md`), [
+    '---', 'from: hub', 'to: ' + slug, 'date: 2026-10-22', 'subject: retry', '---', '', slug + ' again', '',
+  ].join('\n'));
+}
+const gated = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (gated.launched !== 1) fail(9, `only grok should launch during venice cooldown, got ${JSON.stringify(gated)}`);
+if (!gated.rateLimitCooldownSecs) fail(10, 'result should report the max cooldown window');
+if (gated.rateLimitCooldownSecs !== dispatcher.maxRateLimitCooldownRemaining(hub)) {
+  fail(11, 'reported window must match max across provider files');
+}
+
+// Fleet-wide fallback (unnamed provider) gates every bucket.
+dispatcher.markRateLimitCooldown(hub, 60, '');
+fs.writeFileSync(path.join(hub, 'agents/gamma/inbox/2026-10-22-gamma-3.md'), [
+  '---', 'from: hub', 'to: gamma', 'date: 2026-10-22', 'subject: retry', '---', '', 'gamma again', '',
+].join('\n'));
+const fleetGated = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (fleetGated.launched !== 0) fail(12, `fleet-wide cooldown must gate all launches, got ${JSON.stringify(fleetGated)}`);
+
+// Expire both windows; everything dispatches again.
+for (const name of ['rate-limit-cooldown-venice.json', 'rate-limit-cooldown.json']) {
+  const file = path.join(hub, '.bizagent', name);
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  data.until = Math.floor(Date.now() / 1000) - 1;
+  fs.writeFileSync(file, JSON.stringify(data));
+}
+if (dispatcher.maxRateLimitCooldownRemaining(hub) !== 0) fail(13, 'all cooldowns expired must report 0');
+
+fs.rmSync(hub, { recursive: true, force: true });
+if (prevDry === undefined) delete process.env.BIZAGENT_DRY_RUN;
+else process.env.BIZAGENT_DRY_RUN = prevDry;
+NODE
+then
+  fail "per-provider cooldown/slot bucket checks failed"
+fi
+
 echo "  ok: bizagent-dispatch.sh"

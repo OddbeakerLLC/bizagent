@@ -38,6 +38,7 @@ const {
 const {
   classifyProviderError,
   formatProviderFailureMessage,
+  nameProviderInClassification,
 } = require('./provider-errors');
 const ollamaFallback = require('./ollama-fallback');
 const {
@@ -342,17 +343,22 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   // "429", or API keys without any provider error, which misclassified real
   // failures as provider errors (2026-10-19 operator report). Only fall back
   // to the transcript when stderr contributed nothing at all.
-  const classified = classifyProviderError(stderrTail) ||
+  let classified = classifyProviderError(stderrTail) ||
     (stderrTail ? null : classifyProviderError(combined));
   const kind = classified ? classified.kind : 'error';
   if (shouldSkipDuplicateAgentError(hub, slug, exitCode, kind)) return;
 
-  // Operator request (2026-10-21): on the first rate-limit error, stop the
-  // whole fleet for a cooldown window instead of immediately retrying into
-  // another 429. dispatchPendingAgents() gates on this file every tick.
+  // Per-provider cooldowns (2026-10-22): a 429 freezes only the failing
+  // provider's bucket. Provider comes from the registry (model/provider
+  // fields); when it cannot be identified, the fleet-wide fallback file
+  // gates every launch as before. The error card names the provider.
+  let provider = '';
   if (classified && classified.kind === 'rate_limit') {
     try {
-      markRateLimitCooldown(hub, rateLimitCooldownSecs(loadRegistry(hub)));
+      const registry = loadRegistry(hub);
+      provider = agentProvider(registry, slug);
+      markRateLimitCooldown(hub, rateLimitCooldownSecs(registry), provider);
+      classified = nameProviderInClassification(classified, provider);
     } catch (_err) { /* best-effort */ }
   }
 
@@ -522,8 +528,14 @@ function notifyAgentExitFromLogs(hub, slug, exitCode) {
   } catch (_err) { /* ignore */ }
 }
 
-function rateLimitCooldownFile(hub) {
-  return path.join(appDir(hub), 'rate-limit-cooldown.json');
+function rateLimitCooldownFile(hub, provider = '') {
+  // Per-provider cooldowns (2026-10-22): one file per provider so a Venice 429
+  // no longer idles agents on other providers. The unnamed file is the
+  // fleet-wide fallback for providers we cannot identify from the model string.
+  const name = provider
+    ? `rate-limit-cooldown-${provider}.json`
+    : 'rate-limit-cooldown.json';
+  return path.join(appDir(hub), name);
 }
 
 /**
@@ -539,12 +551,13 @@ function rateLimitCooldownSecs(registry) {
 }
 
 /**
- * Record/extend a fleet-wide rate-limit cooldown. Each new rate-limit error
+ * Record/extend a per-provider rate-limit cooldown. Each new rate-limit error
  * pushes the pause out (max of existing until vs now+secs) so repeated 429s
- * keep everybody stopped instead of retry-storming the provider.
+ * keep that provider stopped instead of retry-storming it. An empty provider
+ * marks the fleet-wide fallback file, which gates every launch.
  */
-function markRateLimitCooldown(hub, secs = 120) {
-  const target = rateLimitCooldownFile(hub);
+function markRateLimitCooldown(hub, secs = 120, provider = '') {
+  const target = rateLimitCooldownFile(hub, provider);
   const now = Math.floor(Date.now() / 1000);
   let until = now + secs;
   try {
@@ -553,11 +566,12 @@ function markRateLimitCooldown(hub, secs = 120) {
   } catch (_err) { /* first cooldown */ }
   try {
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, `${JSON.stringify({ until, secs, at: now, t: nowIso() })}\n`, 'utf8');
+    fs.writeFileSync(target, `${JSON.stringify({ provider: provider || 'fleet', until, secs, at: now, t: nowIso() })}\n`, 'utf8');
   } catch (_err) { /* best-effort */ }
   try {
     logEvent(hub, {
       event: 'rate_limit_cooldown',
+      provider: provider || 'fleet',
       until_epoch: until,
       secs: until - now,
       t: nowIso(),
@@ -566,16 +580,52 @@ function markRateLimitCooldown(hub, secs = 120) {
   return until - now;
 }
 
-/** Seconds remaining in the fleet-wide rate-limit cooldown (0 = clear). */
-function rateLimitCooldownRemaining(hub) {
+/** Seconds remaining in a provider's rate-limit cooldown (0 = clear). */
+function rateLimitCooldownRemaining(hub, provider = '') {
   try {
-    const data = JSON.parse(fs.readFileSync(rateLimitCooldownFile(hub), 'utf8'));
+    const data = JSON.parse(fs.readFileSync(rateLimitCooldownFile(hub, provider), 'utf8'));
     const until = Number(data.until || 0);
     if (!until) return 0;
     return Math.max(0, until - Math.floor(Date.now() / 1000));
   } catch (_err) {
     return 0;
   }
+}
+
+/**
+ * Max remaining cooldown across all per-provider files (0 = all clear).
+ * Used by /api/health so the banner still shows while any bucket is paused.
+ */
+function maxRateLimitCooldownRemaining(hub) {
+  let max = 0;
+  let entries;
+  try {
+    entries = fs.readdirSync(appDir(hub));
+  } catch (_err) {
+    return 0;
+  }
+  for (const entry of entries) {
+    const match = /^rate-limit-cooldown(?:-(.+))?\.json$/.exec(entry);
+    if (!match) continue;
+    const secs = rateLimitCooldownRemaining(hub, match[1] || '');
+    if (secs > max) max = secs;
+  }
+  return max;
+}
+
+/**
+ * Provider key for a slug from registry.json ('' = unknown / fleet fallback).
+ * Hub resolves from settings.hub_agent; product agents from their
+ * provider/cliName fields. Lowercased for file-name-safe bucket keys.
+ */
+function agentProvider(registry, slug) {
+  if (slug === 'hub') {
+    const hubAgent = (registry && registry.settings && registry.settings.hub_agent) || {};
+    return String(hubAgent.provider || hubAgent.cliName || '').trim().toLowerCase();
+  }
+  const agents = agentsFromRegistry(registry || {});
+  const agent = agents.find((a) => a && a.slug === slug);
+  return agent ? String(agent.provider || '').trim().toLowerCase() : '';
 }
 
 function promptFileFor(hub, slug) {
@@ -1590,41 +1640,57 @@ function launchHubCold(config, ctx) {
 }
 
 function dispatchPendingAgents(config) {
-  // Fleet-wide rate-limit cooldown: after a 429, pause every launch (hub +
-  // product agents) until the window expires instead of retry-storming the
-  // provider. Operator request (2026-10-21).
-  const cooldownSecs = rateLimitCooldownRemaining(config.hub);
-  if (cooldownSecs > 0) {
-    return {
-      launched: 0,
-      skippedLocked: 0,
-      skippedCap: 0,
-      running: liveRunCount(config.hub, config.lockLeaseSecs),
-      hubRunning: liveHubCount(config.hub, config.lockLeaseSecs),
-      agentRunning: liveAgentCount(config.hub, config.lockLeaseSecs),
-      hubSlots: Math.max(1, Number(config.hubSlots || 1)),
-      agentSlots: Math.max(1, Number(config.agentSlots || config.maxConcurrency || 8)),
-      rateLimitCooldownSecs: cooldownSecs,
-    };
-  }
   const agents = agentsFromRegistry(config.registry);
-  // Phase 2 tiers: hub and product agents use separate slot pools.
-  // allow_concurrency=false (or BIZAGENT_ALLOW_CONCURRENCY=0): at most one live
-  // turn at a time across hub + product agents (serial; useful for local CPU).
+  // Per-provider buckets (2026-10-22): pending agents are grouped by the
+  // provider resolved from their registry model/provider fields instead of
+  // one global agent pool, and each provider has its own slot cap and
+  // rate-limit cooldown. A Venice 429 no longer idles agents on other
+  // providers. The hub keeps its own bucket (hub_slots, default 1); its
+  // cooldown is keyed by the hub's provider so a hub 429 freezes that
+  // provider's product-agent bucket too. Agents whose provider cannot be
+  // identified share the '' bucket, gated by the fleet-wide cooldown file.
+  // If a turn retries/falls back onto a different provider (registry change),
+  // it simply re-queues into that provider's bucket on the next tick — the
+  // failed provider's cooldown does not follow it.
   const allowConcurrency = config.allowConcurrency !== false;
+  // allow_concurrency=false (or BIZAGENT_ALLOW_CONCURRENCY=0): at most one
+  // live turn at a time across hub + product agents (serial; local CPU).
   const hubSlots = allowConcurrency ? Math.max(1, Number(config.hubSlots || 1)) : 1;
   const agentSlots = allowConcurrency ? Math.max(1, Number(config.agentSlots || config.maxConcurrency || 8)) : 1;
+  // Default cap for providers not listed in the agent_slots map (or when
+  // agent_slots is still a plain number — legacy config stays valid).
+  const slotsByProvider = allowConcurrency ? (config.agentSlotsByProvider || {}) : {};
+  const slotCapFor = (provider) => {
+    if (!allowConcurrency) return 1;
+    const mapped = slotsByProvider[provider];
+    return Math.max(1, Number(mapped || agentSlots));
+  };
   let hubRunning = liveHubCount(config.hub, config.lockLeaseSecs);
-  let agentRunning = liveAgentCount(config.hub, config.lockLeaseSecs);
+  // Per-provider live counts for product agents (buckets come from the registry).
+  const runningByProvider = {};
+  let agentRunning = 0;
+  for (const agent of agents) {
+    if (!isAgentActive(config.hub, agent.slug, config.lockLeaseSecs)) continue;
+    const provider = agentProvider(config.registry, agent.slug);
+    runningByProvider[provider] = (runningByProvider[provider] || 0) + 1;
+    agentRunning += 1;
+  }
   let launched = 0;
   let skippedLocked = 0;
   let skippedCap = 0;
+  let skippedCooldown = 0;
   const retrySecs = dispatchRetrySecs(config);
   const serialBusy = () => !allowConcurrency && (hubRunning + agentRunning) >= 1;
+  // Fleet-wide fallback cooldown (unnamed file): gates every launch, for
+  // providers we cannot identify from the model string and as a hard stop.
+  const fleetCooldownSecs = rateLimitCooldownRemaining(config.hub);
 
   const hubNew = pendingUndispatchedMail(config.hub, 'hub', retrySecs, config.lockLeaseSecs);
   if (hubNew.length > 0) {
-    if (serialBusy() || hubRunning >= hubSlots) {
+    const hubProvider = agentProvider(config.registry, 'hub');
+    if (fleetCooldownSecs > 0 || rateLimitCooldownRemaining(config.hub, hubProvider) > 0) {
+      skippedCooldown += 1;
+    } else if (serialBusy() || hubRunning >= hubSlots) {
       skippedCap += 1;
     } else if (tryLock(config.hub, 'hub', config.lockLeaseSecs)) {
       markMailDispatched(config.hub, 'hub', hubNew, retrySecs, config.lockLeaseSecs);
@@ -1652,7 +1718,13 @@ function dispatchPendingAgents(config) {
     if (fresh.length === 0) {
       continue;
     }
-    if (serialBusy() || agentRunning >= agentSlots) {
+    const provider = agentProvider(config.registry, agent.slug);
+    if (fleetCooldownSecs > 0 || rateLimitCooldownRemaining(config.hub, provider) > 0) {
+      skippedCooldown += 1;
+      continue;
+    }
+    const running = runningByProvider[provider] || 0;
+    if (serialBusy() || running >= slotCapFor(provider)) {
       skippedCap += 1;
       continue;
     }
@@ -1660,6 +1732,7 @@ function dispatchPendingAgents(config) {
       markMailDispatched(config.hub, agent.slug, fresh, retrySecs, config.lockLeaseSecs);
       launchAgent(config, agent.slug, agent.model || config.agentDefaultModel || '', agent.cliName || '');
       launched += 1;
+      runningByProvider[provider] = running + 1;
       agentRunning += 1;
     } else {
       skippedLocked += 1;
@@ -1670,12 +1743,16 @@ function dispatchPendingAgents(config) {
     launched,
     skippedLocked,
     skippedCap,
+    skippedCooldown,
     running: hubRunning + agentRunning,
     hubRunning,
     agentRunning,
     hubSlots,
     agentSlots,
+    agentSlotsByProvider: slotsByProvider,
+    runningByProvider,
     allowConcurrency,
+    rateLimitCooldownSecs: maxRateLimitCooldownRemaining(config.hub),
   };
 }
 
@@ -1691,6 +1768,7 @@ module.exports = {
   dispatchFingerprint,
   dispatchRetrySecs,
   drainHubTurnSafety,
+  agentProvider,
   ensureDispatchPrompt,
   findAgentCliPid,
   getHubConversationId,
@@ -1712,6 +1790,7 @@ module.exports = {
   markMailDispatched,
   markOperatorStop,
   markRateLimitCooldown,
+  maxRateLimitCooldownRemaining,
   notifyAgentExitFromLogs,
   pendingUndispatchedMail,
   preferWarmDaemon,
