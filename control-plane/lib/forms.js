@@ -27,6 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { appDir, ensureDir, loadRegistry, agentsFromRegistry } = require('./config');
+const { writeFileAtomic } = require('./atomic-state');
 
 const FORM_ID_RE = /^[a-f0-9]{12}$/;
 const FORM_TTL_MS = 24 * 60 * 60 * 1000;
@@ -275,7 +276,9 @@ function saveFormResponse(hub, { formId, agent, button, fields }) {
     fields: clean,
     submitted_at: new Date().toISOString(),
   };
-  fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+  // Atomic but deliberately no .bak: form values are secrets, so no second
+  // copy may outlive the claim-once delete.
+  writeFileAtomic(file, `${JSON.stringify(payload, null, 2)}\n`, 0o600);
   try { fs.chmodSync(root, 0o700); } catch (_e) { /* best effort */ }
   return file;
 }

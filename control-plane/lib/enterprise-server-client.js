@@ -27,6 +27,7 @@ const http = require('http');
 const https = require('https');
 const path = require('path');
 const { loadRegistry, writeRegistry } = require('./config');
+const { writeJsonAtomic } = require('./atomic-state');
 
 const ASK_ENTERPRISE_SLUG = 'ask-enterprise';
 const MAX_UPLOAD_FILES = 500;
@@ -47,11 +48,7 @@ function loadConnection(hub) {
 }
 
 function saveConnection(hub, conn) {
-  const file = connectionFile(hub);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(conn, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, file);
+  writeJsonAtomic(connectionFile(hub), conn);
   return conn;
 }
 

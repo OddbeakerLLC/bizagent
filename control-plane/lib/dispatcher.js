@@ -3,6 +3,7 @@ const net = require('net');
 const path = require('path');
 const { spawn } = require('child_process');
 const { agentsFromRegistry, appDir, loadHubEnv, loadRegistry } = require('./config');
+const { writeJsonAtomic } = require('./atomic-state');
 const { compileAgentCommand, getCliSettings } = require('./cli-config');
 const {
   buildAgentTurnPrompt,
@@ -276,11 +277,7 @@ function shouldSkipDuplicateAgentError(hub, slug, exitCode, kind) {
   }
   try {
     fs.mkdirSync(path.dirname(stampPath), { recursive: true });
-    fs.writeFileSync(
-      stampPath,
-      `${JSON.stringify({ slug, exitCode, kind, ts: now })}\n`,
-      'utf8',
-    );
+    writeJsonAtomic(stampPath, { slug, exitCode, kind, ts: now });
   } catch (_err) {
     /* ignore */
   }
@@ -306,11 +303,7 @@ function recordRecentError(hub, entry) {
     if (!Array.isArray(list)) list = [];
     list.push(entry);
     fs.mkdirSync(path.dirname(recentErrorsFile(hub)), { recursive: true });
-    fs.writeFileSync(
-      recentErrorsFile(hub),
-      `${JSON.stringify(list.slice(-RECENT_ERRORS_LIMIT), null, 2)}\n`,
-      'utf8',
-    );
+    writeJsonAtomic(recentErrorsFile(hub), list.slice(-RECENT_ERRORS_LIMIT));
   } catch (_err) { /* ignore */ }
 }
 
@@ -566,7 +559,7 @@ function markRateLimitCooldown(hub, secs = 120, provider = '') {
   } catch (_err) { /* first cooldown */ }
   try {
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, `${JSON.stringify({ provider: provider || 'fleet', until, secs, at: now, t: nowIso() })}\n`, 'utf8');
+    writeJsonAtomic(target, { provider: provider || 'fleet', until, secs, at: now, t: nowIso() });
   } catch (_err) { /* best-effort */ }
   try {
     logEvent(hub, {
@@ -762,7 +755,7 @@ function markMailDispatched(hub, slug, files, retrySecs = 0, leaseSecs = 0) {
     const fingerprint = dispatchFingerprint(file);
     if (!next.some((item) => sameFingerprint(item, fingerprint))) next.push({ ...fingerprint, dispatchedAt: now });
   }
-  fs.writeFileSync(target, JSON.stringify({ handled: next.slice(-200) }, null, 2));
+  writeJsonAtomic(target, { handled: next.slice(-200) });
 }
 
 /** Clear hub/agent dispatch markers so unarchived mail may launch again (e.g. hard-fail). */
@@ -803,7 +796,7 @@ function backoffFailedDispatch(hub, slug, retrySecs, backoffSecs = AGENT_FAILURE
     fs.existsSync(path.join(inboxDir, item.file)) ? { ...item, dispatchedAt: shifted } : item
   ));
   try {
-    fs.writeFileSync(target, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    writeJsonAtomic(target, state);
   } catch (_err) {
     /* ignore */
   }
@@ -987,11 +980,7 @@ function markOperatorStop(hub, slug) {
   try {
     const target = operatorStopStampPath(hub, slug);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(
-      target,
-      `${JSON.stringify({ slug, at: Math.floor(Date.now() / 1000), t: nowIso() })}\n`,
-      'utf8',
-    );
+    writeJsonAtomic(target, { slug, at: Math.floor(Date.now() / 1000), t: nowIso() });
   } catch (_err) { /* best-effort */ }
 }
 

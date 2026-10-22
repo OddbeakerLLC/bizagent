@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { appDir, ensureDir, readJson } = require('./config');
+const { writeJsonAtomic } = require('./atomic-state');
 const { logEvent } = require('./log');
 
 const MAX_DISPLAY_NAME = 80;
@@ -41,7 +42,7 @@ function setProfile(hub, patch = {}) {
     updated_at: new Date().toISOString(),
   };
   ensureDir(appDir(hub));
-  fs.writeFileSync(profilePath(hub), `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+  writeJsonAtomic(profilePath(hub), data, { mode: 0o600 });
 
   logEvent(hub, {
     event: 'profile_updated',

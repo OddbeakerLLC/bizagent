@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { appDir, ensureDir, readJson } = require('./config');
+const { writeJsonAtomic } = require('./atomic-state');
 const { logEvent } = require('./log');
 
 function authPath(hub) {
@@ -30,8 +31,8 @@ function initAuth(hub, username, password) {
     password_hash: hashPassword(password, salt),
     created_at: new Date().toISOString(),
   };
-  fs.writeFileSync(authPath(hub), `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
-  fs.writeFileSync(sessionPath(hub), '{}\n', { mode: 0o600 });
+  writeJsonAtomic(authPath(hub), data, { mode: 0o600 });
+  writeJsonAtomic(sessionPath(hub), {}, { mode: 0o600 });
   logEvent(hub, {
     event: 'auth_init',
     username: username
@@ -55,8 +56,7 @@ function loadSessions(hub) {
 }
 
 function saveSessions(hub, sessions) {
-  ensureDir(appDir(hub));
-  fs.writeFileSync(sessionPath(hub), `${JSON.stringify(sessions, null, 2)}\n`, { mode: 0o600 });
+  writeJsonAtomic(sessionPath(hub), sessions, { mode: 0o600 });
 }
 
 function createSession(hub, username) {

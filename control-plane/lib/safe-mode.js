@@ -13,16 +13,17 @@
 
 const fs = require('fs');
 const path = require('path');
+const { readJsonState, writeJsonAtomic } = require('./atomic-state');
 
 function flagPath(hub) {
   return path.join(hub, '.bizagent', 'safe-mode.json');
 }
 
 function readFlag(hub) {
-  try {
-    const raw = JSON.parse(fs.readFileSync(flagPath(hub), 'utf8'));
-    if (raw && typeof raw === 'object') return raw;
-  } catch (_err) { /* absent or corrupt */ }
+  // Tolerant read: a torn flag file falls back to the last-good .bak rather
+  // than silently dropping the hub out of safe mode.
+  const raw = readJsonState(flagPath(hub), null);
+  if (raw && typeof raw === 'object') return raw;
   return null;
 }
 
@@ -32,15 +33,11 @@ function isSafeMode(hub) {
 }
 
 function enterSafeMode(hub, reason) {
-  const dir = path.dirname(flagPath(hub));
   try {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
+    return !!writeJsonAtomic(
       flagPath(hub),
-      `${JSON.stringify({ active: true, reason: String(reason || ''), ts: new Date().toISOString() }, null, 2)}\n`,
-      'utf8',
+      { active: true, reason: String(reason || ''), ts: new Date().toISOString() },
     );
-    return true;
   } catch (_err) {
     return false;
   }

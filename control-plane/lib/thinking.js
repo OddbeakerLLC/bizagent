@@ -14,24 +14,20 @@
 const fs = require('fs');
 const path = require('path');
 const { appDir } = require('./config');
+const { readJsonState, writeJsonAtomic } = require('./atomic-state');
 
 function thinkingFile(hub) {
   return path.join(appDir(hub), 'thinking.json');
 }
 
 function readThinking(hub) {
-  try {
-    const data = JSON.parse(fs.readFileSync(thinkingFile(hub), 'utf8'));
-    return data && typeof data === 'object' ? data : {};
-  } catch (_err) {
-    return {};
-  }
+  const data = readJsonState(thinkingFile(hub), null);
+  return data && typeof data === 'object' ? data : {};
 }
 
 function writeThinking(hub, data) {
   try {
-    fs.mkdirSync(appDir(hub), { recursive: true });
-    fs.writeFileSync(thinkingFile(hub), `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+    writeJsonAtomic(thinkingFile(hub), data);
   } catch (_err) {
     /* best-effort — thinking stream is a UX nicety, never critical */
   }

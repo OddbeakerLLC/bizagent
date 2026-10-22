@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { appDir, ensureDir, readJson } = require('./config');
+const { writeJsonAtomic } = require('./atomic-state');
 const { compactHubSession, resetHubSession } = require('./hub-memory');
 const { logEvent } = require('./log');
 
@@ -332,9 +333,9 @@ function pendingAgentWorkFile(hub) {
 function setActiveConversation(hub, id) {
   if (!id || !getConversation(hub, id)) return false;
   ensureDir(appDir(hub));
-  fs.writeFileSync(
+  writeJsonAtomic(
     activeConversationFile(hub),
-    `${JSON.stringify({ id, updated_at: new Date().toISOString() }, null, 2)}\n`,
+    { id, updated_at: new Date().toISOString() },
   );
   return true;
 }
@@ -359,11 +360,7 @@ function readPendingAgentWork(hub) {
 }
 
 function writePendingAgentWork(hub, bySlug) {
-  ensureDir(appDir(hub));
-  fs.writeFileSync(
-    pendingAgentWorkFile(hub),
-    `${JSON.stringify({ bySlug }, null, 2)}\n`,
-  );
+  writeJsonAtomic(pendingAgentWorkFile(hub), { bySlug });
 }
 
 /**
@@ -493,11 +490,7 @@ function readCrossChatAlerts(hub) {
 }
 
 function writeCrossChatAlerts(hub, alerts) {
-  ensureDir(appDir(hub));
-  fs.writeFileSync(
-    crossChatAlertsFile(hub),
-    `${JSON.stringify({ alerts }, null, 2)}\n`,
-  );
+  writeJsonAtomic(crossChatAlertsFile(hub), { alerts });
 }
 
 /**

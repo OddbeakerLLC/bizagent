@@ -109,6 +109,10 @@ const {
   stopAgentTurn,
 } = require("./lib/dispatcher");
 const {
+  registerCrashHandlers,
+  runStartupRecovery,
+} = require("./lib/startup-recovery");
+const {
   listCompanyFiles,
   parseMultipart,
   readRequestBuffer,
@@ -2207,15 +2211,28 @@ function start(hubInput) {
   setOnConversationMutated((_hub, id) => {
     try { pushConv(config, id); } catch (_) {}
   });
+  // Crash resilience: checkpoint state + log before any exit path (SIGKILL
+  // excepted — accepted data loss). unhandledRejection logs and keeps serving.
+  registerCrashHandlers(config);
+  // Reconcile state a crashed previous process left behind (pending turns,
+  // unrouted outbox mail, stale locks/pidfiles, interrupted dispatches).
+  // Runs before writePidFile so a stale predecessor pidfile is still visible.
+  runStartupRecovery(config, require("./lib/dispatcher"));
   // Own the pidfile for the lifetime of this process (systemd, nohup, or bare node).
   writePidFile(config.hub);
   const clear = () => clearPidFile(config.hub);
   process.once("exit", clear);
   process.once("SIGINT", () => {
+    try {
+      logEvent(config.hub, { event: "control_plane_shutdown", signal: "SIGINT" });
+    } catch (_err) { /* ignore */ }
     clear();
     process.exit(130);
   });
   process.once("SIGTERM", () => {
+    try {
+      logEvent(config.hub, { event: "control_plane_shutdown", signal: "SIGTERM" });
+    } catch (_err) { /* ignore */ }
     clear();
     process.exit(143);
   });

@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { cliJsonMtimeMs, loadCliJson } = require("./cli-config");
+const { readJsonState, writeJsonAtomic } = require("./atomic-state");
 
 function hubPath(input) {
   return path.resolve(
@@ -45,12 +46,12 @@ function loadHubEnv(hub) {
   }
 }
 
+/**
+ * Tolerant JSON read: main file → `<file>.bak` → fallback (see atomic-state).
+ * A torn/corrupt state file no longer silently resets to empty defaults.
+ */
 function readJson(file, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch (_err) {
-    return fallback;
-  }
+  return readJsonState(file, fallback);
 }
 
 function ensureDir(dir) {
@@ -68,14 +69,9 @@ function loadRegistry(hub) {
   });
 }
 
-/** Atomic-ish registry write (temp + rename). Preserves formatting with trailing newline. */
+/** Atomic registry write (tmp + fsync + rename, .bak kept). */
 function writeRegistry(hub, registry) {
-  const file = registryFile(hub);
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  const body = `${JSON.stringify(registry, null, 2)}\n`;
-  fs.writeFileSync(tmp, body, "utf8");
-  fs.renameSync(tmp, file);
-  return registry;
+  return writeJsonAtomic(registryFile(hub), registry);
 }
 
 function registryMtimeMs(hub) {

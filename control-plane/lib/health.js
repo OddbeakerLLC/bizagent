@@ -24,6 +24,7 @@ const { execFileSync } = require('child_process');
 
 const logCaps = require('./log-caps');
 const safeMode = require('./safe-mode');
+const { writeJsonAtomic } = require('./atomic-state');
 
 const MB = 1024 * 1024;
 const GB = 1024 * MB;
@@ -411,8 +412,7 @@ function clockSkewMs(hub) {
     if (monoDelta >= 0) skew = wallDelta - monoDelta;
   }
   try {
-    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-    fs.writeFileSync(stateFile, `${JSON.stringify({ wallMs: wall, monoMs: mono })}\n`, 'utf8');
+    writeJsonAtomic(stateFile, { wallMs: wall, monoMs: mono });
   } catch (_err) { /* ignore */ }
   return skew;
 }
@@ -556,8 +556,7 @@ function postHealthChatLine(hub, report) {
   const now = Date.now();
   if (prev && prev.key === key && now - Number(prev.ts || 0) < 30 * 60 * 1000) return false;
   try {
-    fs.mkdirSync(path.dirname(stampFile), { recursive: true });
-    fs.writeFileSync(stampFile, `${JSON.stringify({ key, ts: now })}\n`, 'utf8');
+    writeJsonAtomic(stampFile, { key, ts: now });
   } catch (_err) { /* ignore */ }
 
   const bad = (report.checks || []).filter((c) => c.level !== 'ok');
@@ -660,10 +659,7 @@ function maybeAutoExitSafeMode(hub, report) {
   // Persist the streak atomically (tmp + rename) so concurrent probes see a
   // whole number; a lost update at worst delays the exit by one run.
   try {
-    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-    const tmp = `${stateFile}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, `${JSON.stringify({ okStreak: decision.okStreak, ts: new Date().toISOString() })}\n`, 'utf8');
-    fs.renameSync(tmp, stateFile);
+    writeJsonAtomic(stateFile, { okStreak: decision.okStreak, ts: new Date().toISOString() });
   } catch (_err) { /* unwritable disk — exit simply waits for a later run */ }
   if (!decision.exit) return false;
   if (!safeMode.exitSafeMode(hub)) return false;

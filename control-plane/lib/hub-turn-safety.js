@@ -25,6 +25,7 @@ const {
 const { logEvent, logError, appendLog } = require('./log');
 const { routeOutboxes, writeOutboxMessage } = require('./mail');
 const { clearThinking } = require('./thinking');
+const { readJsonState, writeJsonAtomic } = require('./atomic-state');
 
 const DEFAULT_MAX_BLOB_CHARS = 4000;
 const MIN_BLOB_CHARS = 12;
@@ -88,20 +89,12 @@ function clearReservedReplyBody(hub, conversationId) {
 }
 
 function readPendingHubTurns(hub) {
-  try {
-    const data = JSON.parse(fs.readFileSync(pendingHubTurnsFile(hub), 'utf8'));
-    return Array.isArray(data.turns) ? data.turns : [];
-  } catch (_err) {
-    return [];
-  }
+  const data = readJsonState(pendingHubTurnsFile(hub), null);
+  return data && Array.isArray(data.turns) ? data.turns : [];
 }
 
 function writePendingHubTurns(hub, turns) {
-  ensureDir(appDir(hub));
-  fs.writeFileSync(
-    pendingHubTurnsFile(hub),
-    `${JSON.stringify({ turns: turns.slice(-20) }, null, 2)}\n`,
-  );
+  writeJsonAtomic(pendingHubTurnsFile(hub), { turns: turns.slice(-20) });
 }
 
 /**

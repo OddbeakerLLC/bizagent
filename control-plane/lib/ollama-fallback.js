@@ -24,6 +24,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const { classifyProviderError } = require('./provider-errors');
+const { writeJsonAtomic } = require('./atomic-state');
 
 const FALLBACK_MODEL = process.env.BIZAGENT_OLLAMA_FALLBACK_MODEL || 'qwen3:4b';
 const OLLAMA_BASE = process.env.BIZAGENT_OLLAMA_URL || 'http://127.0.0.1:11434';
@@ -47,8 +48,7 @@ function isFallbackActive(hub) {
 
 function writeFlag(hub, flag) {
   try {
-    fs.mkdirSync(path.dirname(flagPath(hub)), { recursive: true });
-    fs.writeFileSync(flagPath(hub), `${JSON.stringify(flag, null, 2)}\n`, 'utf8');
+    writeJsonAtomic(flagPath(hub), flag);
     return true;
   } catch (_err) {
     return false;
