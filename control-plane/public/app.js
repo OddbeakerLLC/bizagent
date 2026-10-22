@@ -3537,7 +3537,18 @@ function bannerTimeAgo(ts) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+// Per-session dismissal of recent-error cards in the health banner (simplest
+// option: not persisted — a page reload or a new server-side entry shows it
+// again; entries also age out of the server ring buffer after 24h).
+const dismissedBannerErrors = new Set();
+let lastHealthData = null;
+
+function bannerErrorKey(e) {
+  return `${e.slug || ''}|${e.ts || ''}|${e.title || ''}`;
+}
+
 function renderHealthBanner(h) {
+  lastHealthData = h;
   const el = document.getElementById('healthBanner');
   if (!el) return;
   const level = (h && h.level) || 'unknown';
@@ -3545,12 +3556,13 @@ function renderHealthBanner(h) {
   const fallback = !!h.provider_fallback_active;
   const bad = (h.checks || []).filter((c) => c.level && c.level !== 'ok');
   const recentErrors = h && Array.isArray(h.recent_errors) ? h.recent_errors : [];
+  const visibleErrors = recentErrors.filter((e) => !dismissedBannerErrors.has(bannerErrorKey(e)));
   const cooldown = h && Number(h.rate_limit_cooldown_secs) > 0
     ? Number(h.rate_limit_cooldown_secs)
     : 0;
   const red = safeMode || level === 'critical' || level === 'emergency';
   const yellow = !red && (level === 'warn' || fallback || level === 'unknown' ||
-    recentErrors.length > 0 || cooldown > 0);
+    visibleErrors.length > 0 || cooldown > 0);
   if (!red && !yellow) {
     el.hidden = true;
     el.innerHTML = '';
@@ -3564,8 +3576,8 @@ function renderHealthBanner(h) {
       ? `Hub health: ${level} — agent runs may fail`
       : fallback
         ? 'Paid LLM provider refused; hub turns running on local Ollama (provider_fallback_active)'
-        : recentErrors.length
-          ? `Recent agent errors (${recentErrors.length})`
+        : visibleErrors.length
+          ? `Recent agent errors (${visibleErrors.length})`
           : cooldown
             ? 'Dispatches paused — rate-limit cooldown'
             : `Hub health: ${level}`;
@@ -3573,13 +3585,14 @@ function renderHealthBanner(h) {
   const cooldownHtml = cooldown > 0
     ? `<span class="health-banner-detail">Fleet dispatches paused for ${cooldown}s (rate-limit cooldown) — auto-resumes.</span>`
     : '';
-  const errorsHtml = recentErrors.slice(0, 5).map((e) => {
+  const errorsHtml = visibleErrors.slice(0, 5).map((e) => {
     const agent = e.slug ? ` — ${bannerEscape(e.slug)}` : '';
     const fix = e.fix ? ` Fix: ${bannerEscape(e.fix)}` : '';
     return (
       `<div class="health-banner-error">` +
       `<strong>${bannerEscape(e.title || 'Agent error')}</strong>${agent} ` +
       `<span class="health-banner-detail">${bannerEscape(bannerTimeAgo(e.ts))}${fix}</span>` +
+      `<button type="button" class="health-banner-error-dismiss" data-key="${bannerEscape(bannerErrorKey(e))}" title="Dismiss this error card">dismiss</button>` +
       `</div>`
     );
   }).join('');
@@ -3618,6 +3631,17 @@ async function pollHealthBanner() {
 }
 pollHealthBanner();
 setInterval(pollHealthBanner, 30000);
+
+// Dismiss a recent-error card in the health banner (per-session; the card
+// comes back on reload or if the server reports it again with a new ts).
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest && ev.target.closest('.health-banner-error-dismiss');
+  if (!btn) return;
+  const key = btn.getAttribute('data-key');
+  if (!key) return;
+  dismissedBannerErrors.add(key);
+  if (lastHealthData) renderHealthBanner(lastHealthData);
+});
 
 // --- Cross-conversation waiting indicator -------------------------------------
 // When an agent error lands in a conversation the operator is not viewing,

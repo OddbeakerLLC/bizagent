@@ -1587,6 +1587,20 @@ button {
 .health-banner-error strong {
   font-size: 12px;
 }
+.health-banner-error-dismiss {
+  margin-left: auto;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #fff;
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.health-banner-error-dismiss:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
 
 /* --- Cross-conversation waiting indicator (one line, never the full dump) --- */
 .cross-chat-alert {
