@@ -42,8 +42,12 @@ function classifyProviderError(text) {
     };
   }
 
+  // 429 must stand alone as a token (HTTP status, "Error 429", "code 429") —
+  // a bare "429" substring matched unrelated numbers in paths/timestamps and
+  // produced false rate-limit cards (operator report 2026-10-23). Real
+  // rate-limit phrasing still matches on its own.
   if (
-    /429|rate.?limit|too many requests|slow down/i.test(t) &&
+    (/\b429\b/.test(t) || /rate.?limit|too many requests|slow down/i.test(t)) &&
     !/credits|spending limit/i.test(t)
   ) {
     return {
@@ -79,7 +83,7 @@ function classifyProviderError(text) {
     };
   }
 
-  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|network|fetch failed|socket hang up/i.test(t)) {
+  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|network|fetch failed|socket hang up|connection error/i.test(t)) {
     return {
       kind: 'network',
       title: 'LLM API network error',
