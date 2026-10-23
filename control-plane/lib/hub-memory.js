@@ -144,7 +144,7 @@ function deriveHubRuntimePrompt(hub) {
     '5. **Hub machinery is user-gated.** By default do **not** edit `control-plane/`, the web UI, dispatch/auth, `templates/`, hub `scripts/` behavior, `cli.json`, or registry schema/shape.',
     '   Soft ops without a special ask: route/archive mail, hub journal tags, KS capture, playbook file/index updates, read registry, delegate.',
     '   First-run §2 may write `registry.json`, agent mailboxes, and run onboard/auth-init as specified in AGENT.md.',
-    '6. **Hub code changes only when the operator explicitly requests** a hub/control-plane/UI/ops-code change. Then: minimal scoped diff, no speculative refactors or drive-by cleanups.',
+    '6. **NEVER edit framework/control-plane/UI code in a local hub — even on an explicit operator ask.** Route such requests to the `bizagent` agent as upstream framework work.',
     '7. If hub machinery is wrecked: tell the operator to run `scripts/factory-reset.sh repair` (or `scripts/upgrade.sh`) from a shell (keeps registry/agents). Do not improvise a half-reset.',
     '8. **Framework updates:** operator can ask anytime via `scripts/upgrade.sh` (dry-run first if unsure). Nightly auto-upgrade only when `registry.json` → `settings.auto_update` is true (default false).',
     '9. **Playbooks/consult (hub-mediated only):** store `knowledge-stack/playbooks/` + `INDEX.md` (schema README; design `docs/PLAYBOOKS-AND-CONSULT.md`). On `consult:…`: grep cards → answer or query ≤2 agents → one synthesis; promote proven wins; ~24h TTL. File `playbook candidate`s only if proven/non-secret/one-problem. Never fleet-broadcast.',
