@@ -341,19 +341,21 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   const kind = classified ? classified.kind : 'error';
   if (shouldSkipDuplicateAgentError(hub, slug, exitCode, kind)) return;
 
-  // Per-provider cooldowns (2026-10-22): a 429 freezes only the failing
-  // provider's bucket. Provider comes from the registry (model/provider
-  // fields); when it cannot be identified, the fleet-wide fallback file
-  // gates every launch as before. The error card names the provider.
+  // Provider queue (2026-10-23): every failed turn also feeds the
+  // per-provider consecutive-failure counter (exponential backoff, then a
+  // hold + one-time operator notice instead of retry-looping forever).
   let provider = '';
-  if (classified && classified.kind === 'rate_limit') {
-    try {
-      const registry = loadRegistry(hub);
-      provider = agentProvider(registry, slug);
+  let queueHold = null;
+  try {
+    const registry = loadRegistry(hub);
+    provider = agentProvider(registry, slug);
+    if (classified && classified.kind === 'rate_limit') {
       markRateLimitCooldown(hub, rateLimitCooldownSecs(registry), provider);
       classified = nameProviderInClassification(classified, provider);
-    } catch (_err) { /* best-effort */ }
-  }
+    }
+    const q = recordProviderFailure(hub, registry, provider, kind);
+    if (q.justHeld) queueHold = q;
+  } catch (_err) { /* best-effort */ }
 
   // Hub-only Ollama fallback: paid provider reachable but refused (credits /
   // auth / model). Background — classifies, checks Ollama, activates the
@@ -371,6 +373,34 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   });
 
   const cid = resolveAlertConversationId(hub, conversationId, slug);
+
+  // One-time notice when a provider's queue transitions into the held state
+  // (operator request 2026-10-23: hold the mail and say so, never loop).
+  if (queueHold && cid) {
+    try {
+      const holdMsg = [
+        `**Provider queue: pending mail held for \`${provider || 'fleet'}\`**`,
+        '',
+        `${queueHold.consecutive} consecutive failed turns (last kind: ${queueHold.lastKind || 'error'}). Pending mail for agents on this provider is held — no more automatic retries until it is resumed.`,
+        '',
+        '**Fix:** Resolve the provider issue, then tell the hub to resume the queue — it clears the hold and re-dispatches the held mail.',
+      ].join('\n');
+      appendMessage(hub, cid, 'status', holdMsg, { kind: STATUS_ERROR_KIND });
+      notifyConversationMutated(hub, cid);
+    } catch (_err) { /* ignore */ }
+    try {
+      recordRecentError(hub, {
+        ts: Date.now(),
+        slug,
+        exitCode,
+        kind: 'dispatch_held',
+        title: `Provider queue held (${provider || 'fleet'})`,
+        summary: `${queueHold.consecutive} consecutive failures — pending mail held, no more auto-retries.`,
+        fix: 'Fix the provider, then have the hub resume the queue.',
+        conversationId: cid || '',
+      });
+    } catch (_err) { /* ignore */ }
+  }
 
   // Operator request (2026-10-21): feed the console health banner so recent
   // connection / rate-limit / provider errors are visible at the top of the
@@ -497,6 +527,14 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
  * do not always deliver Node 'exit' to the long-lived control plane).
  */
 function notifyAgentExitFromLogs(hub, slug, exitCode) {
+  // Successful turn: clear the provider queue's backoff/hold for this
+  // agent's provider (2026-10-23 provider queue).
+  if (Number(exitCode) === 0) {
+    try {
+      recordProviderSuccess(hub, agentProvider(loadRegistry(hub), slug));
+    } catch (_err) { /* best-effort */ }
+    return;
+  }
   // Operator hard-stop: suppress failure chatter + hard-fail re-dispatch.
   if (wasOperatorStopped(hub, slug)) {
     try {
@@ -541,6 +579,18 @@ function rateLimitCooldownSecs(registry) {
   const n = Number(dispatch.rate_limit_cooldown_secs);
   if (!Number.isFinite(n)) return 120;
   return Math.max(30, Math.min(3600, Math.floor(n)));
+}
+
+/**
+ * Registry settings.dispatch.recent_error_ttl_secs (default 300, clamp 30–86400).
+ * How long a recent-error entry stays visible in the console health banner
+ * (operator request 2026-10-23: 5 minutes by default, not 24h).
+ */
+function recentErrorTtlSecs(registry) {
+  const dispatch = (registry && registry.settings && registry.settings.dispatch) || {};
+  const n = Number(dispatch.recent_error_ttl_secs);
+  if (!Number.isFinite(n)) return 300;
+  return Math.max(30, Math.min(24 * 3600, Math.floor(n)));
 }
 
 /**
@@ -604,6 +654,142 @@ function maxRateLimitCooldownRemaining(hub) {
     if (secs > max) max = secs;
   }
   return max;
+}
+
+// --- Provider dispatch queue (2026-10-23 operator request) -------------------
+// Per-provider serialized dispatch with exponential backoff on consecutive
+// failures (default ladder 60s → 120s → 300s → 900s cap) and a max-retry
+// limit that HOLDS the provider's pending mail and notifies the operator
+// once, instead of retry-looping forever. State lives in
+// .bizagent/provider-queue/<provider>.json; a successful turn on the
+// provider clears backoff + hold; the operator (via the hub) can resume a
+// held queue explicitly.
+function failureBackoffLadder(registry) {
+  const dispatch = (registry && registry.settings && registry.settings.dispatch) || {};
+  const raw = Array.isArray(dispatch.failure_backoff_secs) ? dispatch.failure_backoff_secs : null;
+  const list = (raw && raw.length ? raw : [60, 120, 300, 900])
+    .map((n) => Math.max(10, Math.min(24 * 3600, Math.floor(Number(n) || 0))))
+    .filter((n) => n > 0);
+  return list.length ? list : [60, 120, 300, 900];
+}
+
+function maxProviderFailures(registry) {
+  const dispatch = (registry && registry.settings && registry.settings.dispatch) || {};
+  const n = Number(dispatch.max_provider_failures);
+  if (!Number.isFinite(n)) return 5;
+  return Math.max(1, Math.min(20, Math.floor(n)));
+}
+
+/**
+ * Minimum spacing between two launches on the same provider — the "API queue"
+ * (operator clarification 2026-10-23: a 0.5 second delay between API calls).
+ * settings.dispatch.api_min_interval_ms, default 500, clamp 0–60000.
+ */
+function apiMinIntervalMs(registry) {
+  const dispatch = (registry && registry.settings && registry.settings.dispatch) || {};
+  const n = Number(dispatch.api_min_interval_ms);
+  if (!Number.isFinite(n)) return 500;
+  return Math.max(0, Math.min(60000, Math.floor(n)));
+}
+
+function providerQueueFile(hub, provider) {
+  return path.join(appDir(hub), 'provider-queue', `${provider || 'fleet'}.json`);
+}
+
+function readProviderQueueState(hub, provider) {
+  try {
+    const s = JSON.parse(fs.readFileSync(providerQueueFile(hub, provider), 'utf8'));
+    return s && typeof s === 'object' ? s : {};
+  } catch (_err) {
+    return {};
+  }
+}
+
+function writeProviderQueueState(hub, provider, state) {
+  try {
+    fs.mkdirSync(path.dirname(providerQueueFile(hub, provider)), { recursive: true });
+    writeJsonAtomic(providerQueueFile(hub, provider), state);
+  } catch (_err) { /* best-effort */ }
+}
+
+/** Dispatch gate for a provider: { held, backoffRemaining, consecutive }. */
+function providerQueueGate(hub, provider) {
+  const s = readProviderQueueState(hub, provider);
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    held: !!s.held,
+    backoffRemaining: Math.max(0, Number(s.backoffUntil || 0) - now),
+    consecutive: Number(s.consecutive || 0),
+  };
+}
+
+/**
+ * Record one failed turn for `provider`. Returns the new state including
+ * justHeld (true only on the transition into the held state, so the
+ * operator is notified once, not on every further failure).
+ */
+function recordProviderFailure(hub, registry, provider, kind) {
+  const now = Math.floor(Date.now() / 1000);
+  const prev = readProviderQueueState(hub, provider);
+  const consecutive = Number(prev.consecutive || 0) + 1;
+  const ladder = failureBackoffLadder(registry);
+  const backoff = ladder[Math.min(consecutive - 1, ladder.length - 1)] || ladder[ladder.length - 1];
+  const held = consecutive >= maxProviderFailures(registry) ? true : !!prev.held;
+  const next = {
+    provider: provider || 'fleet',
+    consecutive,
+    backoffUntil: now + backoff,
+    held,
+    heldAt: held ? Number(prev.heldAt || 0) || now : 0,
+    lastKind: kind || '',
+    lastT: nowIso(),
+  };
+  writeProviderQueueState(hub, provider, next);
+  try {
+    logEvent(hub, {
+      event: 'provider_failure',
+      provider: provider || 'fleet',
+      consecutive,
+      backoff_secs: backoff,
+      held,
+      kind: kind || '',
+      t: nowIso(),
+    });
+  } catch (_err) { /* ignore */ }
+  return { ...next, justHeld: held && !prev.held };
+}
+
+/** A successful turn on this provider clears backoff + hold. */
+function recordProviderSuccess(hub, provider) {
+  const prev = readProviderQueueState(hub, provider);
+  if (!prev.consecutive && !prev.held && !prev.backoffUntil) return;
+  writeProviderQueueState(hub, provider, {
+    provider: provider || 'fleet',
+    consecutive: 0,
+    backoffUntil: 0,
+    held: false,
+    heldAt: 0,
+    lastT: nowIso(),
+  });
+  try {
+    logEvent(hub, { event: 'provider_recovered', provider: provider || 'fleet', t: nowIso() });
+  } catch (_err) { /* ignore */ }
+}
+
+/** Operator/hub-initiated resume of a held or backing-off provider queue. */
+function resumeProviderQueue(hub, provider) {
+  writeProviderQueueState(hub, provider, {
+    provider: provider || 'fleet',
+    consecutive: 0,
+    backoffUntil: 0,
+    held: false,
+    heldAt: 0,
+    resumedAt: Math.floor(Date.now() / 1000),
+    lastT: nowIso(),
+  });
+  try {
+    logEvent(hub, { event: 'provider_queue_resumed', provider: provider || 'fleet', t: nowIso() });
+  } catch (_err) { /* ignore */ }
 }
 
 /**
@@ -1195,8 +1381,9 @@ function launchAgent(config, slug, model = '', cliName = '') {
     'printf "%s === dispatch end slug=%s code=%s duration_ms=%s ===\\n" "$(ts)" "$slug" "$code" "$dur" >> "$agentlog"',
     'printf "%s === dispatch end slug=%s code=%s duration_ms=%s ===\\n" "$(ts)" "$slug" "$code" "$dur" >> "$stderrlog"',
     'printf "%s control-plane: cli_exit slug=%s code=%s duration_ms=%s t=%s\\n" "$(ts)" "$slug" "$code" "$dur" "$(ts)" >> "$cplog"',
-    // Detached CP may miss Node 'exit'; notify operator (credits/auth/etc.) from logs.
-    'if [ "$code" -ne 0 ] && command -v node >/dev/null 2>&1; then',
+    // Detached CP may miss Node 'exit'; notify operator (credits/auth/etc.)
+    // from logs on failure, clear the provider queue on success.
+    'if command -v node >/dev/null 2>&1; then',
     '  node -e "try{require(process.argv[1]).notifyAgentExitFromLogs(process.argv[2],process.argv[3],Number(process.argv[4]))}catch(e){}" "$HUB/control-plane/lib/dispatcher.js" "$HUB" "$slug" "$code" >>"$cplog" 2>&1 || true',
     'fi',
     'exit "$code"',
@@ -1211,6 +1398,13 @@ function launchAgent(config, slug, model = '', cliName = '') {
   });
 
   child.on('exit', (code) => {
+    if (code === 0 || code === null) {
+      // Success: clear this provider's queue backoff/hold (best-effort; the
+      // shell wrapper's cold-path notify also covers detached exits).
+      try {
+        recordProviderSuccess(hub, agentProvider(loadRegistry(hub), slug));
+      } catch (_err) { /* ignore */ }
+    }
     if (code !== 0 && code !== null && !wasOperatorStopped(hub, slug)) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, slug, code, stderrTail, null);
@@ -1573,6 +1767,11 @@ function launchHubCold(config, ctx) {
 
   child.on('exit', (code) => {
     const opStop = wasOperatorStopped(hub, 'hub');
+    if (code === 0 || code === null) {
+      try {
+        recordProviderSuccess(hub, agentProvider(loadRegistry(hub), 'hub'));
+      } catch (_err) { /* ignore */ }
+    }
     if (code !== 0 && code !== null && !opStop) {
       const stderrTail = readStderrTail(agentStderr);
       recordAgentError(hub, 'hub', code, stderrTail, conversationId);
@@ -1668,25 +1867,51 @@ function dispatchPendingAgents(config) {
   let skippedLocked = 0;
   let skippedCap = 0;
   let skippedCooldown = 0;
+  let skippedQueue = 0;
+  let skippedSpacing = 0;
   const retrySecs = dispatchRetrySecs(config);
   const serialBusy = () => !allowConcurrency && (hubRunning + agentRunning) >= 1;
   // Fleet-wide fallback cooldown (unnamed file): gates every launch, for
   // providers we cannot identify from the model string and as a hard stop.
   const fleetCooldownSecs = rateLimitCooldownRemaining(config.hub);
+  // API queue (2026-10-23): minimum spacing between two launches on the same
+  // provider (default 500ms) so calls to one provider are serialized. Tick
+  // granularity is coarser than 500ms, so the first launch in a tick always
+  // goes and the next same-provider launch waits for a later tick.
+  const minIntervalMs = apiMinIntervalMs(config.registry);
+  const lastLaunchAtByProvider = new Map();
+  const apiQueueOpen = (provider) => {
+    if (minIntervalMs <= 0) return true;
+    const last = lastLaunchAtByProvider.get(provider) || 0;
+    return Date.now() - last >= minIntervalMs;
+  };
+  const noteLaunch = (provider) => lastLaunchAtByProvider.set(provider, Date.now());
+  // Provider queue (2026-10-23): a provider with consecutive failures backs
+  // off exponentially; past the max-retry limit its pending mail is HELD
+  // (no automatic retries until the operator/hub resumes the queue).
+  const queueOpen = (provider) => {
+    const gate = providerQueueGate(config.hub, provider);
+    return !gate.held && gate.backoffRemaining <= 0;
+  };
 
   const hubNew = pendingUndispatchedMail(config.hub, 'hub', retrySecs, config.lockLeaseSecs);
   if (hubNew.length > 0) {
     const hubProvider = agentProvider(config.registry, 'hub');
     if (fleetCooldownSecs > 0 || rateLimitCooldownRemaining(config.hub, hubProvider) > 0) {
       skippedCooldown += 1;
+    } else if (!queueOpen(hubProvider)) {
+      skippedQueue += 1;
     } else if (serialBusy() || hubRunning >= hubSlots) {
       skippedCap += 1;
+    } else if (!apiQueueOpen(hubProvider)) {
+      skippedSpacing += 1;
     } else if (tryLock(config.hub, 'hub', config.lockLeaseSecs)) {
       markMailDispatched(config.hub, 'hub', hubNew, retrySecs, config.lockLeaseSecs);
       try {
         launchHub(config);
         launched += 1;
         hubRunning += 1;
+        noteLaunch(hubProvider);
       } catch (err) {
         try { fs.rmSync(lockDir(config.hub, 'hub'), { recursive: true, force: true }); } catch (_e) { /* ignore */ }
         logEvent(config.hub, {
@@ -1712,9 +1937,17 @@ function dispatchPendingAgents(config) {
       skippedCooldown += 1;
       continue;
     }
+    if (!queueOpen(provider)) {
+      skippedQueue += 1;
+      continue;
+    }
     const running = runningByProvider[provider] || 0;
     if (serialBusy() || running >= slotCapFor(provider)) {
       skippedCap += 1;
+      continue;
+    }
+    if (!apiQueueOpen(provider)) {
+      skippedSpacing += 1;
       continue;
     }
     if (tryLock(config.hub, agent.slug, config.lockLeaseSecs)) {
@@ -1723,6 +1956,7 @@ function dispatchPendingAgents(config) {
       launched += 1;
       runningByProvider[provider] = running + 1;
       agentRunning += 1;
+      noteLaunch(provider);
     } else {
       skippedLocked += 1;
     }
@@ -1733,6 +1967,8 @@ function dispatchPendingAgents(config) {
     skippedLocked,
     skippedCap,
     skippedCooldown,
+    skippedQueue,
+    skippedSpacing,
     running: hubRunning + agentRunning,
     hubRunning,
     agentRunning,
@@ -1758,7 +1994,14 @@ module.exports = {
   dispatchRetrySecs,
   drainHubTurnSafety,
   agentProvider,
+  apiMinIntervalMs,
   ensureDispatchPrompt,
+  failureBackoffLadder,
+  maxProviderFailures,
+  providerQueueGate,
+  recordProviderFailure,
+  recordProviderSuccess,
+  resumeProviderQueue,
   findAgentCliPid,
   getHubConversationId,
   getRecentHubInboxMessage,
@@ -1786,6 +2029,7 @@ module.exports = {
   promptFileFor,
   rateLimitCooldownRemaining,
   rateLimitCooldownSecs,
+  recentErrorTtlSecs,
   readRecentErrors,
   readStderrTail,
   recordAgentError,

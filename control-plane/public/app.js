@@ -3537,10 +3537,29 @@ function bannerTimeAgo(ts) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-// Per-session dismissal of recent-error cards in the health banner (simplest
-// option: not persisted — a page reload or a new server-side entry shows it
-// again; entries also age out of the server ring buffer after 24h).
-const dismissedBannerErrors = new Set();
+// Dismissal of recent-error cards in the health banner, persisted in
+// localStorage so dismissed cards stay hidden across page reloads (operator
+// request 2026-10-23). Entries still age out of the server ring buffer, and
+// a new occurrence (new ts) shows a fresh card.
+const DISMISSED_BANNER_ERRORS_KEY = 'bizagent.dismissedBannerErrors';
+let dismissedBannerErrors = new Set();
+try {
+  const rawSaved = JSON.parse(localStorage.getItem(DISMISSED_BANNER_ERRORS_KEY) || '[]');
+  if (Array.isArray(rawSaved)) dismissedBannerErrors = new Set(rawSaved);
+} catch (_err) { /* fresh set */ }
+
+function saveDismissedBannerErrors() {
+  try {
+    // Prune entries older than 24h so the stored list cannot grow unbounded.
+    const dayAgoMs = Date.now() - 24 * 60 * 60 * 1000;
+    const pruned = [...dismissedBannerErrors].filter((key) => {
+      const ts = Number(String(key).split('|')[1] || 0);
+      return !ts || ts >= dayAgoMs;
+    });
+    dismissedBannerErrors = new Set(pruned);
+    localStorage.setItem(DISMISSED_BANNER_ERRORS_KEY, JSON.stringify(pruned));
+  } catch (_err) { /* storage unavailable — session-only fallback */ }
+}
 let lastHealthData = null;
 
 function bannerErrorKey(e) {
@@ -3632,14 +3651,15 @@ async function pollHealthBanner() {
 pollHealthBanner();
 setInterval(pollHealthBanner, 30000);
 
-// Dismiss a recent-error card in the health banner (per-session; the card
-// comes back on reload or if the server reports it again with a new ts).
+// Dismiss a recent-error card in the health banner (persisted; the card
+// comes back only if the server reports the same error again with a new ts).
 document.addEventListener('click', (ev) => {
   const btn = ev.target.closest && ev.target.closest('.health-banner-error-dismiss');
   if (!btn) return;
   const key = btn.getAttribute('data-key');
   if (!key) return;
   dismissedBannerErrors.add(key);
+  saveDismissedBannerErrors();
   if (lastHealthData) renderHealthBanner(lastHealthData);
 });
 

@@ -106,6 +106,8 @@ const {
   isAgentActive,
   maxRateLimitCooldownRemaining,
   readRecentErrors,
+  recentErrorTtlSecs,
+  resumeProviderQueue,
   stopAgentTurn,
 } = require("./lib/dispatcher");
 const {
@@ -724,7 +726,8 @@ async function handleApi(config, req, res) {
       checks: report ? report.checks : [],
       // Operator request (2026-10-21): the banner also shows recent
       // connection / rate-limit / provider errors and the fleet cooldown.
-      recent_errors: readRecentErrors(config.hub),
+      // TTL is configurable (2026-10-23): settings.dispatch.recent_error_ttl_secs.
+      recent_errors: readRecentErrors(config.hub, recentErrorTtlSecs(config.registry) * 1000),
       // Max across per-provider cooldown files (2026-10-22) so the banner
       // shows while any provider bucket is paused.
       rate_limit_cooldown_secs: maxRateLimitCooldownRemaining(config.hub),
@@ -1103,6 +1106,21 @@ async function handleApi(config, req, res) {
       allow_concurrency: resolveAllowConcurrency(dispatch),
       env_forced_off: envForcesConcurrencyOff(),
     });
+  }
+
+  // Provider queue resume (2026-10-23): clears a held/backing-off provider
+  // queue so its pending mail dispatches again. Operator-initiated via the
+  // hub; the hub agent calls this after the operator confirms the provider
+  // is healthy again.
+  if (url.pathname === "/api/dispatch/provider-queue/resume" && req.method === "POST") {
+    const body = await parseBody(req);
+    const provider = String(body.provider || "").trim().toLowerCase();
+    if (!provider) {
+      return send(res, 400, { error: "provider is required" });
+    }
+    resumeProviderQueue(config.hub, provider);
+    didChangeState();
+    return send(res, 200, { ok: true, provider });
   }
 
   if (url.pathname === "/api/profile" && req.method === "GET") {

@@ -411,12 +411,20 @@ if (dispatcher.agentProvider(registry, 'gamma') !== 'grok') fail(1, 'gamma provi
 if (dispatcher.agentProvider(registry, 'hub') !== 'venice') fail(2, 'hub provider must resolve from hub_agent');
 if (dispatcher.agentProvider(registry, 'ghost') !== '') fail(3, 'unknown slug provider must be empty');
 
-// Per-provider slot caps from the agent_slots map: venice cap 2 launches
-// alpha+beta; grok cap 1 launches gamma. No global pool starving either.
+// Per-provider slot caps from the agent_slots map + API-queue serialization
+// (2026-10-23): venice launches alpha; beta (same provider) is deferred to a
+// later tick by the 0.5s same-provider spacing; grok launches gamma.
 const first = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
-if (first.launched !== 3) fail(4, `per-provider caps should launch all three, got ${JSON.stringify(first)}`);
-if (first.runningByProvider.venice !== 2 || first.runningByProvider.grok !== 1) {
+if (first.launched !== 2) fail(4, `per-provider caps + spacing should launch alpha+gamma, got ${JSON.stringify(first)}`);
+if (first.skippedSpacing !== 1) fail(4, `beta must wait for the same-provider API-queue spacing, got ${JSON.stringify(first)}`);
+if (first.runningByProvider.venice !== 1 || first.runningByProvider.grok !== 1) {
   fail(5, `running counts must be per provider, got ${JSON.stringify(first.runningByProvider)}`);
+}
+// Next tick: beta's deferred venice launch goes out (spacing is per tick).
+const firstB = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (firstB.launched !== 1) fail(4, `deferred beta must launch on the next tick, got ${JSON.stringify(firstB)}`);
+if (firstB.runningByProvider.venice !== 1) {
+  fail(5, `beta must count under venice on the next tick, got ${JSON.stringify(firstB.runningByProvider)}`);
 }
 
 // A Venice 429 freezes only the venice bucket: hub (venice) and alpha/beta
@@ -464,3 +472,117 @@ then
 fi
 
 echo "  ok: bizagent-dispatch.sh"
+
+# Provider dispatch queue (2026-10-23): exponential backoff on consecutive
+# failures (60s -> 120s -> 300s -> 900s cap), a max-retry hold that stops
+# auto-retries and notifies once, success clears, and the hub can resume.
+# Also: error-classifier tightening + configurable recent-error banner TTL.
+if ! node - "$ROOT" <<'NODE'
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const root = process.argv[2];
+const { loadRuntimeConfig } = require(path.join(root, 'control-plane/lib/config'));
+const dispatcher = require(path.join(root, 'control-plane/lib/dispatcher'));
+const { classifyProviderError } = require(path.join(root, 'control-plane/lib/provider-errors'));
+
+function fail(code, msg) {
+  console.error(msg);
+  process.exit(code);
+}
+
+const prevDry = process.env.BIZAGENT_DRY_RUN;
+process.env.BIZAGENT_DRY_RUN = '1';
+
+// --- Error classifier tightening (operator report 2026-10-23) ---
+const rl = classifyProviderError('request failed with status 429: too many requests');
+if (!rl || rl.kind !== 'rate_limit') fail(1, 'standalone 429 must classify as rate_limit');
+const notRl = classifyProviderError('fetched 1429 records from the export path');
+if (notRl && notRl.kind === 'rate_limit') fail(2, 'embedded 429 substring must NOT classify as rate_limit');
+const conn = classifyProviderError('Connection error while reaching the provider endpoint');
+if (!conn || conn.kind !== 'network') fail(3, '"Connection error" must classify as network');
+
+// --- Recent-error banner TTL (settings.dispatch.recent_error_ttl_secs) ---
+if (dispatcher.recentErrorTtlSecs(undefined) !== 300) fail(4, 'recent-error TTL default must be 300');
+if (dispatcher.recentErrorTtlSecs({ settings: { dispatch: { recent_error_ttl_secs: 5 } } }) !== 30) {
+  fail(5, 'recent-error TTL must clamp to min 30');
+}
+if (dispatcher.recentErrorTtlSecs({ settings: { dispatch: { recent_error_ttl_secs: 999999 } } }) !== 24 * 3600) {
+  fail(6, 'recent-error TTL must clamp to max 24h');
+}
+
+// --- API queue spacing setting ---
+if (dispatcher.apiMinIntervalMs(undefined) !== 500) fail(7, 'api_min_interval_ms default must be 500');
+if (dispatcher.apiMinIntervalMs({ settings: { dispatch: { api_min_interval_ms: -3 } } }) !== 0) {
+  fail(8, 'api_min_interval_ms must clamp to min 0');
+}
+
+// --- Provider queue state machine ---
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-provider-queue-'));
+fs.mkdirSync(path.join(hub, 'inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'templates'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents/alpha/inbox/archive'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'agents/alpha/outbox'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'agents/alpha/agent.md'), '# alpha\n');
+fs.writeFileSync(path.join(hub, 'agents/alpha/inbox/2026-10-23-alpha.md'), [
+  '---', 'from: hub', 'to: alpha', 'date: 2026-10-23', 'subject: status', '---', '', 'alpha please', '',
+].join('\n'));
+fs.writeFileSync(path.join(hub, 'templates/dispatch.md.template'), "You are '{{slug}}'.\n");
+fs.writeFileSync(path.join(hub, 'cli.json'), JSON.stringify({
+  _runtime: { executable: 'scripts/bizagent-agent', promptFlag: '-f', flags: { extra: '-y' } },
+  grok: { baseURL: 'https://api.x.ai/v1', keyEnv: 'XAI_API_KEY', models: ['grok-4.5'] },
+}));
+const registry = {
+  settings: {
+    dispatch: { agent_slots: 2, lock_lease_secs: 60 },
+    hub_agent: { provider: 'grok', model: 'grok-4.5' },
+  },
+  products: [{ slug: 'alpha', name: 'Alpha', agent_name: 'Agent A', provider: 'grok', projects: [] }],
+};
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify(registry));
+
+// Ladder: 60 -> 120 -> 300 -> 900 (cap), hold at the 5th consecutive failure.
+const ladder = dispatcher.failureBackoffLadder(registry);
+if (ladder.join(',') !== '60,120,300,900') fail(9, `backoff ladder must be 60,120,300,900, got ${ladder.join(',')}`);
+if (dispatcher.maxProviderFailures(registry) !== 5) fail(10, 'max_provider_failures default must be 5');
+let held = null;
+for (let i = 1; i <= 5; i += 1) {
+  const q = dispatcher.recordProviderFailure(hub, registry, 'grok', 'rate_limit');
+  if (q.consecutive !== i) fail(11, `consecutive must be ${i}, got ${q.consecutive}`);
+  if (q.held !== (i >= 5)) fail(11, `held must be ${i >= 5} at ${i} consecutive failures`);
+  if (i === 5) held = q;
+}
+if (!held || !held.justHeld) fail(12, 'queue must report justHeld on the transition into hold');
+const gateHeld = dispatcher.providerQueueGate(hub, 'grok');
+if (!gateHeld.held) fail(13, 'gate must report held after max consecutive failures');
+if (dispatcher.providerQueueGate(hub, 'venice').held) fail(13, 'other providers must be unaffected');
+
+// Held provider gates launches; resume clears the hold and mail dispatches.
+const gated = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (gated.launched !== 0) fail(14, `held provider must gate launches, got ${JSON.stringify(gated)}`);
+if (gated.skippedQueue !== 1) fail(14, `held provider must count a skippedQueue, got ${JSON.stringify(gated)}`);
+dispatcher.resumeProviderQueue(hub, 'grok');
+if (dispatcher.providerQueueGate(hub, 'grok').held) fail(15, 'resume must clear the hold');
+const resumed = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (resumed.launched !== 1) fail(16, `resumed provider must launch again, got ${JSON.stringify(resumed)}`);
+
+// Success clears backoff (no hold left, counter reset).
+dispatcher.recordProviderFailure(hub, registry, 'grok', 'network');
+if (dispatcher.providerQueueGate(hub, 'grok').backoffRemaining <= 0) {
+  fail(17, 'failure must set a backoff window');
+}
+dispatcher.recordProviderSuccess(hub, 'grok');
+const cleared = dispatcher.providerQueueGate(hub, 'grok');
+if (cleared.held || cleared.backoffRemaining > 0 || cleared.consecutive !== 0) {
+  fail(18, `success must clear backoff + hold, got ${JSON.stringify(cleared)}`);
+}
+
+fs.rmSync(hub, { recursive: true, force: true });
+if (prevDry === undefined) delete process.env.BIZAGENT_DRY_RUN;
+else process.env.BIZAGENT_DRY_RUN = prevDry;
+NODE
+then
+  fail "provider queue / classifier / banner TTL checks failed"
+fi
