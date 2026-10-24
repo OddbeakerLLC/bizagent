@@ -134,4 +134,31 @@ minsp="$(node -e "console.log(JSON.parse(process.argv[1]).minSpacing)" "$stats")
 h="$(curl -sf "$BASE/health")"
 echo "$h" | grep -q '"mock"' || fail "health missing mock provider stats: $h"
 
+# 11. Runtime client migration: agent-runtime createClient() in llmapi mode
+# (BIZAGENT_LLMAPI_URL set) completes a chat through the REST API, no local key.
+out="$(BIZAGENT_LLMAPI_URL="$BASE" node -e '
+const { createClient, chatCompletion } = require(process.argv[1] + "/agent-runtime/src/client");
+(async () => {
+  const client = createClient({ apiKey: "", baseURL: "", provider: "mock" });
+  const completion = await chatCompletion(client, "mock-model", [{ role: "user", content: "hello" }], []);
+  console.log(JSON.stringify(completion));
+})().catch((e) => { console.error(e.message); process.exit(1); });
+' "$ROOT")"
+echo "$out" | grep -q '"mock says hi"' || fail "runtime llmapi-mode client failed: $out"
+
+# 12. Runtime llmapi-mode client surfaces provider errors with .status (429 exhaustion)
+code="$(BIZAGENT_LLMAPI_URL="$BASE" node -e '
+const { createClient, chatCompletion } = require(process.argv[1] + "/agent-runtime/src/client");
+(async () => {
+  const client = createClient({ apiKey: "", baseURL: "", provider: "mock" });
+  try {
+    await chatCompletion(client, "mock-model", [{ role: "user", content: "fail-500" }], []);
+    console.log("no-error");
+  } catch (e) {
+    console.log(e.status || "no-status");
+  }
+})().catch(() => process.exit(1));
+' "$ROOT")"
+[ "$code" = "500" ] || fail "runtime llmapi-mode client should surface provider status 500, got: $code"
+
 echo "PASS: test-llmapi.sh"

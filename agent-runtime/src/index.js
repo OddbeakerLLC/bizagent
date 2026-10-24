@@ -17,7 +17,7 @@ const { program } = require('commander');
 const fs = require('fs').promises;
 const path = require('path');
 const readline = require('readline');
-const { createClient, chatCompletion, sanitizeMessages } = require('./client');
+const { createClient, chatCompletion, sanitizeMessages, isLlmApiMode } = require('./client');
 const { resolveProvider, listProviders } = require('./providers');
 const { TOOLS, DESTRUCTIVE_TOOLS, executeToolCall, helperToolsForKind } = require('./tools');
 const { buildSystemPrompt } = require('./system-prompt');
@@ -186,7 +186,7 @@ if (require.main === module) {
       process.exit(1);
     }
 
-    if (!resolved.apiKey) {
+    if (!resolved.apiKey && !isLlmApiMode()) {
       console.error(
         `Error: API key required. Pass -k, set ${resolved.keyEnv}, or BIZAGENT_AGENT_API_KEY.`,
       );
@@ -197,6 +197,7 @@ if (require.main === module) {
     const client = createClient({
       apiKey: resolved.apiKey,
       baseURL: resolved.baseURL,
+      provider: resolved.provider,
     });
 
     const rl = readline.createInterface({

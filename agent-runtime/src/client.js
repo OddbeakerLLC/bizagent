@@ -2,7 +2,83 @@
 
 const OpenAI = require('openai');
 
-function createClient({ apiKey, baseURL }) {
+/**
+ * Base URL of the llmapi.js REST API (Phase 2: callers go through the API
+ * instead of hitting LLM providers directly). Set BIZAGENT_LLMAPI_URL (or
+ * LLMAPI_URL) to enable; unset = legacy direct-provider behavior.
+ */
+function llmApiBase() {
+  return String(process.env.BIZAGENT_LLMAPI_URL || process.env.LLMAPI_URL || '').trim().replace(/\/+$/, '');
+}
+
+function isLlmApiMode() {
+  return !!llmApiBase();
+}
+
+/**
+ * HTTP client that mirrors the OpenAI SDK surface used here
+ * (client.chat.completions.create(body)) but POSTs to the llmapi REST API.
+ * Errors are shaped like OpenAI SDK errors (.status, .error, .headers) so
+ * existing classification (credits/auth/429) keeps working unchanged.
+ */
+function createLlmApiClient(provider) {
+  const base = llmApiBase();
+  return {
+    __llmapi: true,
+    provider,
+    chat: {
+      completions: {
+        async create(body) {
+          const headers = { 'Content-Type': 'application/json' };
+          const token = process.env.BIZAGENT_LLMAPI_TOKEN || process.env.LLMAPI_TOKEN;
+          if (token) headers.Authorization = `Bearer ${token}`;
+          const timeoutMs = Math.max(
+            1000,
+            Number(process.env.BIZAGENT_LLMAPI_TIMEOUT_MS || 600000),
+          );
+          let res;
+          try {
+            res = await fetch(`${base}/v1/chat/completions`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({ provider, ...body }),
+              signal: AbortSignal.timeout(timeoutMs),
+            });
+          } catch (err) {
+            const e = new Error(`llmapi unreachable at ${base}: ${err && err.message || err}`);
+            e.status = 502;
+            e.error = { message: e.message, type: 'provider_unreachable' };
+            throw e;
+          }
+          const text = await res.text();
+          let parsed = null;
+          try { parsed = text ? JSON.parse(text) : null; } catch (_e) { /* non-JSON error body */ }
+          if (!res.ok) {
+            const apiErr = (parsed && parsed.error) || {};
+            const e = new Error(apiErr.message || `llmapi HTTP ${res.status}`);
+            e.status = res.status;
+            e.error = apiErr;
+            const ra = res.headers && res.headers.get && res.headers.get('retry-after');
+            e.headers = ra != null ? { 'retry-after': ra } : {};
+            throw e;
+          }
+          if (!parsed) {
+            const e = new Error('llmapi returned a non-JSON response');
+            e.status = 502;
+            e.error = { message: e.message, type: 'api_error' };
+            throw e;
+          }
+          return parsed;
+        },
+      },
+    },
+  };
+}
+
+function createClient({ apiKey, baseURL, provider }) {
+  if (isLlmApiMode()) {
+    return createLlmApiClient(provider || '');
+  }
   return new OpenAI({
     apiKey,
     baseURL,
@@ -128,4 +204,4 @@ async function chatCompletion(client, model, messages, tools, opts = {}) {
   return client.chat.completions.create(body);
 }
 
-module.exports = { createClient, chatCompletion, sanitizeMessages };
+module.exports = { createClient, chatCompletion, sanitizeMessages, isLlmApiMode };
