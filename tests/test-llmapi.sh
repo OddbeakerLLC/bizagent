@@ -73,7 +73,8 @@ EOF
 node "$TMP/mock.js" & MOCK_PID=$!
 LLMAPI_CONFIG="$TMP/cli.json" LLMAPI_PORT=$PORT LLMAPI_HOST=127.0.0.1 \
   LLMAPI_MIN_INTERVAL_MS=100 LLMAPI_MAX_RETRIES=2 LLMAPI_RETRY_BASE_MS=50 \
-  MOCK_API_KEY=test-key node "$ROOT/llmapi.js" & LLMAPI_PID=$!
+  LLMAPI_QUEUE_WARN_DEPTH=2 \
+  MOCK_API_KEY=test-key node "$ROOT/llmapi.js" >"$TMP/llmapi.log" 2>&1 & LLMAPI_PID=$!
 
 for i in $(seq 1 50); do curl -sf "$BASE/health" >/dev/null 2>&1 && break; sleep 0.1; done
 curl -sf "$BASE/health" >/dev/null || fail "llmapi did not come up on $BASE"
@@ -262,5 +263,25 @@ const { probePaidProvider } = require(process.argv[2] + "/control-plane/lib/olla
 })().catch((e) => { console.error(e.message); process.exit(1); });
 ' "$HUBTMP" "$ROOT")"
 echo "$out" | grep -q '"ok":false' || fail "probe llmapi-mode should fail for a dead provider: $out"
+
+# 21. Significant-event logging: service_start / request in-out / provider
+# selection / retries / mapped errors / queue saturation / service_stop, with
+# no bodies or secrets in the log.
+kill -TERM "$LLMAPI_PID" 2>/dev/null
+for i in $(seq 1 30); do kill -0 "$LLMAPI_PID" 2>/dev/null || break; sleep 0.1; done
+log="$TMP/llmapi.log"
+[ -s "$log" ] || fail "llmapi log is empty"
+grep -q '"event":"service_start"' "$log" || fail "no service_start event"
+grep -q '"event":"request_in".*"route":"POST /v1/chat/completions"' "$log" || fail "no request_in for chat completions"
+grep -q '"event":"request_out".*"provider":"mock".*"model":"mock-model".*"latency_ms"' "$log" || fail "no request_out with provider/model/latency"
+grep -q '"event":"provider_selected"' "$log" || fail "no provider_selected event"
+grep -q '"event":"provider_retry".*"delay_ms"' "$log" || fail "no provider_retry with backoff delay"
+grep -q '"event":"request_error".*"status":500' "$log" || fail "no request_error with mapped status 500"
+grep -q '"event":"request_error".*"status":502.*"type":"provider_unreachable"' "$log" || fail "no request_error with mapped 502 provider_unreachable"
+grep -q '"event":"provider_fallback"' "$log" || fail "no provider_fallback event (models fallback)"
+grep -q '"event":"queue_saturation"' "$log" || fail "no queue_saturation event (3 queued slows, warn depth 2)"
+grep -q '"event":"service_stop".*"signal":"SIGTERM"' "$log" || fail "no service_stop on SIGTERM"
+grep -q 'test-key' "$log" && fail "API key leaked into log" || true
+grep -q '"content"' "$log" && fail "message body leaked into log" || true
 
 echo "PASS: test-llmapi.sh"

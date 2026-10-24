@@ -15,7 +15,8 @@
  *
  * Run: node llmapi.js   (env: LLMAPI_PORT, LLMAPI_HOST, LLMAPI_TOKEN,
  *      LLMAPI_CONCURRENCY, LLMAPI_MIN_INTERVAL_MS, LLMAPI_MAX_RETRIES,
- *      LLMAPI_TIMEOUT_MS, LLMAPI_CONFIG)
+ *      LLMAPI_TIMEOUT_MS, LLMAPI_RETRY_BASE_MS, LLMAPI_QUEUE_WARN_DEPTH,
+ *      LLMAPI_LOG_LEVEL, LLMAPI_CONFIG)
  *
  * Default port 8788 — 8787 is the control plane's default. A second instance
  * started while one is already listening exits cleanly (cron-safe).
@@ -53,6 +54,45 @@ const MIN_INTERVAL_MS = Math.max(0, Number(process.env.LLMAPI_MIN_INTERVAL_MS ||
 const MAX_RETRIES = Math.max(0, Number(process.env.LLMAPI_MAX_RETRIES != null ? process.env.LLMAPI_MAX_RETRIES : 2));
 const TIMEOUT_MS = Math.max(1000, Number(process.env.LLMAPI_TIMEOUT_MS || 120000));
 const RETRY_BASE_MS = Math.max(50, Number(process.env.LLMAPI_RETRY_BASE_MS || 500));
+const QUEUE_WARN_DEPTH = Math.max(1, Number(process.env.LLMAPI_QUEUE_WARN_DEPTH || 5));
+
+// ---------------------------------------------------------------------------
+// Structured event logging — one JSON line per event on stdout (the service
+// unit / scripts/llmapi.sh sends it to logs/llmapi.log). Significant events
+// only: request in/out, provider selection/fallback, retries + backoff,
+// errors with mapped status, queue saturation, service start/stop. Never logs
+// message bodies, API keys, or auth headers. LLMAPI_LOG_LEVEL=debug adds
+// per-request detail (health polls, catalog reads).
+// ---------------------------------------------------------------------------
+const LOG_LEVEL = String(process.env.LLMAPI_LOG_LEVEL || 'info').toLowerCase();
+const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+
+function logEvent(level, event, fields = {}) {
+  if ((LEVELS[level] || 20) < (LEVELS[LOG_LEVEL] || 20)) return;
+  const rec = { ts: new Date().toISOString(), level, event, ...fields };
+  try {
+    process.stdout.write(JSON.stringify(rec) + '\n');
+  } catch (_) {
+    /* logging must never take the API down */
+  }
+}
+
+/** Short reason tag for a retryable error (no message bodies). */
+function retryReason(err) {
+  if (!err) return 'unknown';
+  if (err.status) return `status:${err.status}`;
+  if (err.code) return `code:${err.code}`;
+  if (err.name) return `name:${err.name}`;
+  return 'unknown';
+}
+
+/** Is this error a request timeout (as opposed to other failures)? */
+function isTimeoutError(err) {
+  if (!err) return false;
+  if (err.name === 'APIConnectionTimeoutError') return true;
+  if (err.code === 'ETIMEDOUT') return true;
+  return !err.status && !err.statusCode && /timed? ?out/i.test(String(err.message || ''));
+}
 
 function loadProviderCatalog() {
   const cfgPath = process.env.LLMAPI_CONFIG || path.join(__dirname, 'cli.json');
@@ -142,14 +182,21 @@ function backoffDelay(attempt, err) {
 async function callWithRetry(client, body) {
   let lastErr;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, backoffDelay(attempt - 1, lastErr)));
-    }
     try {
       return await client.openai.chat.completions.create(body);
     } catch (err) {
       lastErr = err;
       if (!isTransient(err) || attempt === MAX_RETRIES) throw err;
+      const delay = backoffDelay(attempt, err);
+      logEvent('warn', 'provider_retry', {
+        provider: client.provider,
+        model: body.model,
+        attempt: attempt + 1,
+        max_retries: MAX_RETRIES,
+        delay_ms: delay,
+        reason: retryReason(err),
+      });
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
   throw lastErr; // unreachable
@@ -183,6 +230,17 @@ async function chatCompletion(client, model, messages, tools, opts = {}) {
   const maxTokens = Number(process.env.BIZAGENT_AGENT_MAX_TOKENS || 0);
   if (maxTokens > 0) body.max_tokens = maxTokens;
 
+  // Queue saturation watch: warn once when depth crosses the threshold, and
+  // log recovery when it drains back below (so the log brackets the pileup).
+  const depth = client.queue.size + client.queue.pending;
+  if (depth >= QUEUE_WARN_DEPTH && !client.queueWarned) {
+    client.queueWarned = true;
+    logEvent('warn', 'queue_saturation', { provider: client.provider, depth, threshold: QUEUE_WARN_DEPTH });
+  } else if (depth < QUEUE_WARN_DEPTH && client.queueWarned) {
+    client.queueWarned = false;
+    logEvent('info', 'queue_recovered', { provider: client.provider, depth });
+  }
+
   return client.queue.add(() => callWithRetry(client, body));
 }
 
@@ -190,12 +248,34 @@ async function chatCompletion(client, model, messages, tools, opts = {}) {
 // Routes
 // ---------------------------------------------------------------------------
 
+// Request in/out logging: one line on arrival, one on completion (route,
+// provider/model when known, mapped status, latency). /health polls are
+// debug-level so the log stays readable at info.
+let reqSeq = 0;
+app.use((req, res, next) => {
+  req.llm = { id: ++reqSeq, start: Date.now() };
+  const level = req.path === '/health' ? 'debug' : 'info';
+  logEvent(level, 'request_in', { req_id: req.llm.id, route: `${req.method} ${req.path}` });
+  res.on('finish', () => {
+    logEvent(level, 'request_out', {
+      req_id: req.llm.id,
+      route: `${req.method} ${req.path}`,
+      provider: req.llm.provider,
+      model: req.llm.model,
+      status: res.statusCode,
+      latency_ms: Date.now() - req.llm.start,
+    });
+  });
+  next();
+});
+
 // Optional shared-token auth for /v1/* when LLMAPI_TOKEN is set.
 app.use('/v1', (req, res, next) => {
   const token = process.env.LLMAPI_TOKEN;
   if (!token) return next();
   const auth = req.headers.authorization || '';
   if (auth === `Bearer ${token}`) return next();
+  logEvent('warn', 'auth_rejected', { req_id: req.llm.id, route: `${req.method} ${req.path}` });
   return res.status(401).json({ error: { message: 'missing or invalid bearer token', type: 'authentication_error' } });
 });
 
@@ -246,7 +326,10 @@ app.get('/v1/models', async (req, res) => {
       return res.status(400).json({ error: { message: `unknown provider "${providerParam}"`, type: 'invalid_request_error' } });
     }
     const fallbackData = staticModelsFor(entry).map((m) => ({ id: m.id, object: 'model', name: m.name, pricing: null }));
-    const fail = (error) => res.json({ object: 'list', ok: false, source: 'fallback', provider: providerParam, error, data: fallbackData });
+    const fail = (error) => {
+      logEvent('warn', 'provider_fallback', { req_id: req.llm.id, provider: providerParam, reason: String(error).slice(0, 200) });
+      return res.json({ object: 'list', ok: false, source: 'fallback', provider: providerParam, error, data: fallbackData });
+    };
 
     let apiKey;
     try {
@@ -285,16 +368,35 @@ app.get('/v1/models', async (req, res) => {
 app.post('/v1/chat/completions', async (req, res) => {
   const { provider, model, messages, tools, ...opts } = req.body || {};
   if (!provider || typeof provider !== 'string') {
+    logEvent('warn', 'request_error', { req_id: req.llm.id, route: 'POST /v1/chat/completions', status: 400, type: 'invalid_request_error', error: 'provider is required' });
     return res.status(400).json({ error: { message: 'provider is required', type: 'invalid_request_error' } });
   }
   if (!model || !Array.isArray(messages)) {
+    logEvent('warn', 'request_error', { req_id: req.llm.id, route: 'POST /v1/chat/completions', provider, status: 400, type: 'invalid_request_error', error: 'model and messages[] are required' });
     return res.status(400).json({ error: { message: 'model and messages[] are required', type: 'invalid_request_error' } });
   }
+  req.llm.provider = provider;
+  req.llm.model = model;
   try {
     const client = createClient(provider);
+    logEvent('info', 'provider_selected', { req_id: req.llm.id, provider, model });
     const completion = await chatCompletion(client, model, messages, tools, opts);
     res.json(completion);
   } catch (err) {
+    // Mapped status: 4xx from validation/unknown-provider/missing-key, provider
+    // HTTP status passed through, 502 for network-level failures.
+    const mappedStatus = err.statusCode || err.status || 502;
+    const mappedType = err.statusCode ? err.type : err.status ? (err.type || 'api_error') : 'provider_unreachable';
+    logEvent('error', 'request_error', {
+      req_id: req.llm.id,
+      provider,
+      model,
+      status: mappedStatus,
+      provider_status: err.status || undefined,
+      type: mappedType,
+      timeout: isTimeoutError(err) || undefined,
+      error: String(err.message || err).slice(0, 300),
+    });
     if (err.statusCode) {
       return res.status(err.statusCode).json({ error: { message: String(err.message || err), type: err.type } });
     }
@@ -326,18 +428,40 @@ if (require.main === module) {
   const port = Number(process.env.LLMAPI_PORT || 0) || 8788;
   const host = process.env.LLMAPI_HOST || '127.0.0.1';
   const server = app.listen(port, host, () => {
+    logEvent('info', 'service_start', {
+      host,
+      port,
+      concurrency: CONCURRENCY,
+      min_interval_ms: MIN_INTERVAL_MS,
+      max_retries: MAX_RETRIES,
+      timeout_ms: TIMEOUT_MS,
+      queue_warn_depth: QUEUE_WARN_DEPTH,
+      auth: Boolean(process.env.LLMAPI_TOKEN),
+      pid: process.pid,
+    });
     console.log(`llmapi listening on http://${host}:${port} (concurrency=${CONCURRENCY}/provider, min_interval=${MIN_INTERVAL_MS}ms, max_retries=${MAX_RETRIES})`);
   });
   // Cron-safe: when a previous instance already owns the port, exit 0 so a
   // cron re-run does not spam failures (systemd restarts handle real crashes).
   server.on('error', (err) => {
     if (err && err.code === 'EADDRINUSE') {
+      logEvent('info', 'service_skip_port_in_use', { port });
       console.log(`llmapi: port ${port} already in use — another instance is running; exiting`);
       process.exit(0);
     }
+    logEvent('error', 'service_error', { error: String((err && err.message) || err).slice(0, 300) });
     console.error(`llmapi: server error: ${err && err.message}`);
     process.exit(1);
   });
+  // Graceful stop (systemd sends SIGTERM): log, close the listener, exit.
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, () => {
+      logEvent('info', 'service_stop', { signal: sig, uptime_secs: Math.floor(process.uptime()) });
+      server.close(() => process.exit(0));
+      // Hard exit if lingering connections keep close() pending.
+      setTimeout(() => process.exit(0), 3000).unref();
+    });
+  }
 }
 
 module.exports = { app, createClient, chatCompletion, getProviderConfig };
