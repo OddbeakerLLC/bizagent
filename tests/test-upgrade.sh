@@ -79,6 +79,45 @@ grep -q '!registry.json' "$TMP/hub/.gitignore" \
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["settings"].get("auto_update") is False' \
   "$TMP/hub/registry.json" || fail "registry settings.auto_update changed unexpectedly"
 
+# --- Major-upgrade migration: a pre-llmapi hub layout must come up to the
+# current structure in place (llmapi.js restored, env line written, no
+# reinstall). Uses the same sandbox hub as the apply above. ---
+[[ -f "$TMP/hub/llmapi.js" ]] \
+  || fail "upgrade did not restore llmapi.js (pre-major-upgrade hub stays on old layout)"
+grep -q '^BIZAGENT_LLMAPI_URL=http://127.0.0.1:8788' "$TMP/hub/.bizagent/env" \
+  || fail "upgrade did not write BIZAGENT_LLMAPI_URL into .bizagent/env"
+# Idempotent: a second apply must not duplicate the env line.
+# (The first apply restored the real control-plane.sh over the sandbox stub;
+# re-stub it so the no-restart repair path stays hermetic.)
+cat >"$TMP/hub/scripts/control-plane.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "stub control-plane $*"
+exit 0
+STUB
+chmod +x "$TMP/hub/scripts/control-plane.sh"
+apply2_out="$(BIZAGENT_SKIP_HEALTH_TIMER=1 bash "$TMP/hub/scripts/upgrade.sh" --hub "$TMP/hub" --source "$ROOT" --yes --no-restart 2>&1)" \
+  || fail "second upgrade apply failed: $apply2_out"
+[[ "$(grep -c '^BIZAGENT_LLMAPI_URL=' "$TMP/hub/.bizagent/env")" -eq 1 ]] \
+  || fail "upgrade duplicated BIZAGENT_LLMAPI_URL on re-run"
+echo "$apply2_out" | grep -qi 'already has BIZAGENT_LLMAPI_URL' \
+  || fail "upgrade should report the env line already present on re-run: $apply2_out"
+# LLMAPI_PORT in .bizagent/env must be honored for the URL line.
+mkdir -p "$TMP/hub-port/.bizagent" "$TMP/hub-port/scripts" "$TMP/hub-port/logs" "$TMP/hub-port/agents/alpha"
+echo '{"org":"T","settings":{"auto_update":false},"products":[]}' >"$TMP/hub-port/registry.json"
+echo 'KEEP_CLI' >"$TMP/hub-port/cli.json"
+echo 'agent' >"$TMP/hub-port/agents/alpha/agent.md"
+echo 'LLMAPI_PORT=9200' >"$TMP/hub-port/.bizagent/env"
+cp "$ROOT/scripts/upgrade.sh" "$ROOT/scripts/factory-reset.sh" "$TMP/hub-port/scripts/"
+cat >"$TMP/hub-port/scripts/control-plane.sh" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$TMP/hub-port/scripts/"*.sh
+port_out="$(BIZAGENT_SKIP_HEALTH_TIMER=1 bash "$TMP/hub-port/scripts/upgrade.sh" --hub "$TMP/hub-port" --source "$ROOT" --yes --no-restart 2>&1)" \
+  || fail "port-honoring upgrade failed: $port_out"
+grep -q '^BIZAGENT_LLMAPI_URL=http://127.0.0.1:9200' "$TMP/hub-port/.bizagent/env" \
+  || fail "upgrade ignored LLMAPI_PORT from .bizagent/env: $(cat "$TMP/hub-port/.bizagent/env")"
+
 # --- Restart verification (upgrade must not report success over a hub whose
 # control plane kept running old code or did not come back up) -------------
 
@@ -225,6 +264,16 @@ grep -q 'install-oddbeaker-tts\|ensure_tts_on_upgrade\|with-tts' "$SCRIPT" \
 grep -q 'BIZAGENT_TTS_VOICE' "$ROOT/scripts/install-oddbeaker-tts.sh" \
   || fail "install-oddbeaker-tts missing voice persistence"
 
+# llmapi migration wired into upgrade + factory-reset (framework path lists in sync)
+grep -q 'ensure_llmapi_on_upgrade' "$SCRIPT" \
+  || fail "upgrade.sh missing llmapi ensure step"
+grep -q 'BIZAGENT_SKIP_LLMAPI' "$SCRIPT" \
+  || fail "upgrade.sh missing BIZAGENT_SKIP_LLMAPI opt-out"
+grep -qF '  llmapi.js' "$SCRIPT" \
+  || fail "upgrade.sh FRAMEWORK_PATHS missing llmapi.js"
+grep -qF '  llmapi.js' "$ROOT/scripts/factory-reset.sh" \
+  || fail "factory-reset.sh FRAMEWORK_PATHS missing llmapi.js"
+
 # health survival timer wired into install + upgrade
 grep -q 'install-health-timer' "$SCRIPT" \
   || fail "upgrade.sh missing health-timer ensure step"
@@ -239,4 +288,3 @@ for f in scripts/health-probe.sh scripts/health-alert-failure.sh \
 done
 echo "$out" | grep -qi 'health' \
   || fail "upgrade dry-run should mention the health-timer step: $out"
-

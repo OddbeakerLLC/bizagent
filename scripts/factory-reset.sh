@@ -111,6 +111,7 @@ FRAMEWORK_PATHS=(
   install
   docs
   agent-runtime
+  llmapi.js
   cli.json.example
   registry.example.json
   package.json
@@ -146,7 +147,7 @@ backup_hub_snapshot() {
   # Snapshot critical trees; skip huge/ephemeral if missing.
   local p
   for p in \
-    control-plane scripts templates tests install docs agent-runtime \
+    control-plane scripts templates tests install docs agent-runtime llmapi.js \
     registry.json cli.json agents journal company knowledge-stack library \
     package.json package-lock.json NIGHTLY.md WEEKLY.md \
     cli.json.example registry.example.json \

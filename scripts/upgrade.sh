@@ -12,8 +12,8 @@
 #
 # Updated (framework machinery):
 #   control-plane/, scripts/, templates/, tests/, install/, docs/,
-#   agent-runtime/, package.json, package-lock.json, examples, AGENT.md,
-#   NIGHTLY.md, WEEKLY.md, README.md, LICENSE, deploy.sh, viewlog.sh, …
+#   agent-runtime/, llmapi.js, package.json, package-lock.json, examples,
+#   AGENT.md, NIGHTLY.md, WEEKLY.md, README.md, LICENSE, deploy.sh, viewlog.sh, …
 #
 # Usage:
 #   scripts/upgrade.sh [--hub PATH] [--source PATH|URL] [--ref REF]
@@ -24,6 +24,7 @@
 #   BIZAGENT_FRAMEWORK   Default framework path or git URL (same as factory-reset)
 #   BIZAGENT_SKIP_TTS=1  Skip oddbeaker-tts offer/install on upgrade
 #   BIZAGENT_TTS_*       See scripts/install-oddbeaker-tts.sh
+#   BIZAGENT_SKIP_LLMAPI=1  Skip llmapi env/service ensure on upgrade
 #   BIZAGENT_SKIP_HEALTH_TIMER=1  Skip health probe timer ensure on upgrade
 #
 # Manual path (any time): run this script, or ask PTL to apply updates.
@@ -92,6 +93,7 @@ FRAMEWORK_PATHS=(
   install
   docs
   agent-runtime
+  llmapi.js
   cli.json.example
   registry.example.json
   package.json
@@ -149,6 +151,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "upgrade: would backup under $HUB/.bizagent/backups/factory-reset-repair-*"
   log "upgrade: would stop control plane, restore framework paths from source, npm install, restart"
   log "upgrade: would ensure ops .gitignore (OPS_HUB_GITIGNORE section) via factory-reset repair"
+  log "upgrade: would ensure llmapi env line + service (scripts/install-llmapi.sh — soft-fail)"
   log "upgrade: would ensure health probe timer (scripts/install-health-timer.sh — systemd user timer or cron)"
   if [[ -d "$SOURCE_LABEL" ]]; then
     for path in "${FRAMEWORK_PATHS[@]}"; do
@@ -327,6 +330,52 @@ ensure_tts_on_upgrade() {
 }
 
 ensure_tts_on_upgrade
+
+# Major-upgrade migration: bring pre-llmapi installs onto the current layout.
+# The llmapi upgrade added a root-level llmapi.js, BIZAGENT_LLMAPI_URL in
+# .bizagent/env, and an optional systemd user unit — none of which older
+# upgrade runs installed. Idempotent; soft-fails so an llmapi problem never
+# blocks the framework upgrade itself.
+ensure_llmapi_on_upgrade() {
+  if [[ -n "${BIZAGENT_SKIP_LLMAPI:-}" ]]; then
+    log "upgrade: skipping llmapi ensure (BIZAGENT_SKIP_LLMAPI)"
+    return 0
+  fi
+  if [[ ! -f "$HUB/llmapi.js" ]]; then
+    log "upgrade: llmapi.js not present after restore — skipping llmapi ensure (source predates the llmapi upgrade?)"
+    return 0
+  fi
+  local env_file="$HUB/.bizagent/env"
+  mkdir -p "$HUB/.bizagent"
+  touch "$env_file"
+  chmod 600 "$env_file" 2>/dev/null || true
+  # Honor LLMAPI_PORT from .bizagent/env (service + URL must agree).
+  local port
+  port="$(grep -E '^LLMAPI_PORT=' "$env_file" 2>/dev/null | tail -n 1 | cut -d= -f2 || true)"
+  port="${port:-${LLMAPI_PORT:-8788}}"
+  if grep -qE '^BIZAGENT_LLMAPI_URL=' "$env_file" 2>/dev/null; then
+    log "upgrade: .bizagent/env already has BIZAGENT_LLMAPI_URL"
+  else
+    printf 'BIZAGENT_LLMAPI_URL=http://127.0.0.1:%s\n' "$port" >>"$env_file"
+    log "upgrade: .bizagent/env: BIZAGENT_LLMAPI_URL written (dispatch routes through llmapi)"
+  fi
+  # Service unit (systemd user session only; install-llmapi.sh just writes the
+  # unit — it never starts/stops anything). Without systemd, the control plane
+  # starts llmapi best-effort as a plain process on every start/restart.
+  local helper="$HUB/scripts/install-llmapi.sh"
+  if [[ -x "$helper" ]] && command -v systemctl >/dev/null 2>&1 \
+    && systemctl --user is-system-running 2>/dev/null | grep -qE '^(running|degraded)$'; then
+    if bash "$helper" >/dev/null 2>&1; then
+      log "upgrade: llmapi systemd user unit installed (enable: systemctl --user enable --now bizagent-llmapi-*.service)"
+    else
+      log "upgrade: WARN llmapi service unit not installed — llmapi still starts alongside the control plane"
+    fi
+  else
+    log "upgrade: no systemd user session — llmapi starts alongside the control plane (scripts/llmapi.sh start)"
+  fi
+}
+
+ensure_llmapi_on_upgrade
 
 # Health survival: make sure the out-of-process probe timer exists after an
 # upgrade that ships it. Idempotent — hubs that already have the systemd user
