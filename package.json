@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "description": "BizAgent OSS control plane and dispatch (public)",
   "dependencies": {
+    "express": "^4.21.2",
     "ws": "^8.18.0"
   },
   "engines": {
