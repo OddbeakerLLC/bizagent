@@ -106,9 +106,27 @@ function isTransientError(err) {
   const status = err.status != null ? err.status : err.statusCode;
   if (status === 429) return true;
   if (typeof status === 'number' && status >= 500) return true;
-  if (err.name === 'APIConnectionError' || err.name === 'APIConnectionTimeoutError') return true;
+  if (isConnectionError(err)) return true;
   const code = err.code || '';
   return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND'].includes(code);
+}
+
+/**
+ * Is this a connection-level failure (stale keep-alive socket, refused/reset
+ * connection, DNS)? The OpenAI SDK wraps these in APIConnectionError, but in
+ * current SDK versions the instance's own `name` is "Error" and `code` is
+ * undefined (the raw code sits on `err.cause`) — so classification must not
+ * rely on `err.name`/`err.code` alone.
+ */
+function isConnectionError(err) {
+  if (!err) return false;
+  if (err instanceof OpenAI.APIConnectionError) return true;
+  // Current SDK versions leave the instance's own `name` as "Error" while the
+  // class is APIConnectionError — check both the name and the constructor.
+  const names = [err.name, err.constructor && err.constructor.name];
+  if (names.includes('APIConnectionError') || names.includes('APIConnectionTimeoutError')) return true;
+  const causeCode = (err.cause && err.cause.code) || '';
+  return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'].includes(causeCode);
 }
 
 function retryDelayMs(attempt, err) {
@@ -259,4 +277,4 @@ async function chatCompletion(client, model, messages, tools, opts = {}) {
   throw lastErr; // unreachable
 }
 
-module.exports = { createClient, chatCompletion, sanitizeMessages, isLlmApiMode, isTransientError, retryDelayMs, agentMaxRetries };
+module.exports = { createClient, chatCompletion, sanitizeMessages, isLlmApiMode, isTransientError, isConnectionError, retryDelayMs, agentMaxRetries };

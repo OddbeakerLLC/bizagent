@@ -59,11 +59,10 @@ const QUEUE_WARN_DEPTH = Math.max(1, Number(process.env.LLMAPI_QUEUE_WARN_DEPTH 
 // ---------------------------------------------------------------------------
 // Structured event logging — one JSON line per event on stdout (the service
 // unit / scripts/llmapi.sh sends it to logs/llmapi.log). Significant events
-// only: request in/out, provider selection + per-provider queue creation,
-// fallback, retries + backoff, errors with mapped status, queue saturation,
-// service start/stop. Never logs message bodies, API keys, or auth headers.
-// LLMAPI_LOG_LEVEL=debug adds per-request detail (health polls, catalog
-// reads). See docs/LLMAPI-LOGGING.md for destinations + tailing.
+// only: request in/out, provider selection/fallback, retries + backoff,
+// errors with mapped status, queue saturation, service start/stop. Never logs
+// message bodies, API keys, or auth headers. LLMAPI_LOG_LEVEL=debug adds
+// per-request detail (health polls, catalog reads).
 // ---------------------------------------------------------------------------
 const LOG_LEVEL = String(process.env.LLMAPI_LOG_LEVEL || 'info').toLowerCase();
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
@@ -82,9 +81,29 @@ function logEvent(level, event, fields = {}) {
 function retryReason(err) {
   if (!err) return 'unknown';
   if (err.status) return `status:${err.status}`;
+  if (isConnectionError(err)) {
+    const causeCode = err.cause && err.cause.code;
+    return `code:${causeCode || 'connection'}`;
+  }
   if (err.code) return `code:${err.code}`;
   if (err.name) return `name:${err.name}`;
   return 'unknown';
+}
+
+/**
+ * Is this a connection-level failure (stale keep-alive socket, refused/reset
+ * connection, DNS)? The OpenAI SDK wraps these in APIConnectionError, but in
+ * current SDK versions the instance's own `name` is "Error" and `code` is
+ * undefined (the raw code sits on `err.cause`) — so classification must not
+ * rely on `err.name`/`err.code` alone.
+ */
+function isConnectionError(err) {
+  if (!err) return false;
+  if (err instanceof OpenAI.APIConnectionError) return true;
+  const cname = (err.constructor && err.constructor.name) || '';
+  if (cname === 'APIConnectionError' || cname === 'APIConnectionTimeoutError') return true;
+  const causeCode = (err.cause && err.cause.code) || '';
+  return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'].includes(causeCode);
 }
 
 /** Is this error a request timeout (as opposed to other failures)? */
@@ -152,12 +171,6 @@ function createClient(provider) {
       openai: new OpenAI({ apiKey, baseURL, timeout: TIMEOUT_MS, maxRetries: 0 }),
       queue: new PQueue(queueOpts),
     };
-    // First request for this provider: it just joined the queue list.
-    logEvent('info', 'provider_queue_created', {
-      provider,
-      concurrency: CONCURRENCY,
-      min_interval_ms: MIN_INTERVAL_MS,
-    });
   }
   return clients[provider];
 }
@@ -168,7 +181,7 @@ function isTransient(err) {
   if (err.status === 429) return true;
   if (typeof err.status === 'number' && err.status >= 500) return true;
   // OpenAI SDK connection errors / timeouts / raw network codes
-  if (err.name === 'APIConnectionError' || err.name === 'APIConnectionTimeoutError') return true;
+  if (isConnectionError(err)) return true;
   const code = err.code || '';
   return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND'].includes(code);
 }
@@ -471,4 +484,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { app, createClient, chatCompletion, getProviderConfig };
+module.exports = { app, createClient, chatCompletion, getProviderConfig, isTransient, isConnectionError };

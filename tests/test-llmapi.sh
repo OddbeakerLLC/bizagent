@@ -36,8 +36,17 @@ const srv = http.createServer((req, res) => {
       const minSpacing = gaps.length ? Math.min(...gaps) : null;
       fs.writeFileSync(stats, JSON.stringify({ maxActive, minSpacing }));
       const n429 = JSON.parse(fs.existsSync('$TMP/n429') ? fs.readFileSync('$TMP/n429', 'utf8') : '0');
-      const marker = body.includes('fail-429') ? 'fail-429' : body.includes('fail-500') ? 'fail-500' : body.includes('slow') ? 'slow' : 'ok';
+      const nreset = JSON.parse(fs.existsSync('$TMP/nreset') ? fs.readFileSync('$TMP/nreset', 'utf8') : '0');
+      const marker = body.includes('fail-429') ? 'fail-429' : body.includes('fail-500') ? 'fail-500' : body.includes('reset-ok') ? 'reset-ok' : body.includes('slow') ? 'slow' : 'ok';
       const reply = (code, obj) => { active--; res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+      if (marker === 'reset-ok' && nreset < 1) {
+        // Simulate a stale keep-alive socket: kill the connection mid-request
+        // so the client sees ECONNRESET ("Connection error.").
+        fs.writeFileSync('$TMP/nreset', String(nreset + 1));
+        active--;
+        req.socket.destroy();
+        return;
+      }
       if (marker === 'fail-429' && n429 < 2) {
         fs.writeFileSync('$TMP/n429', String(n429 + 1));
         return reply(429, { error: { message: 'rate limited' } });
@@ -122,6 +131,15 @@ code="$(curl -s -o "$TMP/edead" -w '%{http_code}' -X POST "$BASE/v1/chat/complet
   -d '{"provider":"dead","model":"dead-model","messages":[{"role":"user","content":"x"}]}')"
 [ "$code" = "502" ] || fail "unreachable provider should 502, got $code"
 grep -q 'provider_unreachable' "$TMP/edead" || fail "missing provider_unreachable type: $(cat "$TMP/edead")"
+
+# 8b. Stale-connection retry: first upstream attempt is killed mid-request
+# (ECONNRESET, the "first request after idle" signature) — llmapi must retry
+# internally and return 200, with a provider_retry event logged.
+out="$(curl -sf -X POST "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
+  -d '{"provider":"mock","model":"mock-model","messages":[{"role":"user","content":"reset-ok"}]}')"
+echo "$out" | grep -q '"mock says hi"' || fail "connection-reset retry path did not recover: $out"
+grep -q '"event":"provider_retry".*"reason":"code:ECONNRESET"' "$TMP/llmapi.log" \
+  || fail "no provider_retry logged for connection reset: $(grep provider_retry "$TMP/llmapi.log" | tail -2)"
 
 # 9. Queueing: 3 concurrent "slow" requests must serialize (max 1 in flight)
 for i in 1 2 3; do
@@ -275,7 +293,6 @@ grep -q '"event":"service_start"' "$log" || fail "no service_start event"
 grep -q '"event":"request_in".*"route":"POST /v1/chat/completions"' "$log" || fail "no request_in for chat completions"
 grep -q '"event":"request_out".*"provider":"mock".*"model":"mock-model".*"latency_ms"' "$log" || fail "no request_out with provider/model/latency"
 grep -q '"event":"provider_selected"' "$log" || fail "no provider_selected event"
-grep -q '"event":"provider_queue_created".*"provider":"mock".*"concurrency"' "$log" || fail "no provider_queue_created event (provider added to queue list)"
 grep -q '"event":"provider_retry".*"delay_ms"' "$log" || fail "no provider_retry with backoff delay"
 grep -q '"event":"request_error".*"status":500' "$log" || fail "no request_error with mapped status 500"
 grep -q '"event":"request_error".*"status":502.*"type":"provider_unreachable"' "$log" || fail "no request_error with mapped 502 provider_unreachable"
