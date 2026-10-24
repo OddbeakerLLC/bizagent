@@ -571,7 +571,8 @@ function makeDetailRow(label, field, isJournal) {
 }
 
 function renderAgentProjects(detail, projects) {
-  detail.innerHTML = '';
+  // No innerHTML reset here: the detail panel is freshly created per render and
+  // already holds the model line (appended first). Wiping it would delete that.
   const list = document.createElement('ul');
   list.className = 'agent-projects';
   const items = Array.isArray(projects) ? projects : [];
