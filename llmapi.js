@@ -59,10 +59,11 @@ const QUEUE_WARN_DEPTH = Math.max(1, Number(process.env.LLMAPI_QUEUE_WARN_DEPTH 
 // ---------------------------------------------------------------------------
 // Structured event logging — one JSON line per event on stdout (the service
 // unit / scripts/llmapi.sh sends it to logs/llmapi.log). Significant events
-// only: request in/out, provider selection/fallback, retries + backoff,
-// errors with mapped status, queue saturation, service start/stop. Never logs
-// message bodies, API keys, or auth headers. LLMAPI_LOG_LEVEL=debug adds
-// per-request detail (health polls, catalog reads).
+// only: request in/out, provider selection + per-provider queue creation,
+// fallback, retries + backoff, errors with mapped status, queue saturation,
+// service start/stop. Never logs message bodies, API keys, or auth headers.
+// LLMAPI_LOG_LEVEL=debug adds per-request detail (health polls, catalog
+// reads). See docs/LLMAPI-LOGGING.md for destinations + tailing.
 // ---------------------------------------------------------------------------
 const LOG_LEVEL = String(process.env.LLMAPI_LOG_LEVEL || 'info').toLowerCase();
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
@@ -151,6 +152,12 @@ function createClient(provider) {
       openai: new OpenAI({ apiKey, baseURL, timeout: TIMEOUT_MS, maxRetries: 0 }),
       queue: new PQueue(queueOpts),
     };
+    // First request for this provider: it just joined the queue list.
+    logEvent('info', 'provider_queue_created', {
+      provider,
+      concurrency: CONCURRENCY,
+      min_interval_ms: MIN_INTERVAL_MS,
+    });
   }
   return clients[provider];
 }
