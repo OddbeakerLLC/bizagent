@@ -1336,6 +1336,24 @@ EOF
   write_tools_env_lines
 }
 
+# Wire BIZAGENT_LLMAPI_URL into .bizagent/env so live dispatch routes through
+# the llmapi REST API by default (llmapi listens on 8788; 8787 is the control
+# plane's default). Idempotent: never overwrites an operator-set value.
+write_llmapi_env_line() {
+  local env_file="$INSTALL_DIR/.bizagent/env"
+  [[ -f "$INSTALL_DIR/llmapi.js" ]] || return 0
+  mkdir -p "$INSTALL_DIR/.bizagent"
+  touch "$env_file"
+  chmod 600 "$env_file" 2>/dev/null || true
+  if grep -qE '^BIZAGENT_LLMAPI_URL=' "$env_file" 2>/dev/null; then
+    ok ".bizagent/env already has BIZAGENT_LLMAPI_URL"
+    return 0
+  fi
+  local port="${LLMAPI_PORT:-8788}"
+  printf 'BIZAGENT_LLMAPI_URL=http://127.0.0.1:%s\n' "$port" >> "$env_file"
+  ok ".bizagent/env: BIZAGENT_LLMAPI_URL written (dispatch routes through llmapi)"
+}
+
 # Append tool PATH / PlantUML / Graphviz exports so control-plane.sh inherits them.
 write_tools_env_lines() {
   local env_file="$INSTALL_DIR/.bizagent/env"
@@ -1711,6 +1729,7 @@ main() {
   write_cli_json
   write_registry_seed
   write_env_file
+  write_llmapi_env_line
   apply_industry_template
   ensure_oddbeaker_tts
   ensure_health_timer

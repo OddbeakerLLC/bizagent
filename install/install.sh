@@ -222,6 +222,22 @@ elif [[ -n "$API_KEY_VAR" ]]; then
   fi
 fi
 
+# --- 1c. llmapi URL -> .bizagent/env (live dispatch routes through the API) ---
+# llmapi listens on 8788 by default (8787 is the control plane's default);
+# LLMAPI_PORT in .bizagent/env overrides both the service and this URL.
+if [[ -f "$HUB/llmapi.js" ]]; then
+  LLMAPI_URL_PORT="${LLMAPI_PORT:-8788}"
+  mkdir -p "$HUB/.bizagent"
+  touch "$HUB/.bizagent/env"
+  if ! grep -qE '^BIZAGENT_LLMAPI_URL=' "$HUB/.bizagent/env" 2>/dev/null; then
+    printf 'BIZAGENT_LLMAPI_URL=http://127.0.0.1:%s\n' "$LLMAPI_URL_PORT" >> "$HUB/.bizagent/env"
+    chmod 600 "$HUB/.bizagent/env" 2>/dev/null || true
+    ok ".bizagent/env: BIZAGENT_LLMAPI_URL written (dispatch routes through llmapi)"
+  else
+    ok ".bizagent/env already has BIZAGENT_LLMAPI_URL"
+  fi
+fi
+
 # --- 2. npm install (control-plane + agent-runtime) ---
 step "Dependencies"
 command -v node >/dev/null 2>&1 || { echo "ERROR: Node.js is required." >&2; exit 1; }
@@ -240,11 +256,23 @@ step "Service"
 if command -v systemctl >/dev/null 2>&1 && systemctl --user is-system-running 2>/dev/null | grep -qE '^(running|degraded)$'; then
   bash "$HUB/scripts/install-control-plane.sh"
   ok "systemd service installed"
+  if [[ -f "$HUB/scripts/install-llmapi.sh" && -f "$HUB/llmapi.js" ]]; then
+    if bash "$HUB/scripts/install-llmapi.sh"; then
+      ok "llmapi systemd service installed"
+    else
+      warn "llmapi service unit could not be installed (start/stop still manage it as a process)"
+    fi
+  fi
 else
   CRON_CMD="*/6 * * * * node $SERVER $HUB >> $HUB/logs/control-plane-server.log 2>&1"
   ( crontab -l 2>/dev/null | grep -v "$SERVER"; echo "$CRON_CMD" ) | crontab -
   mkdir -p "$HUB/logs"
   ok "cron entry installed"
+  if [[ -f "$HUB/llmapi.js" ]] && command -v node >/dev/null 2>&1; then
+    LLMAPI_CRON_CMD="*/6 * * * * node $HUB/llmapi.js >> $HUB/logs/llmapi.log 2>&1"
+    ( crontab -l 2>/dev/null | grep -v "$HUB/llmapi.js"; echo "$LLMAPI_CRON_CMD" ) | crontab -
+    ok "llmapi cron entry installed (exits cleanly when already running)"
+  fi
 fi
 
 # --- 3b. Health watchdog (out-of-process probe timer / cron fallback) ---

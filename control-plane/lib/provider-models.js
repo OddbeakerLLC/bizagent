@@ -287,11 +287,14 @@ function normalizeModels(rawModels) {
 }
 
 /**
- * List chat-capable models for a provider, live from its models-list
- * endpoint (server-side, saved key, never exposed). Falls back to the
- * provider's curated static list (cli.json `models`) when the provider has
- * no reachable list endpoint or no saved key. Always resolves; `ok:false`
- * carries a human-readable `error`.
+ * List chat-capable models for a provider. When BIZAGENT_LLMAPI_URL (or
+ * LLMAPI_URL) is set, the list comes from the llmapi REST API
+ * (`GET /v1/models?provider=x`, bearer via BIZAGENT_LLMAPI_TOKEN/LLMAPI_TOKEN)
+ * — no caller hits provider /models endpoints directly. Without llmapi, the
+ * legacy path fetches the provider's models endpoint server-side with the
+ * saved key. Both fall back to the provider's curated static list (cli.json
+ * `models`) when nothing answers; always resolves; `ok:false` carries a
+ * human-readable `error`.
  *
  * @param {{ hub: string, cliJson: object, provider: string, apiKey?: string }} opts
  * @returns {Promise<{ ok: boolean, provider: string, source: "live"|"fallback", models: Array<{id:string,name:string,pricing:object|null}>, error?: string, style?: string }>}
@@ -314,6 +317,50 @@ async function listProviderModels(opts = {}) {
       models: fallback,
       error: `cli.json has no provider "${key}"`,
     };
+  }
+
+  // llmapi mode: the API owns provider keys and style handling; a failure to
+  // reach llmapi itself falls back to the static list like any other error.
+  const llmapiBase = String(
+    process.env.BIZAGENT_LLMAPI_URL || process.env.LLMAPI_URL || "",
+  ).trim().replace(/\/+$/, "");
+  if (llmapiBase) {
+    try {
+      const headers = {};
+      const token = process.env.BIZAGENT_LLMAPI_TOKEN || process.env.LLMAPI_TOKEN;
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const body = await fetchJson(
+        `${llmapiBase}/v1/models?provider=${encodeURIComponent(key)}`,
+        headers,
+        REQUEST_TIMEOUT_MS,
+      );
+      const models = Array.isArray(body && body.data)
+        ? body.data
+            .map((m) => ({
+              id: normalizeModelId(m && m.id),
+              name: String((m && m.name) || (m && m.id) || "").trim(),
+              pricing: m && m.pricing != null ? m.pricing : null,
+            }))
+            .filter((m) => m.id && MODEL_ID_RE.test(m.id))
+        : [];
+      const ok = !!(body && body.ok !== false) && models.length > 0;
+      return {
+        ok,
+        provider: key,
+        source: ok && body.source === "live" ? "live" : "fallback",
+        models: ok ? models : (models.length ? models : fallback),
+        style: providerModelsStyle(entry),
+        ...(ok ? {} : { error: (body && body.error) || "llmapi returned no usable models" }),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        provider: key,
+        source: "fallback",
+        models: fallback,
+        error: (err && err.message) || "failed to list models via llmapi",
+      };
+    }
   }
 
   const keyEnv = String(entry.keyEnv || "").trim();

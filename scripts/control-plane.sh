@@ -52,6 +52,22 @@ PID_FILE="$HUB/.bizagent/control-plane.pid"
 LOG_FILE="$HUB/logs/control-plane-server.log"
 UNITDIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
+# llmapi (LLM provider REST API) is managed alongside the control plane:
+# start starts it, stop stops it, restart restarts both. Best-effort: a
+# llmapi start failure never prevents the control plane from running.
+start_llmapi_best_effort() {
+  if [ -x "$ROOT/scripts/llmapi.sh" ] && [ -f "$ROOT/llmapi.js" ]; then
+    "$ROOT/scripts/llmapi.sh" start "$HUB" 2>/dev/null \
+      || echo "llmapi start skipped (control plane still starts)"
+  fi
+}
+
+stop_llmapi_best_effort() {
+  if [ -x "$ROOT/scripts/llmapi.sh" ]; then
+    "$ROOT/scripts/llmapi.sh" stop "$HUB" 2>/dev/null || true
+  fi
+}
+
 # --- discovery -------------------------------------------------------------
 
 find_pids() {
@@ -180,6 +196,9 @@ describe_running() {
 
 start_server() {
   local pid unit
+  # llmapi first (idempotent) so live dispatch has the API as soon as the
+  # control plane is up — including when the control plane is already running.
+  start_llmapi_best_effort
   if pid="$(primary_pid 2>/dev/null)"; then
     write_pid_file "$pid"
     echo "bizagent-control-plane already running: pid $pid"
@@ -210,7 +229,6 @@ start_server() {
         || echo "hub-daemon start skipped (cold launch still works)"
     fi
   }
-
   unit="$(find_systemd_unit 2>/dev/null || true)"
   if [ -n "$unit" ] && command -v systemctl >/dev/null 2>&1; then
     if systemctl --user start "$unit" 2>/dev/null; then
@@ -262,6 +280,7 @@ stop_server() {
     if [ -x "$ROOT/scripts/hub-daemon.sh" ]; then
       "$ROOT/scripts/hub-daemon.sh" stop 2>/dev/null || true
     fi
+    stop_llmapi_best_effort
     echo "bizagent-control-plane stopped via systemd ($unit)"
     return 0
   fi
@@ -286,6 +305,7 @@ stop_server() {
   if [ -x "$ROOT/scripts/hub-daemon.sh" ]; then
     "$ROOT/scripts/hub-daemon.sh" stop 2>/dev/null || true
   fi
+  stop_llmapi_best_effort
   return 0
 }
 
@@ -294,6 +314,10 @@ case "${1:-}" in
   stop) stop_server ;;
   status)
     if describe_running; then
+      # Informational: llmapi runs alongside the control plane.
+      if [ -x "$ROOT/scripts/llmapi.sh" ]; then
+        "$ROOT/scripts/llmapi.sh" status "$HUB" 2>/dev/null || true
+      fi
       exit 0
     fi
     rm -f "$PID_FILE"

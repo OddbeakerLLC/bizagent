@@ -16,6 +16,9 @@
  * Run: node llmapi.js   (env: LLMAPI_PORT, LLMAPI_HOST, LLMAPI_TOKEN,
  *      LLMAPI_CONCURRENCY, LLMAPI_MIN_INTERVAL_MS, LLMAPI_MAX_RETRIES,
  *      LLMAPI_TIMEOUT_MS, LLMAPI_CONFIG)
+ *
+ * Default port 8788 — 8787 is the control plane's default. A second instance
+ * started while one is already listening exits cleanly (cron-safe).
  */
 
 const express = require('express');
@@ -25,6 +28,16 @@ const PQueueMod = require('p-queue');
 const PQueue = PQueueMod.default || PQueueMod;
 const OpenAI = require('openai');
 const { sanitizeMessages } = require('./agent-runtime/src/client');
+// Models-list helpers shared with the console picker (same normalization:
+// chat-model filtering, display names, pricing; anthropic pagination).
+const {
+  providerModelsStyle,
+  modelsUrlFor,
+  fetchOpenAiStyleModels,
+  fetchAnthropicModels,
+  normalizeModels,
+  staticModelsFor,
+} = require('./control-plane/lib/provider-models');
 
 const app = express();
 app.disable('x-powered-by');
@@ -207,6 +220,67 @@ app.get('/v1/providers', (req, res) => {
   }
 });
 
+// GET /v1/models — OpenAI-shaped model list.
+//   ?provider=x  live fetch of that provider's models endpoint (server-side
+//                key), normalized to chat models; falls back to the provider's
+//                curated static list with ok:false + error when it fails.
+//   no provider  catalog static model lists for every provider (no network).
+// Shape: { object: "list", ok, source, provider?, error?, data: [{ id, object: "model", name, pricing?, provider? }] }
+app.get('/v1/models', async (req, res) => {
+  const providerParam = String(req.query.provider || '').trim();
+  try {
+    const catalog = loadProviderCatalog();
+    if (!providerParam) {
+      const data = [];
+      for (const [name, entry] of Object.entries(catalog)) {
+        if (name.startsWith('_')) continue;
+        for (const m of staticModelsFor(entry)) {
+          data.push({ id: m.id, object: 'model', name: m.name, provider: name });
+        }
+      }
+      return res.json({ object: 'list', ok: true, source: 'catalog', data });
+    }
+
+    const entry = catalog[providerParam];
+    if (!entry || !entry.baseURL) {
+      return res.status(400).json({ error: { message: `unknown provider "${providerParam}"`, type: 'invalid_request_error' } });
+    }
+    const fallbackData = staticModelsFor(entry).map((m) => ({ id: m.id, object: 'model', name: m.name, pricing: null }));
+    const fail = (error) => res.json({ object: 'list', ok: false, source: 'fallback', provider: providerParam, error, data: fallbackData });
+
+    let apiKey;
+    try {
+      apiKey = getProviderConfig(providerParam).apiKey;
+    } catch (err) {
+      // Missing key (non-optionalKey provider): same semantics as the console
+      // picker today — static fallback + human-readable error, not a 4xx.
+      return fail(String(err && err.message || err));
+    }
+
+    try {
+      const url = modelsUrlFor(entry);
+      const raw = providerModelsStyle(entry) === 'anthropic'
+        ? await fetchAnthropicModels(url, apiKey)
+        : await fetchOpenAiStyleModels(url, apiKey);
+      const models = normalizeModels(raw);
+      if (models.length === 0) {
+        return fail('models list empty or no chat-capable models');
+      }
+      return res.json({
+        object: 'list',
+        ok: true,
+        source: 'live',
+        provider: providerParam,
+        data: models.map((m) => ({ id: m.id, object: 'model', name: m.name, pricing: m.pricing })),
+      });
+    } catch (err) {
+      return fail(String((err && err.message) || err || 'failed to list models'));
+    }
+  } catch (err) {
+    res.status(500).json({ error: { message: String(err && err.message || err), type: 'api_error' } });
+  }
+});
+
 // POST /v1/chat/completions — body: { provider, model, messages, tools?, ...opts }
 app.post('/v1/chat/completions', async (req, res) => {
   const { provider, model, messages, tools, ...opts } = req.body || {};
@@ -249,10 +323,20 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 // ---------------------------------------------------------------------------
 
 if (require.main === module) {
-  const port = Number(process.env.LLMAPI_PORT || 0) || 8787;
+  const port = Number(process.env.LLMAPI_PORT || 0) || 8788;
   const host = process.env.LLMAPI_HOST || '127.0.0.1';
-  app.listen(port, host, () => {
+  const server = app.listen(port, host, () => {
     console.log(`llmapi listening on http://${host}:${port} (concurrency=${CONCURRENCY}/provider, min_interval=${MIN_INTERVAL_MS}ms, max_retries=${MAX_RETRIES})`);
+  });
+  // Cron-safe: when a previous instance already owns the port, exit 0 so a
+  // cron re-run does not spam failures (systemd restarts handle real crashes).
+  server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+      console.log(`llmapi: port ${port} already in use — another instance is running; exiting`);
+      process.exit(0);
+    }
+    console.error(`llmapi: server error: ${err && err.message}`);
+    process.exit(1);
   });
 }
 

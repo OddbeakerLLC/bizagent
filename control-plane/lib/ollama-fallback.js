@@ -178,6 +178,7 @@ function hubLaunchOverride(hub) {
 async function probePaidProvider(hub) {
   let providerName = '';
   let def = null;
+  let key = '';
   try {
     const { loadRegistry } = require('./config');
     const { loadCliJson, providerEntries, resolveProviderName } = require('./cli-config');
@@ -186,12 +187,41 @@ async function probePaidProvider(hub) {
     providerName = String(hubAgent.provider || hubAgent.cliName || '').trim();
     if (!providerName) return { probed: false };
     const cliJson = loadCliJson(hub);
-    const key = resolveProviderName(providerName, cliJson);
+    key = resolveProviderName(providerName, cliJson);
     def = providerEntries(cliJson)[key];
   } catch (_err) {
     return { probed: false };
   }
   if (!def || !def.baseURL) return { probed: false };
+
+  // llmapi mode: probe through the llmapi REST API (it owns provider keys and
+  // auth) instead of hitting the provider /models endpoint directly.
+  const llmapiBase = String(
+    process.env.BIZAGENT_LLMAPI_URL || process.env.LLMAPI_URL || '',
+  ).trim().replace(/\/+$/, '');
+  if (llmapiBase) {
+    try {
+      const headers = {};
+      const token = process.env.BIZAGENT_LLMAPI_TOKEN || process.env.LLMAPI_TOKEN;
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${llmapiBase}/v1/models?provider=${encodeURIComponent(key)}`, {
+        headers,
+        signal: AbortSignal.timeout(8000),
+      });
+      if (res.ok) {
+        const body = await res.json().catch(() => null);
+        if (body && body.ok === false) {
+          return { probed: true, ok: false, reason: body.error || 'provider_refused' };
+        }
+        clearFallback(hub, 'paid_provider_probe_ok');
+        return { probed: true, ok: true };
+      }
+      return { probed: true, ok: false, status: res.status };
+    } catch (err) {
+      return { probed: true, ok: false, error: err.message };
+    }
+  }
+
   const keyEnv = def.keyEnv || '';
   const apiKey = (keyEnv && process.env[keyEnv]) || '';
   if (!apiKey) return { probed: true, ok: false, reason: `missing ${keyEnv}` };

@@ -1,0 +1,15 @@
+[Unit]
+Description=BizAgent llmapi (LLM provider REST API)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__HUB_SETTING__
+Environment=PATH=%h/.local/bin:%h/.grok/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-__HUB_EXEC__/.bizagent/env
+ExecStart=__NODE__ "__HUB_EXEC__/llmapi.js"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

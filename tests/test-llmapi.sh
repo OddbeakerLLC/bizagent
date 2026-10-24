@@ -53,6 +53,10 @@ const srv = http.createServer((req, res) => {
     });
     return;
   }
+  if (req.method === 'GET' && req.url === '/v1/models') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ object: 'list', data: [{ id: 'mock-model' }, { id: 'mock-embed-model' }] }));
+  }
   res.writeHead(404); res.end();
 });
 srv.listen($MOCKPORT, '127.0.0.1', () => console.log('mock ready'));
@@ -160,5 +164,103 @@ const { createClient, chatCompletion } = require(process.argv[1] + "/agent-runti
 })().catch(() => process.exit(1));
 ' "$ROOT")"
 [ "$code" = "500" ] || fail "runtime llmapi-mode client should surface provider status 500, got: $code"
+
+# 13. GET /v1/models (no provider) — catalog static lists for every provider
+out="$(curl -sf "$BASE/v1/models")"
+echo "$out" | grep -q '"object":"list"' || fail "models response not OpenAI-shaped: $out"
+echo "$out" | grep -q '"mock-model"' || fail "catalog models missing mock-model: $out"
+echo "$out" | grep -q '"dead-model"' || fail "catalog models missing dead-model: $out"
+
+# 14. GET /v1/models?provider=mock — live fetch from the provider, chat-filtered
+out="$(curl -sf "$BASE/v1/models?provider=mock")"
+echo "$out" | grep -q '"source":"live"' || fail "provider models not live: $out"
+echo "$out" | grep -q '"mock-model"' || fail "live models missing mock-model: $out"
+echo "$out" | grep -q 'mock-embed-model' && fail "non-chat model not filtered: $out" || true
+
+# 15. GET /v1/models?provider=dead — unreachable provider falls back to static list
+out="$(curl -sf "$BASE/v1/models?provider=dead")"
+echo "$out" | grep -q '"ok":false' || fail "dead provider should report ok:false: $out"
+echo "$out" | grep -q '"source":"fallback"' || fail "dead provider should fall back: $out"
+echo "$out" | grep -q '"dead-model"' || fail "fallback models missing dead-model: $out"
+
+# 16. GET /v1/models?provider=nope — unknown provider -> 400
+code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/models?provider=nope")"
+[ "$code" = "400" ] || fail "unknown provider models should 400, got $code"
+
+# 17. Console picker migration: listProviderModels() in llmapi mode
+# (BIZAGENT_LLMAPI_URL set) returns live models through the API, no direct
+# provider call.
+out="$(BIZAGENT_LLMAPI_URL="$BASE" node -e '
+const { listProviderModels } = require(process.argv[1] + "/control-plane/lib/provider-models");
+(async () => {
+  const r = await listProviderModels({
+    hub: process.argv[1],
+    cliJson: { mock: { baseURL: "http://127.0.0.1:'$MOCKPORT'/v1", keyEnv: "MOCK_API_KEY", models: ["static-mock"] } },
+    provider: "mock",
+  });
+  console.log(JSON.stringify(r));
+})().catch((e) => { console.error(e.message); process.exit(1); });
+' "$ROOT")"
+echo "$out" | grep -q '"ok":true' || fail "picker llmapi-mode not ok: $out"
+echo "$out" | grep -q '"source":"live"' || fail "picker llmapi-mode not live: $out"
+echo "$out" | grep -q '"mock-model"' || fail "picker llmapi-mode missing mock-model: $out"
+
+# 18. Picker llmapi-mode falls back to the static list when llmapi is unreachable
+out="$(BIZAGENT_LLMAPI_URL="http://127.0.0.1:1" node -e '
+const { listProviderModels } = require(process.argv[1] + "/control-plane/lib/provider-models");
+(async () => {
+  const r = await listProviderModels({
+    hub: process.argv[1],
+    cliJson: { mock: { baseURL: "http://127.0.0.1:'$MOCKPORT'/v1", keyEnv: "MOCK_API_KEY", models: ["static-mock"] } },
+    provider: "mock",
+  });
+  console.log(JSON.stringify(r));
+})().catch((e) => { console.error(e.message); process.exit(1); });
+' "$ROOT")"
+echo "$out" | grep -q '"ok":false' || fail "picker should fail when llmapi is down: $out"
+echo "$out" | grep -q '"static-mock"' || fail "picker llmapi-down fallback missing static list: $out"
+
+# 19. Ollama-fallback probe migration: probePaidProvider() in llmapi mode
+# probes through the API (2xx + ok -> clear the fallback flag).
+HUBTMP="$TMP/hub"
+mkdir -p "$HUBTMP/.bizagent"
+cat > "$HUBTMP/registry.json" <<EOF
+{ "settings": { "hub_agent": { "provider": "mock" } }, "products": [] }
+EOF
+cat > "$HUBTMP/cli.json" <<EOF
+{ "mock": { "label": "Mock", "baseURL": "http://127.0.0.1:$MOCKPORT/v1", "keyEnv": "MOCK_API_KEY", "models": ["mock-model"] } }
+EOF
+printf '{"active":true,"provider":"ollama","ts":"%s"}' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HUBTMP/.bizagent/ollama-fallback.json"
+out="$(BIZAGENT_LLMAPI_URL="$BASE" node -e '
+const { probePaidProvider } = require(process.argv[2] + "/control-plane/lib/ollama-fallback");
+(async () => {
+  const r = await probePaidProvider(process.argv[1]);
+  const fs = require("fs");
+  const flagGone = !fs.existsSync(process.argv[1] + "/.bizagent/ollama-fallback.json");
+  console.log(JSON.stringify({ ...r, flagGone }));
+})().catch((e) => { console.error(e.message); process.exit(1); });
+' "$HUBTMP" "$ROOT")"
+echo "$out" | grep -q '"ok":true' || fail "probe llmapi-mode should succeed: $out"
+echo "$out" | grep -q '"flagGone":true' || fail "probe success should clear the fallback flag: $out"
+
+# 20. Probe llmapi-mode reports failure when the paid provider is unreachable
+cat > "$HUBTMP/cli.json" <<EOF
+{ "dead": { "label": "Dead", "baseURL": "http://127.0.0.1:1/v1", "keyEnv": "MOCK_API_KEY", "models": ["dead-model"] } }
+EOF
+python3 - "$HUBTMP/registry.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["settings"]["hub_agent"]["provider"] = "dead"
+json.dump(d, open(p, "w"))
+PY
+out="$(BIZAGENT_LLMAPI_URL="$BASE" node -e '
+const { probePaidProvider } = require(process.argv[2] + "/control-plane/lib/ollama-fallback");
+(async () => {
+  const r = await probePaidProvider(process.argv[1]);
+  console.log(JSON.stringify(r));
+})().catch((e) => { console.error(e.message); process.exit(1); });
+' "$HUBTMP" "$ROOT")"
+echo "$out" | grep -q '"ok":false' || fail "probe llmapi-mode should fail for a dead provider: $out"
 
 echo "PASS: test-llmapi.sh"
