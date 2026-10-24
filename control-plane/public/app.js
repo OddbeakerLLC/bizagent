@@ -658,14 +658,10 @@ function renderAgents(agents) {
     detail.className = 'agent-detail';
     if (isExpanded) detail.classList.add('expanded');
     detail.dataset.status = agent.hasMail ? 'on' : '';
-    detail.appendChild(makeDetailRow('INBOX', 'inbox', false));
-    detail.appendChild(makeDetailRow('DISPATCHED', 'lastDispatched', false));
-    detail.appendChild(makeDetailRow('JOURNAL', 'journal', true));
-    if (typeof renderAgentProjects === 'function') {
-      renderAgentProjects(detail, agent.projects);
-    }
 
-    // Model link lives inside the expanded accordion (click opens config).
+    // Model link first, directly under the product/agent name (click opens config),
+    // so it keeps a fixed position instead of sitting under an arbitrary-length
+    // project list.
     const cliLine = document.createElement('button');
     cliLine.type = 'button';
     cliLine.className = 'agent-cli-line';
@@ -678,6 +674,13 @@ function renderAgents(agents) {
       showAgentConfigModal(agent);
     });
     detail.appendChild(cliLine);
+
+    detail.appendChild(makeDetailRow('INBOX', 'inbox', false));
+    detail.appendChild(makeDetailRow('DISPATCHED', 'lastDispatched', false));
+    detail.appendChild(makeDetailRow('JOURNAL', 'journal', true));
+    if (typeof renderAgentProjects === 'function') {
+      renderAgentProjects(detail, agent.projects);
+    }
 
     let loaded = false;
     const toggle = () => {
