@@ -79,10 +79,50 @@ function createClient({ apiKey, baseURL, provider }) {
   if (isLlmApiMode()) {
     return createLlmApiClient(provider || '');
   }
+  // maxRetries: 0 — the SDK's built-in retries fire ~0.5s/1s apart and exhaust
+  // in ~2s (operator report 2026-10-24: 502 retries "exhaust almost instantly").
+  // Transient-error retries with real backoff live in chatCompletion() below.
   return new OpenAI({
     apiKey,
     baseURL,
+    maxRetries: 0,
   });
+}
+
+/**
+ * Transient-error retry with real exponential backoff.
+ *
+ * Retries 429 / 5xx / network-level failures with exponential backoff + jitter
+ * (base delay defaults to 5s, so the full cycle — maxRetries attempts after the
+ * first failure — spans roughly 30–60s before giving up instead of exhausting
+ * in a couple of seconds). Honors a provider Retry-After header when present.
+ *
+ * Env:
+ *   BIZAGENT_AGENT_MAX_RETRIES   extra attempts after the first (default 3)
+ *   BIZAGENT_AGENT_RETRY_BASE_MS base delay, doubled per attempt (default 5000)
+ */
+function isTransientError(err) {
+  if (!err) return false;
+  const status = err.status != null ? err.status : err.statusCode;
+  if (status === 429) return true;
+  if (typeof status === 'number' && status >= 500) return true;
+  if (err.name === 'APIConnectionError' || err.name === 'APIConnectionTimeoutError') return true;
+  const code = err.code || '';
+  return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND'].includes(code);
+}
+
+function retryDelayMs(attempt, err) {
+  const base = Math.max(250, Number(process.env.BIZAGENT_AGENT_RETRY_BASE_MS || 5000));
+  let ms = base * Math.pow(2, attempt) + Math.floor(Math.random() * base);
+  const headers = (err && err.headers) || {};
+  const ra = Number(headers.get ? headers.get('retry-after') : headers['retry-after']);
+  if (Number.isFinite(ra) && ra >= 0) ms = Math.max(ms, ra * 1000);
+  return Math.min(ms, 60000);
+}
+
+function agentMaxRetries() {
+  const raw = process.env.BIZAGENT_AGENT_MAX_RETRIES;
+  return Math.max(0, Number(raw != null && raw !== '' ? raw : 3));
 }
 
 /**
@@ -201,7 +241,22 @@ async function chatCompletion(client, model, messages, tools, opts = {}) {
   const maxTokens = Number(process.env.BIZAGENT_AGENT_MAX_TOKENS || 0);
   if (maxTokens > 0) body.max_tokens = maxTokens;
 
-  return client.chat.completions.create(body);
+  const maxRetries = agentMaxRetries();
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await client.chat.completions.create(body);
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientError(err) || attempt === maxRetries) throw err;
+      const delay = retryDelayMs(attempt, err);
+      console.error(
+        `LLM call failed (attempt ${attempt + 1}/${maxRetries + 1}, transient: ${err.status || err.code || err.name || 'error'}); retrying in ${Math.round(delay / 1000)}s`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr; // unreachable
 }
 
-module.exports = { createClient, chatCompletion, sanitizeMessages, isLlmApiMode };
+module.exports = { createClient, chatCompletion, sanitizeMessages, isLlmApiMode, isTransientError, retryDelayMs, agentMaxRetries };
