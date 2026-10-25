@@ -40,9 +40,45 @@ The weekly cron runs `scripts/weekly-refresh.sh`, which:
    - Archives the request
 
 7. **Manifest write** — writes a fresh `knowledge-stack/MANIFEST.md` with
-   this run's timestamp and all current files.
+   this run's timestamp and all current files. Copied docs with recorded
+   provenance get a `| src: <project>/<path>@<sha>` field; docs removed by
+   reconciliation are listed under "Removed this refresh".
 
 8. **Journal bullet** — appends a `[Maintenance]` bullet to `journal/YYYY-MM-DD.md`.
+
+---
+
+## Provenance and removal reconciliation
+
+The timestamp-based refresh has a blind spot: a spec deleted from a product
+repo stops appearing among "files newer than the last refresh", but its stale
+copy in `knowledge-stack/` keeps answering questions as if current. The
+refresh closes this gap with provenance tracking in
+`scripts/lib/ks-provenance.sh` (sourced by `weekly-refresh.sh`):
+
+- **Sidecar** — `knowledge-stack/.provenance.json` maps each copied stack
+  file to its owner slug, registry project name, repo-relative source path,
+  source git SHA, content hash, and copy timestamp. It is operator data:
+  `scripts/upgrade.sh` preserves `knowledge-stack/` wholesale, so the sidecar
+  survives upgrades.
+- **Capture** — after a product agent reports an update, the refresh parses
+  the reply's `Source docs:` list (the existing agent.md convention) and
+  matches it against the `<slug>-<basename>.<ext>` files the agent copied.
+  Docs it cannot resolve are left untracked — never guessed.
+- **Removal reconciliation** — before agents run each week, any stack copy
+  whose recorded source file no longer exists in its project repo is removed
+  and logged. Safety rules: files without resolved provenance (legacy stacks)
+  are never touched, and a missing project directory (repo not cloned) is
+  treated as "cannot verify" — skipped, not deleted.
+- **Overview revision stamping** — after an update, the slug's
+  `<slug>-overview.md` gets an HTML-comment `<!-- ks-provenance ... -->`
+  footer listing the source paths and revisions it summarizes (replaced, not
+  duplicated, on each refresh). PTL can then distinguish "current product
+  state" from "what the stack knew at last refresh".
+
+Backward compatibility: existing `MANIFEST.md` files keep working unchanged
+(the `Last refresh:` header format is untouched); stacks without a sidecar
+simply have nothing to reconcile until agents start reporting `Source docs:`.
 
 ---
 
@@ -69,6 +105,9 @@ When spawned for Knowledge Stack refresh:
 - If meaningful updates:
   - Write `<slug>-overview.md` to `knowledge-stack/`
   - Copy source documents as `<slug>-<basename>.<ext>`
+  - List every copied file's repo-relative path under a `Source docs:` heading
+    in your reply — this is recorded as provenance, and stack copies whose
+    source later disappears are removed automatically on refresh
 - If no meaningful updates, reply with "no update"
 - Archive the refresh request message
 

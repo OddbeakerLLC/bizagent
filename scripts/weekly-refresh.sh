@@ -29,6 +29,12 @@ cd "$HUB"
 # Timestamp for this run
 RUN_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 RUN_DATE="$(date -u +%Y-%m-%d)"
+STACK="$HUB/knowledge-stack"
+
+# Provenance tracking (source paths + revisions, removal reconciliation,
+# overview revision stamping). Best-effort: never fails the refresh.
+# shellcheck source=lib/ks-provenance.sh
+. "$HUB/scripts/lib/ks-provenance.sh"
 
 # --- Helper functions -------------------------------------------------------
 
@@ -211,20 +217,23 @@ spawn_hub_for_ks() {
 }
 
 # Check if agent replied with "no update"
+# Sets REPLY_FILE (path of the reply used) for downstream provenance parsing.
 check_agent_no_update() {
   local slug="$1"
-  
+
   local outbox="$HUB/agents/$slug/outbox"
-  
+
   # Find the most recent reply in the agent's outbox
   local reply_file
   reply_file="$(find "$outbox" -name "*.md" -type f -newermt "$RUN_DATE" 2>/dev/null | sort | tail -1)"
-  
+
   if [[ -z "$reply_file" ]]; then
     # Fall back to any recent file
     reply_file="$(find "$outbox" -name "*.md" -type f -mmin -10 2>/dev/null | sort | tail -1)"
   fi
-  
+
+  REPLY_FILE="$reply_file"
+
   if [[ -z "$reply_file" ]]; then
     return 1  # No reply found, assume update needed
   fi
@@ -321,9 +330,25 @@ write_manifest() {
         source="copied"
       fi
       
-      echo "- $basename | owner: $owner | source: $source | date: $file_date"
+      # Provenance suffix (empty for files without recorded provenance)
+      local prov
+      prov="$(ks_prov_manifest_field "$basename")"
+      
+      echo "- $basename | owner: $owner | source: $source | date: $file_date$prov"
     done
   } > "$manifest"
+  
+  # Removals from this run's provenance reconciliation (visibility for PTL)
+  if [[ -n "${KS_REMOVED_LIST:-}" ]]; then
+    {
+      echo ""
+      echo "## Removed this refresh"
+      echo ""
+      for rf in $KS_REMOVED_LIST; do
+        echo "- $rf (source document deleted from repo)"
+      done
+    } >> "$manifest"
+  fi
   
   log "MANIFEST.md written"
 }
@@ -366,6 +391,25 @@ fi
 # Run the existing weekly.sh for orphan cleanup
 log "Running weekly.sh for orphan cleanup..."
 "$HUB/scripts/weekly.sh" 2>&1 || err "weekly.sh had errors (continuing)"
+
+# 2b. Removal reconciliation: stack copies whose recorded source document was
+# deleted from the product repo are removed here (before agents run), so a
+# stale copy can no longer answer questions as if current. Files without
+# resolved provenance (legacy stacks) are never touched.
+log "Reconciling Knowledge Stack removals (provenance)..."
+KS_REMOVED_LIST=""
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+  log "$line"
+  if [[ "$line" == "REMOVED "* ]]; then
+    local_name="${line#REMOVED }"
+    local_name="${local_name%% (*}"
+    KS_REMOVED_LIST="$KS_REMOVED_LIST $local_name"
+  fi
+done < <(ks_prov_reconcile)
+if [[ -n "$KS_REMOVED_LIST" ]]; then
+  log "Removed stale stack copies:$KS_REMOVED_LIST"
+fi
 
 # 2. Get last refresh timestamp
 LAST_REFRESH="$(get_last_refresh)"
@@ -429,6 +473,7 @@ while IFS= read -r slug; do
 If there are meaningful updates:
 - Write an overview file (<slug>-overview.md) to knowledge-stack/ with your contribution
 - Copy any source documents (PDFs, specs, etc.) to knowledge-stack/ as <slug>-<basename>.<ext>
+- Under a 'Source docs:' heading at the end of your reply, list the repo-relative path of every file you copied. These paths are recorded as provenance (with the source revision); on later refreshes, any stack copy whose source document no longer exists in your repo is removed automatically, so an accurate list keeps the stack trustworthy.
 
 If no meaningful updates since last refresh, reply with 'no update' and your existing files will be preserved.
 
@@ -440,12 +485,20 @@ This is a weekly maintenance task. Do not start any product work."
   # Spawn the agent
   if spawn_agent_for_ks "$slug"; then
     # Check if agent replied with "no update"
+    REPLY_FILE=""
     if check_agent_no_update "$slug"; then
       log "Agent $slug: no update"
       NO_UPDATE_SLUGS="$NO_UPDATE_SLUGS $slug"
     else
       log "Agent $slug: updated"
       UPDATED_SLUGS="$UPDATED_SLUGS $slug"
+      # Provenance: record source path + revision for the docs the agent just
+      # copied (parsed from its reply's "Source docs:" list), then stamp the
+      # overview with the revisions it summarizes. Best-effort.
+      ks_prov_record_for_slug "$slug" "$REPLY_FILE" | while IFS= read -r pl; do
+        [[ -n "$pl" ]] && log "$pl"
+      done
+      ks_prov_stamp_overview "$slug"
     fi
     
     # Archive the request message
@@ -470,6 +523,9 @@ if [[ -n "$NO_UPDATE_SLUGS" ]]; then
 fi
 if [[ -n "$FAILED_SLUGS" ]]; then
   JOURNAL_MSG="$JOURNAL_MSG Failed:$FAILED_SLUGS."
+fi
+if [[ -n "$KS_REMOVED_LIST" ]]; then
+  JOURNAL_MSG="$JOURNAL_MSG Removed stale copies:$KS_REMOVED_LIST."
 fi
 
 append_journal "$JOURNAL_MSG"
