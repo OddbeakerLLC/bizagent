@@ -55,7 +55,17 @@ registry before asking.
 Approved beat order (one question per turn):
 
 1. **Welcome + organization name.**
-2. **Where their project repositories live.** Accept a parent folder path, an
+2. **Business type.** Ask what type of business they're running, offering a
+   curated list (software developer, product manufacturer, lawyer,
+   accountant, consultant, e-commerce/retail, agency, …) plus an **other**
+   free-text option. Resolve their answer with
+   `scripts/business-preset.sh match "<answer>"` and record the preset slug.
+   This one question replaces any individual code-review / approval-gate /
+   testing-bar questions — the preset map
+   (`templates/business-presets.json`) drives those defaults. Do **not**
+   ask per-service integration questions (email, Google apps, calendars);
+   those stay per-product.
+3. **Where their project repositories live.** Accept a parent folder path, an
    explicit list of repo paths, or **none yet** (zero-repo → skip 3–4 product
    grouping, keep `products: []`).
    - If they give a folder: list its sub-directories, briefly inspect each one
@@ -63,10 +73,10 @@ Approved beat order (one question per turn):
      into _products_. Present the proposal and invite corrections. Iterate
      until they approve it.
    - If they list repos: path + optional git remote per repo.
-3. **Confirmation of the product groupings** (skip if zero-repo). Each product
+4. **Confirmation of the product groupings** (skip if zero-repo). Each product
    needs a short lowercase `slug` (e.g. `jobe-ai`). One agent per product; an
    agent owns one or more project repos.
-4. **Agent names** per confirmed product (skip if zero-repo). Derive a short
+5. **Agent names** per confirmed product (skip if zero-repo). Derive a short
    name: single-word product → first letter ("Widgets" → **Agent W**);
    multi-word → first letter of each word ("Jobe AI" → **Agent JA**). On
    conflict, fall back to first two letters of each product's first word
@@ -75,29 +85,29 @@ Approved beat order (one question per turn):
    "I'd suggest calling this agent **Agent W**. Want to use that, or do you
    have a different name in mind?" Record confirmed `agent_name` in
    `registry.json`.
-5. **Peer messaging?** Default **hub-and-spoke / no** direct cross-product
+6. **Peer messaging?** Default **hub-and-spoke / no** direct cross-product
    agent chat. Most products have none. (No peer-chat protocol work.)
-6. **Nightly maintenance time** — default `23:00`.
-7. **Knowledge Stack** — on/off (default `true`) plus `refresh_day`
+7. **Nightly maintenance time** — default `23:00`.
+8. **Knowledge Stack** — on/off (default `true`) plus `refresh_day`
    (default `sunday`) and `refresh_time` (default `01:00`) if enabled. The
    Knowledge Stack is synthesized docs PTL keeps fresh for chat-with-documents
    tools (NotebookLM, MSTY). Skip (`false`) if unused.
-8. **Auto-archive days** — inbox messages left unactioned. Default `30`.
-9. **Agent autonomy** — `maintenance-only` (default), `+monitoring`, or
+9. **Auto-archive days** — inbox messages left unactioned. Default `30`.
+10. **Agent autonomy** — `maintenance-only` (default), `+monitoring`, or
    `+light-dev`.
-10. **Private hub remote or local-only.** Installer removes public framework
+11. **Private hub remote or local-only.** Installer removes public framework
     `origin`. Ask for a **private** remote URL (GitHub private, bare repo on
     this machine, or private host) as `hub.remote`. Blank = local-only nightly
     commits. Never a public framework URL.
-11. **LLM provider + model** — only if not already in env/registry from the
+12. **LLM provider + model** — only if not already in env/registry from the
     installer. Runtime is always **bizagent-agent**. Set
     `settings.hub_agent.provider` (key in `cli.json`) and
     `settings.hub_agent.model`. Ensure matching API key in `.bizagent/env`.
     Legacy `cliName` aliases `provider` only.
-12. **Control-plane login** — only if not already set (no `.bizagent/auth.json`).
+13. **Control-plane login** — only if not already set (no `.bizagent/auth.json`).
     Username + password; store only the salted hash from
     `node scripts/bizagent-control-plane.js auth-init`.
-13. **Build summary + next steps** — products/projects (or zero-repo), deferred
+14. **Build summary + next steps** — products/projects (or zero-repo), deferred
     items, cron, control-plane service offer, how to start directing work.
 
 **Do not ask** about message transport, hub-and-spoke topology, the
@@ -132,7 +142,12 @@ once exposed an operator's private data publicly — don't repeat it.)
 
 1. **Write `registry.json`.** Use the schema in `registry.example.json`,
    populated from the interview answers. Include the `agent_name` confirmed
-   in step 3 of the interview on each product entry.
+   in step 4 of the interview on each product entry. Record the § 1
+   business-type answer as `settings.business_type` (slug, label,
+   `custom: true` for free-text "other", `applied_at`, and the preset's
+   `defaults` from `templates/business-presets.json` — see
+   `docs/ONBOARDING-BUSINESS-PRESETS.md`). The preset is a starting point,
+   not a cage: everything stays overridable in registry settings post-setup.
 2. **Create the hub and user mailboxes:** `inbox/`, `inbox/archive/`, `outbox/`,
    `user/inbox/archive/`, `journal/`, `logs/`.
 3. **Create one agent per product:** for each product, make
@@ -140,7 +155,11 @@ once exposed an operator's private data publicly — don't repeat it.)
    `agents/<slug>/inbox/archive/`, and `agents/<slug>/outbox/`. Fill
    `agent.md` from `templates/agent.md.template` and `.dispatch.md` from
    `templates/dispatch.md.template`, substituting the product's name, slug,
-   project list, and any cross-product edges. Dispatch code must read this
+   project list, and any cross-product edges. Fill the template's
+   `{{BUSINESS_PRESET_SECTION}}` placeholder with the output of
+   `scripts/business-preset.sh section` (empty when no preset is set), so
+   agents spawned afterward inherit the business type's approval gates and
+   defaults automatically. Dispatch code must read this
    prompt file; never embed product-agent system prompts inline.
 4. **Onboard each project repo.** For every project on disk, run
    `scripts/onboard.sh <path>`. If a repo is missing but has a git remote,

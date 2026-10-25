@@ -5,12 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 A="$SCRIPT_DIR/../AGENT.md"
 fail() { echo "  FAIL: $1"; exit 1; }
 
-# § 1: Knowledge Stack interview question
-grep -q "^6\. \*\*Knowledge Stack" "$A" || fail "§ 1 missing Knowledge Stack question (step 6)"
+# § 1: Knowledge Stack interview question (step 8 after the business-type beat)
+grep -q "^8\. \*\*Knowledge Stack" "$A" || fail "§ 1 missing Knowledge Stack question (step 8)"
 grep -q "default \`true\`"          "$A" || fail "§ 1 missing default-true note"
 
 # § 1: subsequent steps renumbered
-grep -q "^7\. \*\*Archive threshold" "$A" || fail "§ 1 step 7 should be Archive threshold (renumbered from 6)"
+grep -q "^9\. \*\*Auto-archive days" "$A" || fail "§ 1 step 9 should be Auto-archive days (renumbered from 8)"
+
+# § 1: business-type beat present (step 2)
+grep -q "^2\. \*\*Business type" "$A" || fail "§ 1 missing business-type question (step 2)"
 
 # § 2: Knowledge Stack setup step (gated)
 grep -q "knowledge_stack.enabled == true" "$A" || fail "§ 2 missing knowledge_stack gating reference"

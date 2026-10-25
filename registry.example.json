@@ -12,6 +12,19 @@
     "auto_update": false,
     "_auto_update_comment": "When true, nightly runs scripts/upgrade.sh (public framework → hub machinery only; never clobbers registry/cli.json/agents/company/KS/library/mail). Default false = manual-only. Operator can always run scripts/upgrade.sh or ask PTL.",
     "autonomy": "maintenance-only",
+    "business_type": {
+      "_comment": "Set during first-run onboarding (§ 1 business-type question). Preset map: templates/business-presets.json; docs/ONBOARDING-BUSINESS-PRESETS.md. A starting point, not a cage — edit defaults/overrides here post-setup and re-render agent files with scripts/business-preset.sh section. Absent = no preset (backward compatible).",
+      "slug": "software-developer",
+      "label": "Software developer",
+      "custom": false,
+      "applied_at": "2026-10-25T00:00:00Z",
+      "defaults": {
+        "agent_roles": ["implementer", "reviewer"],
+        "approval_gates": ["code_review"],
+        "features_off": ["client_messaging"]
+      },
+      "overrides": {}
+    },
     "dispatch": {
       "_comment": "Node control-plane dispatch tunables. poll_seconds honored (default 2; clamp 1\u201330). hub_slots and agent_slots are separate pools so hub turns do not starve product fanout (defaults: hub 1, agents = max_concurrency). max_concurrency default 8 (product-agent pool when agent_slots omitted). allow_concurrency default true (omit/true = allow); false = at most one live turn. Env BIZAGENT_ALLOW_CONCURRENCY=0 forces off.",
       "poll_seconds": 2,

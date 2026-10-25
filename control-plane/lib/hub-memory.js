@@ -103,9 +103,9 @@ function deriveHubRuntimePrompt(hub) {
         `- Hub root (absolute): \`${hubAbs}\``,
         '- Registry state: **MINIMAL install seed** (`registry.json` exists but org empty and products=[]). This is **first-run**, not BUILT.',
         '- On `install-first-run` / Welcome seed: continue the console conversation; keep replies short (TTS). One question at a time per AGENT.md §1.',
-        '- Approved beats: org → repos (or none) → product groupings/slugs → agent names → peer messaging (default no) → nightly 23:00 → KS → archive days 30 → autonomy maintenance-only → private hub remote → LLM (skip if set) → CP login (skip if auth exists) → summary/next steps.',
-        '- Zero-repo is OK: write minimal registry + scaffolding; add products later. Hub-and-spoke stays; no peer-chat protocol work.',
-        '- Skip installer-already-set provider/key/CP auth/detach. After §1 answers, do §2 generate. Open `AGENT.md` §1–§2 for the full checklist.',
+        '- Beats: org → business type → repos (or none) → groupings/slugs → agent names → peer messaging → nightly 23:00 → KS → archive 30d → autonomy → private remote → LLM/CP login (skip if set) → summary. Save as `settings.business_type` (map: `templates/business-presets.json`; render `{{BUSINESS_PRESET_SECTION}}` in agent.md).',
+        '- Zero-repo OK: minimal registry + scaffolding. No peer-chat protocol.',
+        '- Skip installer-set provider/key/CP auth. After §1, do §2. See `AGENT.md` §1–§2.',
       ];
     }
     return [

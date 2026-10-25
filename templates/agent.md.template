@@ -30,6 +30,7 @@ You own **only** the paths listed below for **{{PRODUCT_NAME}}** (from `registry
 ### Projects
 {{PROJECT_LIST}}
 <!-- one bullet per project, e.g.:  - `repo-name` — ../repo-name -->
+{{BUSINESS_PRESET_SECTION}}
 
 ### Cross-product relationships
 {{CROSS_PRODUCT_EDGES}}

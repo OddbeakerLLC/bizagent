@@ -1,0 +1,78 @@
+{
+  "_comment": "Business-type presets for first-run onboarding (AGENT.md § 1 beat 2). The chosen type pre-configures defaults — a starting point, not a cage: everything stays overridable in registry.json settings.business_type after setup. scripts/business-preset.sh reads this file; do not rename keys without updating that script and docs/ONBOARDING-BUSINESS-PRESETS.md.",
+  "version": 1,
+  "presets": {
+    "software-developer": {
+      "label": "Software developer",
+      "aliases": ["software", "dev", "developer", "saas", "programming", "coding"],
+      "defaults": {
+        "agent_roles": ["implementer", "reviewer"],
+        "approval_gates": ["code_review"],
+        "features_off": ["client_messaging"]
+      }
+    },
+    "product-manufacturer": {
+      "label": "Product manufacturer",
+      "aliases": ["manufacturer", "manufacturing", "factory", "production"],
+      "defaults": {
+        "agent_roles": ["coordinator", "qa"],
+        "approval_gates": ["qa_shipment"],
+        "features_off": ["client_messaging"]
+      }
+    },
+    "law": {
+      "label": "Lawyer / law firm",
+      "aliases": ["lawyer", "attorney", "legal", "law firm"],
+      "defaults": {
+        "agent_roles": ["drafter", "reviewer"],
+        "approval_gates": ["document_review"],
+        "features_off": ["client_messaging", "auto_publish"]
+      }
+    },
+    "accounting": {
+      "label": "Accountant / bookkeeper",
+      "aliases": ["accountant", "bookkeeper", "accounting", "cpa", "tax"],
+      "defaults": {
+        "agent_roles": ["preparer", "reviewer"],
+        "approval_gates": ["document_review"],
+        "features_off": ["client_messaging", "auto_publish"]
+      }
+    },
+    "consultant": {
+      "label": "Consultant",
+      "aliases": ["consulting", "advisor", "coach"],
+      "defaults": {
+        "agent_roles": ["analyst", "drafter"],
+        "approval_gates": ["client_approval"],
+        "features_off": ["auto_publish"]
+      }
+    },
+    "ecommerce-retail": {
+      "label": "E-commerce / retail",
+      "aliases": ["ecommerce", "e-commerce", "retail", "shop", "store", "online store"],
+      "defaults": {
+        "agent_roles": ["merchandiser", "support-drafter"],
+        "approval_gates": ["qa_shipment"],
+        "features_off": ["auto_publish"]
+      }
+    },
+    "agency": {
+      "label": "Agency",
+      "aliases": ["agency", "studio", "marketing agency", "design agency"],
+      "defaults": {
+        "agent_roles": ["producer", "reviewer"],
+        "approval_gates": ["client_approval"],
+        "features_off": []
+      }
+    },
+    "generic": {
+      "label": "Other / general business",
+      "aliases": ["other"],
+      "defaults": {
+        "agent_roles": [],
+        "approval_gates": [],
+        "features_off": []
+      }
+    }
+  }
+}
