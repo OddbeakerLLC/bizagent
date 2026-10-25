@@ -12,7 +12,7 @@ const {
   ensureHubRuntimePrompt,
   pickPendingConversationId,
 } = require('./hub-memory');
-const { pendingMail } = require('./mail');
+const { pendingMail, writeOutboxMessage } = require('./mail');
 const { logEvent, logLatency, logError, appendLog } = require('./log');
 const {
   appendMessage,
@@ -284,6 +284,118 @@ function shouldSkipDuplicateAgentError(hub, slug, exitCode, kind) {
   return false;
 }
 
+// --- Iteration-cap notify (2026-10-25) -------------------------------------
+// When an agent burns its whole tool-iteration budget (often a degenerate
+// identical-tool-call loop), tell the hub once per slug per hour. Cap exits
+// are code 0, so this is detected from log tails regardless of exit code.
+
+const ITERATION_CAP_NOTIFY_WINDOW_MS = 60 * 60 * 1000;
+const ITERATION_CAP_MARKER = /stopped after (\d+) tool iterations/;
+
+function iterationCapNotifyStatePath(hub, slug) {
+  return path.join(appDir(hub), `iteration-cap-notify-${slug}.json`);
+}
+
+/** Debounce: at most one iteration-cap mail per slug per hour. */
+function shouldNotifyIterationCap(hub, slug, now = Date.now()) {
+  const statePath = iterationCapNotifyStatePath(hub, slug);
+  try {
+    const prev = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    if (
+      prev &&
+      prev.slug === slug &&
+      now - Number(prev.ts || 0) < ITERATION_CAP_NOTIFY_WINDOW_MS
+    ) {
+      return false;
+    }
+  } catch (_err) {
+    /* no state yet */
+  }
+  try {
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    writeJsonAtomic(statePath, { slug, ts: now });
+  } catch (_err) {
+    /* ignore */
+  }
+  return true;
+}
+
+/** Last N distinct `→ tool …` progress lines from a dispatch log tail. */
+function lastDistinctToolCalls(logTail, limit = 3) {
+  const seen = [];
+  const lines = String(logTail || '').split('\n');
+  for (let i = lines.length - 1; i >= 0 && seen.length < limit; i -= 1) {
+    const idx = lines[i].indexOf('→ ');
+    if (idx === -1) continue;
+    const call = lines[i].slice(idx).trim();
+    if (!call || seen.includes(call)) continue;
+    seen.push(call);
+  }
+  return seen.reverse();
+}
+
+/** Best-effort task hint: subject of the slug's newest pending inbox mail. */
+function iterationCapTaskHint(hub, slug) {
+  try {
+    const files = pendingMail(hub, slug) || [];
+    for (let i = files.length - 1; i >= 0; i -= 1) {
+      const body = fs.readFileSync(files[i], 'utf8');
+      const subj = String(body).match(/^subject:\s*(.+?)\s*$/m);
+      if (subj) return subj[1].trim();
+    }
+  } catch (_err) {
+    /* ignore */
+  }
+  return '(turn prompt already cleaned up — see dispatch-<slug>.log)';
+}
+
+/**
+ * Detect the iteration-cap marker in a dispatch's log tails and write one
+ * debounced mail to the hub inbox (from the agent slug). Best-effort — never
+ * blocks dispatch. Returns true when a mail was written.
+ */
+function notifyIterationCap(hub, slug) {
+  try {
+    const stdoutTail = readLogTail(
+      path.join(hub, 'logs', `dispatch-${slug}.log`),
+      20000,
+    );
+    const stderrTail = readStderrTail(
+      path.join(hub, 'logs', `dispatch-${slug}.stderr`),
+      20000,
+    );
+    const match = `${stdoutTail}\n${stderrTail}`.match(ITERATION_CAP_MARKER);
+    if (!match) return false;
+    if (!shouldNotifyIterationCap(hub, slug)) return false;
+    const calls = lastDistinctToolCalls(stdoutTail, 3);
+    const body = [
+      `Agent \`${slug}\` hit the tool iteration cap (${match[1]} iterations) without finishing its turn.`,
+      `Task: ${iterationCapTaskHint(hub, slug)}`,
+      calls.length
+        ? `Last distinct tool calls:\n${calls.map((c) => `- ${c}`).join('\n')}`
+        : 'Last distinct tool calls: (none found in log tail)',
+    ].join('\n');
+    writeOutboxMessage(hub, {
+      from: slug,
+      to: 'hub',
+      subject: `iteration-cap hit: ${slug}`,
+      body,
+    });
+    try {
+      logEvent(hub, {
+        event: 'iteration_cap_notify',
+        slug,
+        iterations: Number(match[1]),
+      });
+    } catch (_err) {
+      /* ignore */
+    }
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
 const RECENT_ERRORS_LIMIT = 20;
 
 function recentErrorsFile(hub) {
@@ -330,6 +442,9 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
     path.join(hub, 'logs', `dispatch-${slug}.log`),
     2500,
   );
+  // Iteration-cap notify (2026-10-25): cap exits are code 0, so this also
+  // runs from notifyAgentExitFromLogs on every exit regardless of code.
+  try { notifyIterationCap(hub, slug); } catch (_err) { /* ignore */ }
   const combined = [stderrTail, stdoutTail].filter(Boolean).join('\n');
   // Classify the real error output (stderr) first. The stdout log is the
   // agent's own transcript — thinking/tool output can mention "rate limit",
@@ -2019,11 +2134,14 @@ module.exports = {
   backoffFailedDispatch,
   agentRetrySecs,
   isProtectedStopPid,
+  iterationCapTaskHint,
   markMailDispatched,
   markOperatorStop,
   markRateLimitCooldown,
   maxRateLimitCooldownRemaining,
+  lastDistinctToolCalls,
   notifyAgentExitFromLogs,
+  notifyIterationCap,
   pendingUndispatchedMail,
   preferWarmDaemon,
   promptFileFor,
@@ -2036,6 +2154,7 @@ module.exports = {
   requestHubDaemon,
   requestWarmHubCancel,
   requestWarmHubTurn,
+  shouldNotifyIterationCap,
   stopAgentTurn,
   suppressRedispatchAfterStop,
   tryLock,

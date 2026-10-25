@@ -14,6 +14,7 @@
 'use strict';
 
 const { program } = require('commander');
+const crypto = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
 const readline = require('readline');
@@ -61,6 +62,41 @@ const MAX_ITERATIONS = Math.min(
   Math.max(Number(process.env.BIZAGENT_AGENT_MAX_ITERATIONS || 100), 5),
   120,
 );
+
+// Loop guard (2026-10-25): agents occasionally degenerate into re-issuing the
+// byte-identical tool call until the iteration cap (observed 50+ identical
+// greps in dispatch logs). Track consecutive identical signatures — tool name
+// + stable hash of parsed args — nudge the model after N repeats, and stop the
+// tool loop after M so the turn ends with a summary instead of burning all
+// iterations. Thresholds are env-tunable; MAX_ITERATIONS stays as-is.
+function loopGuardThresholds() {
+  const clamp = (v, dflt, min, max) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return dflt;
+    return Math.max(min, Math.min(max, Math.floor(n)));
+  };
+  return {
+    nudge: clamp(process.env.BIZAGENT_AGENT_LOOP_NUDGE, 3, 2, 50),
+    stop: clamp(process.env.BIZAGENT_AGENT_LOOP_STOP, 5, 3, 100),
+  };
+}
+
+/** Stable signature for a tool call: name + sha256 of the parsed args object. */
+function toolCallSignature(name, args) {
+  let canonical;
+  try {
+    canonical = JSON.stringify(args, Object.keys(args || {}).sort());
+  } catch (_err) {
+    canonical = String(args);
+  }
+  const hash = crypto.createHash('sha256').update(`${name}\n${canonical}`).digest('hex');
+  return `${name}:${hash}`;
+}
+
+const LOOP_NUDGE_TEXT =
+  'You have issued the identical tool call repeatedly in a row. The result will not change. ' +
+  'Do NOT repeat it. Re-read the last tool result, pick a different approach, or if the work ' +
+  'is done/blocked, stop and summarize.';
 
 program
   .name('bizagent-agent')
@@ -164,7 +200,7 @@ function activeTools() {
   return mcpTools.length ? TOOLS.concat(mcpTools) : TOOLS;
 }
 
-module.exports = { extractReasoning };
+module.exports = { extractReasoning, toolCallSignature, loopGuardThresholds, LOOP_NUDGE_TEXT };
 
 if (require.main === module) {
   if (opts.listTools) {
@@ -246,6 +282,9 @@ if (require.main === module) {
       let iteration = 0;
       let consecutiveParseErrors = 0;
       const tools = activeTools();
+      const loopGuard = loopGuardThresholds();
+      let lastSignature = null;
+      let identicalStreak = 0;
 
       while (iteration < MAX_ITERATIONS) {
         iteration += 1;
@@ -308,6 +347,31 @@ if (require.main === module) {
         for (const toolCall of msg.tool_calls) {
           const args = parseToolArgs(toolCall);
           const name = toolCall.function && toolCall.function.name;
+
+          // Loop guard: track consecutive identical tool calls (name + args hash).
+          const signature = toolCallSignature(name, args);
+          if (signature === lastSignature) {
+            identicalStreak += 1;
+          } else {
+            lastSignature = signature;
+            identicalStreak = 1;
+          }
+          if (identicalStreak >= loopGuard.stop) {
+            console.log(
+              `Loop guard: identical tool call repeated ${identicalStreak}x — ending tool loop`,
+            );
+            iteration = MAX_ITERATIONS; // fall through to the final-summary path
+            break;
+          }
+          if (identicalStreak >= loopGuard.nudge) {
+            console.log(
+              `Loop guard: identical tool call repeated ${identicalStreak}x — nudging model`,
+            );
+            messages.push({
+              role: 'user',
+              content: LOOP_NUDGE_TEXT,
+            });
+          }
 
           if (args.__parse_error) {
             consecutiveParseErrors += 1;
@@ -399,6 +463,8 @@ if (require.main === module) {
             content: JSON.stringify(result),
           });
         }
+
+        if (iteration >= MAX_ITERATIONS) break;
       }
 
       if (iteration >= MAX_ITERATIONS) {
