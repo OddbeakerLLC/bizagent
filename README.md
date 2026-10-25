@@ -38,8 +38,9 @@ agent looks after one or more **project repositories**.
 Each agent keeps a **journal** and a **sitemap** for every repo it owns. Agents
 talk by dropping markdown messages in each other's mailboxes. Work happens in
 real time — the moment the operator raises an issue, or the moment one agent
-sends another a message — plus a light nightly maintenance pass for housekeeping
-(journals, sitemaps, archive pruning).
+sends another a message — plus scheduled maintenance passes: a nightly
+housekeeping run (journals, sitemaps, archive pruning) and, when the Knowledge
+Stack is enabled, a weekly refresh that re-syncs each product's contribution.
 
 You ask the hub for the big picture; it digests every journal and reports back.
 
@@ -175,7 +176,7 @@ source override is active.
 
 ### Windows
 
-bizagent uses `cron` for the nightly pass, so on Windows you'll need WSL.
+bizagent schedules its maintenance passes with `cron`, so on Windows you'll need WSL.
 In PowerShell, run `wsl --install`, reboot, then run the one-liner above
 inside your new WSL shell.
 
@@ -217,6 +218,19 @@ your `registry.json`).
 - **Agent rail** — left sidebar: each agent with a status light, **`provider >> model`**
   (click to change LLM), expand for inbox / last dispatch / journal
 - **Agent detail panel** — expand a row for inbox count, last-dispatched time, journal snippet
+- **Model picker** — providers gated on saved API keys; live model lists fetched
+  server-side (OpenAI-style and Anthropic `/v1/models`), with pricing when reported
+- **Vision paste** — paste clipboard images into chat (Ctrl/Cmd+V); agents receive
+  them as `image_url` content when the model supports it
+- **DGen forms** — agents can request secrets or structured input as a modal form
+  (`kind: form-request` mail with a ` ```dgen ` block); values bypass chat history
+  entirely and the answer file is deleted on claim. See
+  [`docs/2026-10-18-dgen-form-requests.md`](docs/2026-10-18-dgen-form-requests.md).
+- **Health banner** — recent agent errors, fleet rate-limit cooldowns, and a
+  connection-lost indicator surface in the UI; an out-of-process watchdog
+  (`scripts/health-probe.sh`, systemd user timer or cron every 2 min) watches
+  disk and service health even when the control plane is wedged. See
+  [`docs/HEALTH-SURVIVAL.md`](docs/HEALTH-SURVIVAL.md).
 - **Library** — topbar **Library** opens a named-tab accordion: **Hub**
   (`docs/`, `company/`, `reports/` only) plus each registry project repo.
   Markdown and PlantUML/SVG diagrams render in-browser (no `library/manifest.json`).
@@ -230,6 +244,36 @@ your `registry.json`).
 - **Dynamic page title** — browser tab reads `BizAgent — {org name}` from `registry.json`
 - **Push updates** — WebSocket feeds preferred; optional poll via `?poll=1`
 - **Hub session memory** — compact rolling markdown; older turns are summarized, not accumulated
+
+### Standby helper pool
+
+For bounded grunt work (research, search, summarize, test-extract) an agent may
+call `hire_helper` inside its turn: the runtime spawns a short **read-only**
+`bizagent-agent` on a cheap helper model and returns one text result for the
+parent to review. Helpers are not products — no slug, inbox, or rail entry.
+Off by default; configure under `registry.json` → `settings.helpers`
+(`pool_size`, `provider`/`model`, wall-clock and depth caps). Design:
+[`docs/2026-09-22-standby-helper-pool.md`](docs/2026-09-22-standby-helper-pool.md).
+
+### Journal search
+
+Agents get a built-in `journal_search` tool for historical recall ("what did we
+decide about X?") — keyword full-text search over the hub journal plus every
+registered product's `.agent/journal/`, backed by SQLite FTS5 (ripgrep fallback).
+Product agents search only their own product's journals; the hub searches all.
+CLI equivalent: `scripts/journal-search.sh --query "…" [--product slug]`.
+
+### llmapi (optional LLM proxy)
+
+`llmapi.js` is an optional local REST proxy in front of your LLM providers:
+`GET /health`, `GET /v1/providers`, `GET /v1/models?provider=…`, and
+`POST /v1/chat/completions` (body carries `provider`). It serializes calls
+per provider with rate-limit-aware retries, so per-provider limits are
+respected even under fan-out. Agents and the console use it automatically when
+`BIZAGENT_LLMAPI_URL` is set; unset means direct-provider behavior (no change).
+Install: `scripts/install-llmapi.sh` (systemd) or `scripts/llmapi.sh
+start|status|stop`; default port **8788** (8787 is the control plane's).
+Details: [`docs/LLMAPI-LOGGING.md`](docs/LLMAPI-LOGGING.md).
 
 ---
 
@@ -279,10 +323,18 @@ scripts/hub-daemon.sh status
 scripts/hub-daemon.sh ping
 scripts/hub-daemon.sh stop
 
+# Optional LLM proxy (per-provider queues + retries; default port 8788)
+scripts/llmapi.sh start
+scripts/llmapi.sh status
+scripts/llmapi.sh stop
+
 # SSH operator console (pick a conversation, talk to the hub; no browser/VPN)
 scripts/chat.sh                          # interactive: list, pick, chat
 scripts/chat.sh --list                   # list conversations only
 scripts/chat.sh --conversation ID --send "hello"   # one-shot send
+
+# Journal keyword search (SQLite FTS5, ripgrep fallback) — same data agents see
+scripts/journal-search.sh --query "disk full" [--product slug] [--since YYYY-MM-DD]
 
 # Safe preview then apply archive pruning (default 15 days)
 scripts/prune-archives.sh --dry-run
@@ -291,10 +343,19 @@ scripts/prune-archives.sh
 # Follow control-plane / hub runtime logs (Ctrl-C to stop; skips JSON structured.log)
 scripts/viewlog.sh
 scripts/viewlog.sh hub          # warm hub + dispatch-hub.*
+scripts/viewlog.sh cron         # nightly.log + weekly.log
 
 # Nightly mechanical half + end-of-night backup push
 scripts/nightly.sh              # pull, route, archive, prune (+ optional auto-upgrade)
 scripts/nightly.sh push         # commit/push product repos + hub (private remote)
+
+# Weekly Knowledge Stack refresh (mechanical orchestration, minimal LLM usage)
+scripts/weekly-refresh.sh
+
+# Out-of-process health watchdog (systemd user timer or cron, every 2 min)
+scripts/install-health-timer.sh # idempotent; installed by the installer by default
+scripts/health-probe.sh         # one manual probe run (exit 0 ok/warn, 1 critical…)
+
 scripts/defer.sh --in 15m ...   # schedule one-shot wake mail (see docs/DEFERRED-WAKE.md)
 scripts/defer.sh --list         # pending deferred wakes
 scripts/defer.sh --cancel ID
@@ -326,13 +387,26 @@ Multiple BizAgent hubs can run on one machine. Set
     "allow_concurrency": true,
     "lock_lease_secs": 1800
   },
+  "helpers": {
+    "enabled": false,
+    "pool_size": 10,
+    "provider": "venice",
+    "model": "qwen3-5-9b"
+  },
   "tuning": {
     "archive": { "retention_days": 15, "prune_on_nightly": true }
   }
 }
 ```
 
-`poll_seconds` (1–30) controls how often the control plane wakes. Separate hub/agent slot pools keep operator turns responsive even under heavy fan-out. Uncheck **Allow concurrency** in the nav drawer (or set `allow_concurrency: false` / `BIZAGENT_ALLOW_CONCURRENCY=0`) to run at most one live turn at a time. Archive pruning removes old `*/archive/` mail automatically on the nightly (or on demand).
+`poll_seconds` (1–30) controls how often the control plane wakes. `agent_slots`
+may be a number (legacy) or a per-provider map (`{"venice": 3, "openai": 2}`);
+rate-limit cooldowns are per provider. Separate hub/agent slot pools keep
+operator turns responsive even under heavy fan-out. Uncheck **Allow
+concurrency** in the nav drawer (or set `allow_concurrency: false` /
+`BIZAGENT_ALLOW_CONCURRENCY=0`) to run at most one live turn at a time. Archive
+pruning removes old `*/archive/` mail automatically on the nightly (or on
+demand). `helpers` configures the standby helper pool (see above).
 
 ### Upgrading the hub framework
 
@@ -379,7 +453,8 @@ and begins setup in the web UI. It only asks for the things that are genuinely y
 - where your project repositories live (a folder to scan, or a list)
 - how repos group into products, and a short slug for each
 - which products' agents need to message each other
-- nightly run time _(default 23:00)_
+- nightly run time _(default 23:00; PTL installs the nightly cron line during setup —
+  the installer itself does not schedule anything)_
 - how long an unactioned message waits before being archived _(default 30 days)_
 - agent autonomy: maintenance-only, +monitoring, or +light-dev _(default maintenance-only)_
 - framework auto-update vs manual-only _(installer default: manual-only; `settings.auto_update`)_
@@ -396,6 +471,30 @@ It does **not** ask you to design the system. The hub-and-spoke topology,
 file-based messaging, the journal and sitemap formats, and the real-time +
 nightly model are decided — that is what this template _is_.
 
+During that interview PTL also installs the scheduled cron lines (nightly
+maintenance, plus the weekly Knowledge Stack refresh when the stack is
+enabled) into your crontab — it shows you the exact lines and confirms before
+writing them. The installer itself does not add these lines.
+
+---
+
+## Onboarding presets and industry templates
+
+Two ways to pre-configure a fresh hub instead of starting from a blank interview:
+
+- **Business-type presets** — PTL asks what kind of business you run; the answer
+  maps to a preset (`templates/business-presets.json`, ~10 verticals) that
+  pre-sets agent roles, approval gates, and feature defaults. Everything stays
+  overridable in `registry.json` → `settings.business_type`. See
+  [`docs/ONBOARDING-BUSINESS-PRESETS.md`](docs/ONBOARDING-BUSINESS-PRESETS.md).
+- **Industry templates** — deeper vertical configuration (accounting, law,
+  fitness training, …) shipped as `templates/industries/<slug>.json`: agents,
+  behaviors, system prompts, routines, and privacy guardrails, with customer
+  answers substituted into `{{variables}}` at install time
+  (`install.sh --template <slug> --answers answers.json`). A new vertical is a
+  new JSON file — no code changes. See
+  [`docs/industry-templates.md`](docs/industry-templates.md).
+
 ---
 
 ## Repository layout
@@ -404,40 +503,62 @@ nightly model are decided — that is what this template _is_.
 bizagent/
 ├── AGENT.md                 the agent's instructions: interview -> build -> operate
 ├── README.md                this file
+├── llmapi.js                optional LLM proxy (per-provider queues, /v1/models, retries)
 ├── registry.example.json    the shape of the generated registry.json
 ├── install.sh               one-liner installer
 ├── install/
 │   ├── install.sh             control-plane installer (npm, service, start, browser open)
-│   └── bizagent-control-plane.service  systemd unit template
+│   ├── bizagent-control-plane.service  systemd unit template
+│   └── bizagent-llmapi.service          llmapi systemd user unit template
 ├── scripts/
 │   ├── bizagent-control-plane.js  Node control-plane CLI + write-message
+│   ├── bizagent-agent           agent runtime launcher (CLI shim)
 │   ├── chat.sh                SSH operator console (interactive + one-shot)
 │   ├── lib/operator-chat.js   chat.sh backend (conversation/inbox path)
 │   ├── control-plane.sh       start/stop/status/restart wrapper
 │   ├── hub-daemon.js          warm hub turn worker (socket protocol)
 │   ├── hub-daemon.sh          daemon start/stop/status/ping
 │   ├── install-control-plane.sh  wire the control plane + daemon to systemd
+│   ├── install-llmapi.sh      wire llmapi.js to systemd (or cron fallback)
+│   ├── llmapi.sh              llmapi start/stop/status/restart
+│   ├── install-health-timer.sh  out-of-process health watchdog (systemd timer/cron)
+│   ├── health-probe.sh        one watchdog probe run
+│   ├── journal-search.sh      journal keyword search CLI (FTS5 / ripgrep fallback)
+│   ├── journal-index.sh       force a full journal search-index rebuild
+│   ├── business-preset.sh     business-type presets for onboarding
+│   ├── apply-template.sh      apply an industry template to a hub
+│   ├── form-answer.sh         claim a DGen form response (prints + deletes)
 │   ├── prune-archives.sh      archive retention (15-day default, registry-driven)
-│   ├── viewlog.sh             tail -F control-plane / hub / structured logs
+│   ├── viewlog.sh             tail -F control-plane / hub / cron / structured logs
 │   ├── write-message.sh       canonical outbox helper (conversation stamping)
 │   ├── defer.sh               one-shot deferred wake mail (poll-after)
 │   ├── nightly.sh             route + prune + optional auto-upgrade + housekeeping
+│   ├── weekly-refresh.sh      Knowledge Stack weekly refresh (mechanical orchestration)
 │   ├── upgrade.sh             safe framework upgrade from public OddbeakerLLC/bizagent
 │   ├── factory-reset.sh       repair / restore-ops / nuke (upgrade uses repair)
 │   └── ...                    (router, run-agent, onboard, publish-check, etc.)
+├── agent-runtime/           the built-in OpenAI-compatible agent runtime
+│   ├── src/                   client (multi-provider + llmapi mode), tools, system
+│   │                          prompt, MCP client, vision, journal search
+│   └── test/                  node test suite (client, tools, providers, …)
 ├── control-plane/
 │   ├── server.js
 │   └── lib/                 (dispatcher, mail, hub-memory, hub-turn-safety,
-│                            conversations, config, cli-config, profile, ...)
-├── templates/               agent.md, dispatch, NIGHTLY, WEEKLY
-├── tests/                   shell test suite
+│                            conversations, config, cli-config, profile,
+│                            health, health-probe, atomic-state, …)
+├── templates/               agent.md, dispatch, NIGHTLY, WEEKLY,
+│                            business-presets.json, industries/ (vertical JSON)
+├── tests/                   shell test suite (tests/run-tests.sh)
 └── docs/
     ├── ARCHITECTURE.md
     ├── DEFERRED-WAKE.md
     ├── HEALTH-SURVIVAL.md
+    ├── LLMAPI-LOGGING.md
     ├── MCP-ONBOARD.md
+    ├── ONBOARDING-BUSINESS-PRESETS.md
     ├── PLAYBOOKS-AND-CONSULT.md
     ├── TTS-CONSOLE.md
+    ├── industry-templates.md
     └── diagrams/           PlantUML architecture diagrams
 ```
 
