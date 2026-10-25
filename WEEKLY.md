@@ -46,6 +46,11 @@ The weekly cron runs `scripts/weekly-refresh.sh`, which:
 
 8. **Journal bullet** — appends a `[Maintenance]` bullet to `journal/YYYY-MM-DD.md`.
 
+Between steps 6 and 7, claim provenance runs: updated agents get their
+overview's `Claims:` block recorded and the claim-checks footer stamped;
+"no update" agents get a quiet-week spot-check of their least-recently-checked
+claims (see "Claim-level provenance and quiet-week spot-checks" below).
+
 ---
 
 ## Provenance and removal reconciliation
@@ -82,6 +87,48 @@ simply have nothing to reconcile until agents start reporting `Source docs:`.
 
 ---
 
+## Claim-level provenance and quiet-week spot-checks
+
+Provenance + removal reconciliation catches source docs that get deleted, but
+not the failure mode where an overview was wrong when it was written ("the
+login rewrite is finished" while it was half done). Nothing removes that line;
+on quiet weeks the agent replies "no update" and the claim gets older and
+sounds more settled every time it is quoted. The refresh closes this gap:
+
+- **Claims block** — product agents list their overview's factual claims
+  under a `Claims:` heading, one bullet per claim, each ending with a source
+  reference in brackets: `- Login rewrite is finished [src: <project>/<path>]`
+  or `- v2.1 shipped on 2026-10-01 [src: <project>@<commit>]`. This builds on
+  the `Source docs:` convention (same `[src: ...]` shape as the MANIFEST's
+  `| src:` field) — no new protocol. Claims without a ref are recorded but
+  cannot be mechanically re-verified.
+- **Recording** — after an update, the refresh parses the overview's
+  `Claims:` block into the sidecar (`claims` key: id = hash of the claim
+  text, owner slug, text, src ref, recorded_at, last_checked). Re-recording
+  the same claim text keeps its id and last_checked date — only recorded_at
+  moves. Claims dropped from the overview stay in the sidecar but are no
+  longer stamped into the footer.
+- **Quiet-week spot-check** — when an agent replies "no update", the refresh
+  does not just trust the timestamp: it picks up to
+  `KS_PROV_SPOT_CHECK_N` (default 3) of that slug's least-recently-checked
+  claims and re-verifies each against its recorded source (file exists in
+  the project repo / commit exists). Verified claims get
+  `last_checked = today`; a claim whose source ref no longer resolves is
+  logged as `CLAIM-STALE` for the agent to resolve next week. Claims with no
+  resolvable ref are logged as `CLAIM-UNVERIFIABLE` (agent judgment only).
+- **Checked-vs-unchecked visibility** — the overview gets a visible
+  `<!-- ks-claim-checks ... -->` footer (replaced, not duplicated) listing
+  every live claim with its ref and last-checked date; never-checked claims
+  say so explicitly. PTL can thus tell a claim someone verified last week
+  from one nobody has looked at since March. The footer is an HTML comment,
+  so rendered markdown stays clean while the raw file carries the state.
+
+Backward compatibility: overviews without a `Claims:` block are untouched
+(no footer, no sidecar entries); existing sidecars gain an empty `claims`
+key only when the first claims are recorded.
+
+---
+
 ## Agent responsibilities
 
 ### Hub agent (PTL)
@@ -108,7 +155,14 @@ When spawned for Knowledge Stack refresh:
   - List every copied file's repo-relative path under a `Source docs:` heading
     in your reply — this is recorded as provenance, and stack copies whose
     source later disappears are removed automatically on refresh
-- If no meaningful updates, reply with "no update"
+  - List the overview's factual claims under a `Claims:` heading, one bullet
+    per claim, each ending with a source reference in brackets
+    (`[src: <project>/<path>]` or `[src: <project>@<commit>]`) — this lets the
+    refresh re-verify the claim against your repo and show when it was last
+    checked
+- If no meaningful updates, reply with "no update" — your existing files are
+  preserved and the refresh spot-checks a few of your carried-over claims
+  against your repo, recording which ones were re-verified (with date)
 - Archive the refresh request message
 
 ---

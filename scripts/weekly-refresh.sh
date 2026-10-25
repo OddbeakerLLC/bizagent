@@ -475,7 +475,9 @@ If there are meaningful updates:
 - Copy any source documents (PDFs, specs, etc.) to knowledge-stack/ as <slug>-<basename>.<ext>
 - Under a 'Source docs:' heading at the end of your reply, list the repo-relative path of every file you copied. These paths are recorded as provenance (with the source revision); on later refreshes, any stack copy whose source document no longer exists in your repo is removed automatically, so an accurate list keeps the stack trustworthy.
 
-If no meaningful updates since last refresh, reply with 'no update' and your existing files will be preserved.
+Keep checkable claims verifiable: in your overview, list factual claims under a 'Claims:' heading, one bullet per claim, each ending with a source reference in brackets — e.g. "- Login rewrite is finished [src: widgets-api/docs/auth.md]" or "- v2.1 shipped on 2026-10-01 [src: widgets-api@a1b2c3d]". The ref is a <project>/<file path> or <project>@<commit>. Claims without a ref are recorded but cannot be mechanically re-verified.
+
+If no meaningful updates since last refresh, reply with 'no update' — your existing files will be preserved, and the refresh will spot-check a few of your carried-over claims against your repo and record which ones you re-verified.
 
 This is a weekly maintenance task. Do not start any product work."
   
@@ -489,6 +491,13 @@ This is a weekly maintenance task. Do not start any product work."
     if check_agent_no_update "$slug"; then
       log "Agent $slug: no update"
       NO_UPDATE_SLUGS="$NO_UPDATE_SLUGS $slug"
+      # Quiet-week spot-check: instead of letting carried-over claims age
+      # unexamined, re-verify a few against their recorded sources and stamp
+      # which claims were checked (and when) into the overview footer.
+      ks_prov_spot_check "$slug" | while IFS= read -r pl; do
+        [[ -n "$pl" ]] && log "$pl"
+      done
+      ks_prov_stamp_claims "$slug"
     else
       log "Agent $slug: updated"
       UPDATED_SLUGS="$UPDATED_SLUGS $slug"
@@ -499,6 +508,12 @@ This is a weekly maintenance task. Do not start any product work."
         [[ -n "$pl" ]] && log "$pl"
       done
       ks_prov_stamp_overview "$slug"
+      # Claim-level provenance: record the overview's "Claims:" block (text +
+      # source ref per claim) and stamp the checked/unchecked footer.
+      ks_prov_record_claims "$slug" "$STACK/$slug-overview.md" | while IFS= read -r pl; do
+        [[ -n "$pl" ]] && log "$pl"
+      done
+      ks_prov_stamp_claims "$slug"
     fi
     
     # Archive the request message

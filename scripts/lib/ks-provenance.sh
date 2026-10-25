@@ -20,6 +20,15 @@
 #         "hash":      "sha256:<prefix of copied file> | null",
 #         "copied_at": "<ISO ts>"
 #       }
+#     },
+#     "claims": {
+#       "<id>": {                       # id = sha256(claim text)[:6]
+#         "owner":       "<slug>",
+#         "text":        "<claim text>",
+#         "src":         "<project>/<path> | <project>@<sha> | null",
+#         "recorded_at": "<ISO ts>",
+#         "last_checked": "<YYYY-MM-DD | null>"   # set by quiet-week spot-checks
+#       }
 #     }
 #   }
 #
@@ -260,5 +269,217 @@ except Exception:
 e = data.get("files", {}).get(f)
 if e and e.get("source"):
     print(" | src: %s/%s@%s" % (e.get("project"), e["source"], e.get("sha") or "unknown"))
+PY
+}
+
+# --- Claim-level provenance -------------------------------------------------
+#
+# An overview can be wrong the day it is written ("the login rewrite is
+# finished" while it was half done). Removal reconciliation cannot catch that:
+# the source doc still exists, the claim was just never true. The refresh
+# therefore also tracks the overview's factual claims as first-class records
+# so they can be re-verified on quiet weeks and their freshness made visible.
+
+# ks_prov_record_claims <slug> <overview-file>
+# Parse the overview's "Claims:" block (one "- <claim> [src: <ref>]" bullet
+# per checkable claim) into the sidecar. Idempotent: a claim with the same
+# text keeps its id, src, and last_checked date; only the recorded_at stamp
+# moves. Claims dropped from the overview stay in the sidecar (history) but
+# are no longer stamped into the footer. Best-effort: never fails the refresh.
+ks_prov_record_claims() {
+  local slug="$1" ov="$2"
+  [[ -f "$ov" ]] || return 0
+  python3 - "$STACK" "$slug" "$ov" "$RUN_TS" <<'PY'
+import json, os, re, hashlib, sys
+
+stack, slug, ov, ts = sys.argv[1:5]
+try:
+    text = open(ov, encoding="utf-8", errors="replace").read()
+except OSError:
+    sys.exit(0)
+
+# Parse the "Claims:" block: bullets "- <text> [src: <ref>]" until a
+# non-bullet, non-blank line ends the block.
+claims = []
+inblk = False
+for ln in text.splitlines():
+    s = ln.strip()
+    if re.match(r"^Claims:\s*$", s):
+        inblk = True
+        continue
+    if inblk:
+        if not s:
+            continue
+        if not s.startswith(("-", "*")):
+            break
+        m = re.match(r"^[-*]\s+(.*\S)\s*$", s)
+        if m:
+            claims.append(m.group(1))
+if not claims:
+    sys.exit(0)
+
+pf = os.path.join(stack, ".provenance.json")
+try:
+    data = json.load(open(pf))
+except Exception:
+    data = {"version": 1, "files": {}}
+data.setdefault("claims", {})
+
+for c in claims:
+    m = re.match(r"^(.*\S)\s*\[src:\s*([^\]]+)\]\s*$", c)
+    ref = m.group(2).strip() if m else None
+    body = (m.group(1) if m else c).strip()
+    cid = hashlib.sha256(body.encode("utf-8")).hexdigest()[:6]
+    prev = data["claims"].get(cid, {})
+    data["claims"][cid] = {
+        "owner": slug,
+        "text": body,
+        "src": ref,
+        "recorded_at": ts,
+        "last_checked": prev.get("last_checked"),
+    }
+    print("CLAIM %s %s" % (cid, body[:80]))
+
+data["updated"] = ts
+try:
+    json.dump(data, open(pf, "w"), indent=2, sort_keys=True)
+except OSError:
+    pass
+PY
+}
+
+# ks_prov_spot_check <slug>
+# Quiet-week spot-check: pick up to KS_PROV_SPOT_CHECK_N (default 3) of the
+# slug's least-recently-checked claims and re-verify each against its source:
+#   - "proj/path"  -> the file exists in the project repo
+#   - "proj@sha"   -> the commit exists in the project repo
+#   - no src       -> cannot verify mechanically; agent judgment only
+# Verified claims get last_checked = today (stamped into the overview footer).
+# A claim whose source ref no longer resolves is reported as STALE (the agent
+# decides whether the claim is outdated or just needs a new ref). Best-effort.
+ks_prov_spot_check() {
+  local slug="$1"
+  python3 - "$HUB" "$STACK" "$slug" "$RUN_DATE" "${KS_PROV_SPOT_CHECK_N:-3}" <<'PY'
+import json, os, subprocess, sys
+
+hub, stack, slug, today, limit = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+pf = os.path.join(stack, ".provenance.json")
+try:
+    data = json.load(open(pf))
+except Exception:
+    sys.exit(0)
+claims = data.get("claims", {})
+mine = [(cid, c) for cid, c in claims.items() if c.get("owner") == slug]
+if not mine:
+    sys.exit(0)
+
+try:
+    reg = json.load(open(os.path.join(hub, "registry.json")))
+except Exception:
+    reg = {}
+projects = {}
+for p in reg.get("products", []):
+    if p.get("slug") == slug:
+        for pr in p.get("projects", []):
+            if pr.get("name"):
+                projects[pr["name"]] = os.path.normpath(os.path.join(hub, pr.get("path", "")))
+
+def resolve_src(ref):
+    """Return (project_dir, kind, detail) or None if unresolvable."""
+    if not ref:
+        return None
+    if "@" in ref:
+        prj, sha = ref.rsplit("@", 1)
+        pd = projects.get(prj.strip())
+        if pd and os.path.isdir(pd):
+            return pd, "commit", sha.strip()
+        return None
+    if "/" in ref:
+        prj, rel = ref.split("/", 1)
+        pd = projects.get(prj.strip())
+        if pd and os.path.isdir(pd):
+            return pd, "file", rel.strip()
+    return None
+
+# Least-recently-checked first; never-checked before checked.
+def key(item):
+    cid, c = item
+    lc = c.get("last_checked") or ""
+    return (lc, cid)
+
+checked, stale = [], []
+for cid, c in sorted(mine, key=key)[:limit]:
+    r = resolve_src(c.get("src"))
+    if r is None:
+        print("CLAIM-UNVERIFIABLE %s (no resolvable src: %s)" % (cid, c.get("src") or "-"))
+        continue
+    pd, kind, detail = r
+    if kind == "file":
+        ok = os.path.isfile(os.path.join(pd, detail))
+        why = "file %s/%s" % (os.path.basename(pd), detail)
+    else:
+        try:
+            out = subprocess.run(["git", "-C", pd, "cat-file", "-e", detail + "^{commit}"],
+                                 capture_output=True, timeout=10)
+            ok = out.returncode == 0
+        except Exception:
+            ok = False
+        why = "commit %s@%s" % (os.path.basename(pd), detail)
+    if ok:
+        c["last_checked"] = today
+        checked.append(cid)
+        print("CLAIM-OK %s (%s)" % (cid, why))
+    else:
+        stale.append(cid)
+        print("CLAIM-STALE %s (src no longer resolves: %s)" % (cid, why))
+
+if checked or stale:
+    data["claims"] = claims
+    data["updated"] = "%sT00:00:00Z" % today
+    try:
+        json.dump(data, open(pf, "w"), indent=2, sort_keys=True)
+    except OSError:
+        pass
+PY
+}
+
+# ks_prov_stamp_claims <slug>
+# Write/replace a visible "Claim checks:" footer (after the existing
+# ks-provenance block) listing each live claim with its provenance ref and
+# last-checked date, so PTL can tell a claim verified last week from one
+# nobody has looked at since March. Claims never mechanically checked show
+# "never checked". Best-effort.
+ks_prov_stamp_claims() {
+  local slug="$1"
+  python3 - "$STACK" "$slug" "$RUN_DATE" <<'PY'
+import json, os, re, sys
+
+stack, slug, today = sys.argv[1], sys.argv[2], sys.argv[3]
+ov = os.path.join(stack, slug + "-overview.md")
+if not os.path.isfile(ov):
+    sys.exit(0)
+try:
+    data = json.load(open(os.path.join(stack, ".provenance.json")))
+except Exception:
+    data = {}
+claims = [(c.get("recorded_at") or "", cid, c) for cid, c in data.get("claims", {}).items()
+          if c.get("owner") == slug]
+if not claims:
+    sys.exit(0)
+lines = []
+for _, cid, c in sorted(claims):
+    lc = c.get("last_checked")
+    when = "checked %s" % lc if lc else "never checked"
+    src = c.get("src") or "no ref"
+    lines.append("  - [%s] %s (src: %s)" % (when, c.get("text", ""), src))
+block = "<!-- ks-claim-checks\nupdated: %s\n%s\n-->\n" % (today, "\n".join(lines))
+try:
+    text = open(ov, encoding="utf-8", errors="replace").read()
+except OSError:
+    sys.exit(0)
+text = re.sub(r"<!-- ks-claim-checks\n.*?-->\n?", "", text, flags=re.S)
+if text.strip() and not text.endswith("\n"):
+    text += "\n"
+open(ov, "w", encoding="utf-8").write((text + "\n" + block) if text.strip() else block)
 PY
 }

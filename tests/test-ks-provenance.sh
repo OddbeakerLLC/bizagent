@@ -11,6 +11,7 @@ HUB="$TMP/hub"
 STACK="$HUB/knowledge-stack"
 PROJ="$TMP/proj-repo"          # product repo (git)
 RUN_TS="2026-10-25T01:00:00Z"
+RUN_DATE="2026-10-25"
 mkdir -p "$HUB" "$STACK"
 
 cat > "$HUB/registry.json" <<'EOF'
@@ -118,3 +119,77 @@ ks_prov_record_for_slug widgets "$TMP/empty-reply.md" || fail "record: non-zero 
 [[ ! -f "$STACK/.provenance.json" ]] || fail "record: sidecar written without Source docs"
 
 echo "  ok: ks-provenance"
+
+# --- case 10: record claims from overview "Claims:" block -------------------
+cat > "$STACK/widgets-overview.md" <<OV
+# widgets overview
+
+Claims:
+- Login rewrite is finished [src: widgets-api/docs/api-spec.md]
+- v2.1 shipped on 2026-10-01 [src: widgets-api@$SRC_SHA]
+- Dashboard uses the new cache [src: widgets-api/docs/missing.md]
+OV
+out="$(ks_prov_record_claims widgets "$STACK/widgets-overview.md")"
+echo "$out" | grep -q "CLAIM " || fail "claims: no CLAIM lines"
+python3 -c "
+import json
+d=json.load(open('$STACK/.provenance.json'))
+cs=d['claims']
+assert len(cs)==3, cs
+assert all(c['owner']=='widgets' and c['last_checked'] is None for c in cs.values()), cs
+assert any(c['src']=='widgets-api/docs/api-spec.md' for c in cs.values()), cs
+assert any(c['src']=='widgets-api@$SRC_SHA' for c in cs.values()), cs
+" || fail "claims: bad sidecar entries"
+
+# --- case 11: spot-check verifies file+commit refs, stamps last_checked -----
+echo "api spec v1" > "$PROJ/docs/api-spec.md"   # restore the source deleted in case 5
+out="$(ks_prov_spot_check widgets)"
+echo "$out" | grep -q "CLAIM-OK" || fail "spot-check: no CLAIM-OK"
+echo "$out" | grep -q "CLAIM-STALE" || fail "spot-check: missing ref not flagged STALE"
+python3 -c "
+import json
+d=json.load(open('$STACK/.provenance.json'))
+cs=d['claims']
+ok=[c for c in cs.values() if c['last_checked']=='2026-10-25']
+assert len(ok)==2, cs
+assert any(c['src']=='widgets-api/docs/missing.md' and c['last_checked'] is None for c in cs.values()), cs
+" || fail "spot-check: last_checked not stamped"
+
+# --- case 12: claim-checks footer stamped, replaced not duplicated ----------
+ks_prov_stamp_claims widgets
+grep -q "ks-claim-checks" "$STACK/widgets-overview.md" || fail "claims stamp: no block"
+grep -q "never checked" "$STACK/widgets-overview.md" || fail "claims stamp: no never-checked line"
+grep -q "checked 2026-10-25" "$STACK/widgets-overview.md" || fail "claims stamp: no checked line"
+n1="$(grep -c 'ks-claim-checks' "$STACK/widgets-overview.md")"
+RUN_DATE="2026-10-26" ks_prov_stamp_claims widgets
+n2="$(grep -c 'ks-claim-checks' "$STACK/widgets-overview.md")"
+[[ "$n1" == "1" && "$n2" == "1" ]] || fail "claims stamp: duplicated blocks ($n1/$n2)"
+grep -q "updated: 2026-10-26" "$STACK/widgets-overview.md" || fail "claims stamp: ts not replaced"
+
+# --- case 13: spot-check respects last_checked ordering + cap ---------------
+# Cap 2: the never-checked claim plus the least-recently-checked one are
+# eligible; the most-recently-checked claim must keep its 10-25 date.
+RUN_DATE="2026-10-26" KS_PROV_SPOT_CHECK_N=2 out="$(ks_prov_spot_check widgets)"
+python3 -c "
+import json
+d=json.load(open('$STACK/.provenance.json'))
+cs=d['claims']
+assert sum(1 for c in cs.values() if c['last_checked']=='2026-10-25')==1, cs
+" || fail "spot-check: cap did not preserve most-recent check"
+echo "$out" | grep -q "CLAIM-" || fail "spot-check: no output on second run"
+
+# --- case 14: idempotent re-record keeps last_checked -----------------------
+out="$(ks_prov_record_claims widgets "$STACK/widgets-overview.md")"
+python3 -c "
+import json
+d=json.load(open('$STACK/.provenance.json'))
+cs=d['claims']
+assert len(cs)==3, cs
+assert any(c['last_checked']=='2026-10-25' for c in cs.values()), cs
+" || fail "claims: re-record lost last_checked"
+
+# --- case 15: overview without Claims block -> no-op ------------------------
+echo "plain overview, no claims" > "$STACK/widgets-overview2.md"
+out="$(ks_prov_record_claims widgets "$STACK/widgets-overview2.md")"
+[[ -z "$out" ]] || fail "claims: output without Claims block"
+echo "  ok: claim provenance + spot-check"
