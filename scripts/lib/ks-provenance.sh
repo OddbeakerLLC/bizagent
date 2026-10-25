@@ -360,7 +360,7 @@ PY
 ks_prov_spot_check() {
   local slug="$1"
   python3 - "$HUB" "$STACK" "$slug" "$RUN_DATE" "${KS_PROV_SPOT_CHECK_N:-3}" <<'PY'
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 
 hub, stack, slug, today, limit = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
 pf = os.path.join(stack, ".provenance.json")
@@ -371,7 +371,37 @@ except Exception:
 claims = data.get("claims", {})
 mine = [(cid, c) for cid, c in claims.items() if c.get("owner") == slug]
 if not mine:
-    sys.exit(0)
+    # No recorded claims for this slug (e.g. legacy overview written before
+    # claim tracking): adopt its current Claims block first, then check.
+    import hashlib
+    try:
+        text = open(os.path.join(stack, slug + "-overview.md"),
+                    encoding="utf-8", errors="replace").read()
+    except OSError:
+        sys.exit(0)
+    parsed, inblk = [], False
+    for ln in text.splitlines():
+        s = ln.strip()
+        if re.match(r"^Claims:\s*$", s):
+            inblk = True
+            continue
+        if inblk:
+            if not s:
+                continue
+            if not s.startswith(("-", "*")):
+                break
+            m = re.match(r"^[-*]\s+(.*\S)\s*$", s)
+            if m:
+                mm = re.match(r"^(.*\S)\s*\[src:\s*([^\]]+)\]\s*$", m.group(1))
+                ref = mm.group(2).strip() if mm else None
+                body = (mm.group(1) if mm else m.group(1)).strip()
+                parsed.append((hashlib.sha256(body.encode("utf-8")).hexdigest()[:6], body, ref))
+    if not parsed:
+        sys.exit(0)
+    for cid, body, ref in parsed:
+        claims[cid] = {"owner": slug, "text": body, "src": ref,
+                       "recorded_at": today + "T00:00:00Z", "last_checked": None}
+    mine = [(cid, claims[cid]) for cid, _, _ in parsed]
 
 try:
     reg = json.load(open(os.path.join(hub, "registry.json")))
@@ -459,11 +489,33 @@ ov = os.path.join(stack, slug + "-overview.md")
 if not os.path.isfile(ov):
     sys.exit(0)
 try:
+    text = open(ov, encoding="utf-8", errors="replace").read()
+except OSError:
+    sys.exit(0)
+# Only claims still present in the overview's Claims block are stamped;
+# dropped claims stay in the sidecar (history) but leave the footer.
+live = set()
+inblk = False
+for ln in text.splitlines():
+    s = ln.strip()
+    if re.match(r"^Claims:\s*$", s):
+        inblk = True
+        continue
+    if inblk:
+        if not s:
+            continue
+        if not s.startswith(("-", "*")):
+            break
+        m = re.match(r"^[-*]\s+(.*\S)\s*$", s)
+        if m:
+            body = re.sub(r"\s*\[src:\s*[^\]]+\]\s*$", "", m.group(1)).strip()
+            live.add(body)
+try:
     data = json.load(open(os.path.join(stack, ".provenance.json")))
 except Exception:
     data = {}
 claims = [(c.get("recorded_at") or "", cid, c) for cid, c in data.get("claims", {}).items()
-          if c.get("owner") == slug]
+          if c.get("owner") == slug and c.get("text") in live]
 if not claims:
     sys.exit(0)
 lines = []
