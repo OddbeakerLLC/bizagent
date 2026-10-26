@@ -135,7 +135,10 @@ body {
 .agent-detail {
   background: #0f1826;
   border-left: 2px solid #4b5563;
-  margin: 0 8px;
+  /* Bottom margin = vertical gap between product cards in the rail
+     (matches the 8px horizontal gutter). The detail is the last element
+     of each product block, so row + expanded detail stay attached. */
+  margin: 0 8px 8px;
   border-radius: 0 0 4px 4px;
   overflow: hidden;
   max-height: 0;

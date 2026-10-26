@@ -555,21 +555,6 @@ function bindAgentConfigModal() {
   });
 }
 
-function makeDetailRow(label, field, isJournal) {
-  const dr = document.createElement('div');
-  dr.className = isJournal ? 'detail-row detail-row--journal' : 'detail-row';
-  const lbl = document.createElement('span');
-  lbl.className = 'detail-label';
-  lbl.textContent = label;
-  const val = document.createElement('span');
-  val.className = isJournal ? 'detail-value detail-value--journal' : 'detail-value';
-  val.dataset.field = field;
-  val.textContent = '—';
-  dr.appendChild(lbl);
-  dr.appendChild(val);
-  return dr;
-}
-
 function renderAgentProjects(detail, projects) {
   // No innerHTML reset here: the detail panel is freshly created per render and
   // already holds the model line (appended first). Wiping it would delete that.
@@ -676,14 +661,10 @@ function renderAgents(agents) {
     });
     detail.appendChild(cliLine);
 
-    detail.appendChild(makeDetailRow('INBOX', 'inbox', false));
-    detail.appendChild(makeDetailRow('DISPATCHED', 'lastDispatched', false));
-    detail.appendChild(makeDetailRow('JOURNAL', 'journal', true));
     if (typeof renderAgentProjects === 'function') {
       renderAgentProjects(detail, agent.projects);
     }
 
-    let loaded = false;
     const toggle = () => {
       const expanded = row.getAttribute('aria-expanded') === 'true';
       const next = !expanded;
@@ -691,26 +672,6 @@ function renderAgents(agents) {
       detail.classList.toggle('expanded', next);
       if (next) expandedAgentSlugs.add(agent.slug);
       else expandedAgentSlugs.delete(agent.slug);
-      if (next && !loaded) {
-        loaded = true;
-        const inboxEl = detail.querySelector('[data-field="inbox"]');
-        if (inboxEl) inboxEl.textContent = 'Loading…';
-        api(`/api/agent-detail/${encodeURIComponent(agent.slug)}`).then((data) => {
-          const inbox = detail.querySelector('[data-field="inbox"]');
-          const disp = detail.querySelector('[data-field="lastDispatched"]');
-          const journal = detail.querySelector('[data-field="journal"]');
-          if (inbox) inbox.textContent = data.inbox > 0 ? String(data.inbox) : '—';
-          if (disp) {
-            disp.textContent = data.lastDispatched
-              ? relativeTime(data.lastDispatched)
-              : '—';
-          }
-          if (journal) journal.textContent = data.journal || '—';
-        }).catch(() => {
-          const inbox = detail.querySelector('[data-field="inbox"]');
-          if (inbox) inbox.textContent = '—';
-        });
-      }
     };
     row.addEventListener('click', toggle);
     row.addEventListener('keydown', (e) => {
