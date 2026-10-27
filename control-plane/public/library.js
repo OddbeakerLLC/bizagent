@@ -418,6 +418,7 @@ async function openLibraryFile(repoId, filePath) {
   if (!bodyEl) return;
   librarySelected = { repoId, path: filePath, id: `${repoId}:${filePath}` };
   bodyEl.innerHTML = '<p class="company-file-empty">Loading…</p>';
+  bodyEl.scrollTop = 0;
   setLibraryDownloadEnabled(false);
   setLibrarySourceVisible(false);
   document.querySelectorAll('.library-tree-file-btn').forEach((el) => {
@@ -471,11 +472,13 @@ async function openLibraryFile(repoId, filePath) {
     } else {
       bodyEl.innerHTML = renderMarkdown(doc.content || '') || '<p class="company-file-empty">(empty)</p>';
     }
+    bodyEl.scrollTop = 0;
     setLibraryDownloadEnabled(true);
     const hasSource = !!(doc.source_path || kind === 'plantuml' || doc.source_content);
     setLibrarySourceVisible(hasSource);
   } catch (err) {
     bodyEl.innerHTML = `<p class="company-file-empty">${escapeHtml(err.message || 'Failed to load')}</p>`;
+    bodyEl.scrollTop = 0;
   }
 }
 
