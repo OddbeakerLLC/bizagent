@@ -2,7 +2,6 @@ const fs = require('fs');
 const path = require('path');
 const { appDir, ensureDir } = require('./config');
 const { logEvent, logLatency } = require('./log');
-const { applyHubSessionPath, applyHubTurnContext, isActiveEnterprise, getActiveEnterpriseHooks } = require('./enterprise-plugin');
 
 const MAX_RECENT_TURNS = 12;
 const MAX_SUMMARY_BULLETS = 16;
@@ -29,20 +28,6 @@ function hubTurnsDir(hub) {
 }
 
 function hubSessionFile(hub, sessionOrUserId) {
-  if (isActiveEnterprise()) {
-    try {
-      const p = applyHubSessionPath(hub, sessionOrUserId || null);
-      if (p) return p;
-    } catch (_err) {
-      /* fall through */
-    }
-    // Default enterprise naming when hook absent but we have a user id
-    const uid =
-      typeof sessionOrUserId === 'string'
-        ? sessionOrUserId
-        : sessionOrUserId && (sessionOrUserId.user_id || sessionOrUserId.userId);
-    if (uid) return path.join(appDir(hub), `hub-session-${uid}.md`);
-  }
   return path.join(appDir(hub), 'hub-session.md');
 }
 
@@ -513,24 +498,7 @@ function buildHubTurnPrompt(hub, opts) {
   ensureHubRuntimePrompt(hub);
   ensureDir(hubTurnsDir(hub));
   const hubAbs = path.resolve(hub);
-  // Resolve acting user from pending console mail (enterprise isolation).
-  let actingUserId = null;
-  if (isActiveEnterprise()) {
-    const hooks = getActiveEnterpriseHooks();
-    if (typeof hooks.resolveActingUserId === 'function') {
-      try { actingUserId = hooks.resolveActingUserId(hub, {}) || null; } catch (_e) { /* ignore */ }
-    }
-    if (!actingUserId) {
-      for (const file of listPendingInboxFiles(hub)) {
-        try {
-          const body = fs.readFileSync(file, 'utf8');
-          const m = body.match(/^user_id:\s*(.+?)\s*$/m);
-          if (m) { actingUserId = m[1].trim(); break; }
-        } catch (_e) { /* ignore */ }
-      }
-    }
-  }
-  const sessionPath = hubSessionFile(hub, actingUserId);
+  const sessionPath = hubSessionFile(hub);
   const sessionRel = path.relative(hub, sessionPath);
   let sessionBody = '';
   try {
@@ -609,27 +577,14 @@ function buildHubTurnPrompt(hub, opts) {
     '**Fallback only — write-message helper (if file write fails):**',
     '',
     '```bash',
-    actingUserId
-      ? `scripts/write-message.sh --to user --from hub --subject "console reply" --conversation-id "${convId}" --user-id "${actingUserId}" --body "Your reply here."`
-      : `scripts/write-message.sh --to user --from hub --subject "console reply" --conversation-id "${convId}" --body "Your reply here."`,
+    `scripts/write-message.sh --to user --from hub --subject "console reply" --conversation-id "${convId}" --body "Your reply here."`,
     '```',
     '',
     'write-message funnels into the reserved body when it exists (still one delivery).',
     '',
-    actingUserId
-      ? `When writing hub→user mail, always set user_id: ${actingUserId} and conversation_id: ${convId}.`
-      : 'Success = reserved body file non-empty (or write-message funneled into it).',
-    actingUserId
-      ? 'Success = reserved body file non-empty (or write-message funneled into it) with this conversation_id and user_id.'
-      : '',
+    'Success = reserved body file non-empty (or write-message funneled into it).',
     '',
   ].filter((line) => line !== undefined).join('\n');
-
-  const enterpriseCtx = applyHubTurnContext(hub, {
-    conversationId: convId,
-    user_id: actingUserId,
-    pendingCount: pending.length,
-  });
 
   const content = [
     '# Hub turn prompt (ephemeral)',
@@ -640,12 +595,10 @@ function buildHubTurnPrompt(hub, opts) {
     '',
     deriveHubRuntimePrompt(hub).trim(),
     '',
-    enterpriseCtx ? '## Enterprise seat context\n\n' + enterpriseCtx.trim() + '\n' : '',
     '## This turn',
     '',
     `- Hub absolute path: \`${hubAbs}\``,
     `- conversation_id: \`${convId}\``,
-    actingUserId ? `- Acting user_id: \`${actingUserId}\`` : '',
     `- RESERVED_REPLY_BODY: \`${reservedBodyAbs}\``,
     `- Session file (read-only, already compacted by CP): \`${sessionRel}\``,
     `- Pending inbox files: ${pending.length}`,

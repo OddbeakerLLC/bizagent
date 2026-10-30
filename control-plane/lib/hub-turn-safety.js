@@ -310,17 +310,6 @@ function promoteBlobToOutbox(hub, conversationId, body, subject = 'recovered hub
     const conv = getConversation(hub, conversationId);
     if (conv && conv.user_id) userId = String(conv.user_id);
   } catch (_e) { /* ignore */ }
-  if (!userId) {
-    try {
-      const { getActiveEnterpriseHooks, isActiveEnterprise } = require('./enterprise-plugin');
-      if (isActiveEnterprise()) {
-        const hooks = getActiveEnterpriseHooks();
-        if (typeof hooks.resolveActingUserId === 'function') {
-          userId = hooks.resolveActingUserId(hub, { conversationId }) || '';
-        }
-      }
-    } catch (_e) { /* ignore */ }
-  }
   // forceOutbox: reserved-body finalize must write real outbox mail, not re-funnel
   // into the reserved file (writeOutboxMessage funnels hub→user when reserved exists).
   return writeOutboxMessage(hub, {

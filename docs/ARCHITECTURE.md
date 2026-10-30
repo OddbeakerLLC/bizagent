@@ -114,16 +114,17 @@ The server does not replace the hub filesystem with a database:
   append-hub-turn` remains available for manual repair/imports.
 - Login config and salted password hash live in `.bizagent/auth.json`.
 - Sessions live in `.bizagent/sessions.json` and are deleted on logout.
-- **Enterprise plugin seams (Phase 0):** optional multi-user layer. When
-  `settings.enterprise` is absent or `enabled` is not strictly `true`, the hub
-  is pure single-operator OSS. When enabled, `control-plane/lib/enterprise-plugin.js`
-  resolves `BIZAGENT_ENTERPRISE_PATH` → `package_path` → `package` name, calls
-  `register(api)`, and **soft-fails to OSS** if the package is missing or throws.
-  The injected `api` exposes `hub`, `registry`, `appDir`, `registerRoute`,
-  `getSession`, `requireAuth`, `log`, and a `hooks` map
-  (`authProvider`, `resolveUserInbox`, `filterAgents`, `getHubSessionPath`) for
-  Phase 1+ packages. Design lives in the private `bizagent-enterprise` repo;
-  public OSS never hard-depends on that package.
+- **Enterprise Server connection (optional):** a hub may connect to a private
+  **BizAgent Enterprise Server** (silent company box) via
+  `control-plane/lib/enterprise-server-client.js` — connection state lives in
+  `.bizagent/enterprise-server.json` (URL + token + hub_id). When connected:
+  company KS syncs to the server (nightly + on-connect), products
+  auto-register their git remotes, new products default their LLM provider to
+  the server proxy, and an `ask-enterprise` knowledge-stack agent is
+  provisioned. Without a connection file the hub is pure single-operator OSS —
+  every enterprise entry point is a no-op. Spec:
+  `docs/2026-10-03-enterprise-server-mvp-spec.md` (superseded in part by the
+  private repo's 2026-10-30 technical spec).
 - Named conversation history lives as JSON files under `.bizagent/conversations/`.
   That UI history is bounded: older raw turns are compressed into a JSON summary
   and the hub runtime reads the markdown session file, not an unbounded transcript.

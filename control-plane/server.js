@@ -11,7 +11,6 @@ try { WebSocket = require("ws"); } catch (_) { WebSocket = null; }
 
 // --- WebSocket feeds (preferred over SSE). Subscribe model with per-session scoping. ---
 // OSS single-operator: full visibility for any valid session.
-// Enterprise hook: filter publish by user/roles; conversation visibility = ownership or explicit grant.
 const wsAgentsClients = new Set(); // Set<WebSocket>
 const wsConvClients = new Map(); // convId -> Set<WebSocket>
 const wsClientMeta = new WeakMap(); // ws -> { username, subscribed: Set<string> }
@@ -43,7 +42,6 @@ function wsSend(ws, obj) {
 function wsBroadcastAgents(snapshot) {
   for (const ws of wsAgentsClients) {
     // OSS: any authenticated session sees full board.
-    // Enterprise: filter here by meta.username + roles/seats (documented below).
     wsSend(ws, { feed: 'agents', snapshot });
   }
 }
@@ -52,8 +50,7 @@ function wsBroadcastConv(id, conv) {
   const set = wsConvClients.get(id);
   if (!set || set.size === 0) return;
   for (const ws of set) {
-    // Conversation visibility: currently any valid session may subscribe to any existing conv (OSS sole-op).
-    // Enterprise: check conv ownership / ACL against meta.username before including this client.
+    // Conversation visibility: any valid session may subscribe to any existing conv (OSS sole-op).
     wsSend(ws, { feed: `conversation:${id}`, id, conv });
   }
 }
@@ -78,11 +75,6 @@ const {
   parseCookies,
   verifyLogin,
 } = require("./lib/auth");
-const {
-  applyFilterAgents,
-  loadEnterprisePlugin,
-  matchPluginRoute,
-} = require("./lib/enterprise-plugin");
 const {
   activeConversationFile,
   appendMessage,
@@ -270,70 +262,20 @@ function serveStatic(req, res) {
   return true;
 }
 
-function authProvider(config) {
-  const custom =
-    config.enterprise &&
-    config.enterprise.hooks &&
-    config.enterprise.hooks.authProvider;
-  if (custom && typeof custom === "object") return custom;
-  return null;
-}
-
 function requireAuth(config, req, res) {
-  const provider = authProvider(config);
-  const has =
-    provider && typeof provider.hasAuth === "function"
-      ? provider.hasAuth(config.hub)
-      : hasAuth(config.hub);
-  if (!has) {
+  if (!hasAuth(config.hub)) {
     send(res, 401, { error: "setup required" });
     return false;
   }
   const cookies = parseCookies(req.headers.cookie);
   const sessionId = cookies.bizagent_session;
-  const session =
-    provider && typeof provider.getSession === "function"
-      ? provider.getSession(config.hub, sessionId)
-      : getSession(config.hub, sessionId);
+  const session = getSession(config.hub, sessionId);
   if (!session) {
     send(res, 401, { error: "login required" });
     return false;
   }
   req.session = { id: sessionId, ...session };
   return true;
-}
-
-/** Attach / reload optional Enterprise plugin (no-op when disabled). Soft-fail. */
-function attachEnterprisePlugin(config) {
-  const state = loadEnterprisePlugin(config, {
-    getSession: (req) => {
-      const cookies = parseCookies(req && req.headers && req.headers.cookie);
-      const id = cookies.bizagent_session;
-      const provider = authProvider(config);
-      if (provider && typeof provider.getSession === "function") {
-        return provider.getSession(config.hub, id);
-      }
-      return getSession(config.hub, id);
-    },
-  });
-  // Bind requireAuth for packages that call api.requireAuth(req, res).
-  if (state.api) {
-    state.api.requireAuth = (req, res) => requireAuth(config, req, res);
-    state.api.getSession = (req) => {
-      const cookies = parseCookies(req && req.headers && req.headers.cookie);
-      const id = cookies.bizagent_session;
-      const provider =
-        state.hooks && state.hooks.authProvider
-          ? state.hooks.authProvider
-          : null;
-      if (provider && typeof provider.getSession === "function") {
-        return provider.getSession(config.hub, id);
-      }
-      return getSession(config.hub, id);
-    };
-  }
-  config.enterprise = state;
-  return state;
 }
 
 const { providerEntries, resolveProviderName, getRuntimeDef } = require("./lib/cli-config");
@@ -517,8 +459,7 @@ function currentState(config, session) {
       active: isAgentActive(config.hub, agent.slug, config.lockLeaseSecs),
     };
   });
-  // Enterprise hook: filter roster by seat/ownership (identity when plugin off).
-  agents = applyFilterAgents(config.enterprise, agents, session || null);
+  // OSS sole-op: full board.
   return { agents, org: config.registry.org || "" };
 }
 
@@ -614,26 +555,13 @@ function rememberPushedConv(id, conv) {
 // Broadcast helpers used after mutations to push to SSE + WS clients.
 function pushState(config) {
   try {
-    // OSS sole-op: full board. Enterprise Phase 1+ may re-filter per WS client
-    // using hooks.filterAgents + meta.username (see upgrade handler).
+    // OSS sole-op: full board.
     const snap = currentState(config, null);
     broadcastState(snap);
     wsBroadcastAgents(snap);
   } catch (_) {}
 }
 
-/** Reload enterprise plugin when settings.enterprise changes on disk. */
-function maybeReloadEnterprise(config) {
-  const ent =
-    config.registry &&
-    config.registry.settings &&
-    config.registry.settings.enterprise;
-  const fp = JSON.stringify(ent || null);
-  if (fp === config._enterpriseFp) return config;
-  config._enterpriseFp = fp;
-  attachEnterprisePlugin(config);
-  return config;
-}
 function pushActiveConv(config) {
   try {
     const active = readJson(activeConversationFile(config.hub), null);
@@ -699,7 +627,6 @@ async function handleApi(config, req, res) {
   // Pick up registry.json and cli.json edits (agents, dispatch, hub_agent.cliName)
   // without requiring a control-plane restart. Legacy .cli is name-only migration.
   refreshRuntimeConfig(config);
-  maybeReloadEnterprise(config);
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   // Local helpers for post-mutation push (event-driven UI)
@@ -736,44 +663,18 @@ async function handleApi(config, req, res) {
   }
 
   if (url.pathname === "/api/setup" && req.method === "POST") {
-    const provider = authProvider(config);
-    const already =
-      provider && typeof provider.hasAuth === "function"
-        ? provider.hasAuth(config.hub)
-        : hasAuth(config.hub);
+    const already = hasAuth(config.hub);
     if (already) return send(res, 409, { error: "auth already initialized" });
     const body = await parseBody(req);
-    if (provider && typeof provider.initAuth === "function") {
-      provider.initAuth(config.hub, body.username, body.password);
-    } else {
-      initAuth(config.hub, body.username, body.password);
-    }
+    initAuth(config.hub, body.username, body.password);
     return send(res, 200, { ok: true });
   }
 
   if (url.pathname === "/api/login" && req.method === "POST") {
     const body = await parseBody(req);
-    const provider = authProvider(config);
-    let sessionId;
-    if (provider && typeof provider.verifyLogin === "function") {
-      const principal = provider.verifyLogin(
-        config.hub,
-        body.username,
-        body.password,
-      );
-      if (!principal) return send(res, 401, { error: "invalid login" });
-      sessionId =
-        typeof provider.createSession === "function"
-          ? provider.createSession(config.hub, principal)
-          : createSession(
-              config.hub,
-              (principal && principal.username) || body.username,
-            );
-    } else {
-      if (!verifyLogin(config.hub, body.username, body.password))
-        return send(res, 401, { error: "invalid login" });
-      sessionId = createSession(config.hub, body.username);
-    }
+    if (!verifyLogin(config.hub, body.username, body.password))
+      return send(res, 401, { error: "invalid login" });
+    const sessionId = createSession(config.hub, body.username);
     return send(
       res,
       200,
@@ -782,20 +683,6 @@ async function handleApi(config, req, res) {
         "Set-Cookie": `bizagent_session=${sessionId}; HttpOnly; SameSite=Lax; Path=/`,
       },
     );
-  }
-
-  // Enterprise plugin routes may opt out of auth (rare); default is auth required.
-  const pluginRoute = matchPluginRoute(
-    config.enterprise && config.enterprise.routes,
-    req.method,
-    url.pathname,
-  );
-  if (pluginRoute && pluginRoute.auth === false) {
-    try {
-      return await pluginRoute.handler(req, res, config);
-    } catch (err) {
-      return send(res, 500, { error: err.message || "plugin route error" });
-    }
   }
 
   if (!requireAuth(config, req, res)) return null;
@@ -811,22 +698,9 @@ async function handleApi(config, req, res) {
     });
   }
 
-  if (pluginRoute) {
-    try {
-      return await pluginRoute.handler(req, res, config);
-    } catch (err) {
-      return send(res, 500, { error: err.message || "plugin route error" });
-    }
-  }
-
   if (url.pathname === "/api/logout" && req.method === "POST") {
-    const provider = authProvider(config);
     if (req.session && req.session.id) {
-      if (provider && typeof provider.destroySession === "function") {
-        provider.destroySession(config.hub, req.session.id);
-      } else {
-        destroySession(config.hub, req.session.id);
-      }
+      destroySession(config.hub, req.session.id);
     }
     return send(
       res,
@@ -1972,7 +1846,6 @@ function activeSlugKey(config) {
 function runTick(config) {
   const start = Date.now();
   refreshRuntimeConfig(config);
-  maybeReloadEnterprise(config);
   // Heartbeat for the out-of-process probe (cheap single small write).
   try {
     const hbDir = path.join(config.hub, ".bizagent");
@@ -2105,7 +1978,6 @@ function createServer(config) {
 
   // Attach WebSocket feeds (preferred subscribe model) if 'ws' is available.
   // Auth: same bizagent_session cookie as REST. OSS: full visibility for the sole session.
-  // Enterprise: per-user scoping on subscribe + publish (see comments below).
   if (WebSocket && WebSocket.WebSocketServer) {
     const wss = new WebSocket.WebSocketServer({ noServer: true });
 
@@ -2148,8 +2020,8 @@ function createServer(config) {
               try { wsSend(ws, { feed: 'agents', snapshot: currentState(config) }); } catch (_) {}
             } else if (feed.startsWith('conversation:')) {
               const id = feed.slice('conversation:'.length);
-              // Conversation visibility gate (OSS = any existing conv; Enterprise = ownership/ACL).
-              // We validate the conv exists for this hub; per-user scoping is a documented hook.
+              // Conversation visibility gate (OSS = any existing conv).
+              // We validate the conv exists for this hub.
               const conv = getConversation(config.hub, id);
               if (!conv) {
                 wsSend(ws, { feed, error: 'not found' });
@@ -2218,10 +2090,6 @@ function clearPidFile(hub) {
 
 function start(hubInput) {
   const config = loadRuntimeConfig(hubInput);
-  attachEnterprisePlugin(config);
-  config._enterpriseFp = JSON.stringify(
-    (config.registry.settings && config.registry.settings.enterprise) || null,
-  );
   const server = createServer(config);
   ensureHubRuntimePrompt(config.hub);
   // Main-process push hook: safety net / spawn exit handler mutations broadcast
@@ -2307,7 +2175,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  attachEnterprisePlugin,
   conversationIdsFromSafetyResults,
   createServer,
   pushConv,

@@ -2864,7 +2864,6 @@ async function boot() {
     await loadConversations();
     // Subscribe after WS has had a chance; subscribe* will close SSE if WS is live.
     subscribeAgents();
-    try { loadEnterprisePanel(); } catch (_) {}
   } catch (_err) {
     if (!sessionActive && !needsSetup) {
       setAuthenticated(false, 'Login required');
@@ -3457,16 +3456,6 @@ setInterval(() => {
   const noPush = !wsReady && !convSource && currentConversation;
   if (FORCE_POLL || noPush) pollConversation().catch(() => {});
 }, 2000);
-// Optional Enterprise additive UI (served when plugin active).
-function loadEnterprisePanel() {
-  if (document.getElementById("enterprise-panel-script")) return;
-  const s = document.createElement("script");
-  s.id = "enterprise-panel-script";
-  s.src = "/enterprise/enterprise-panel.js";
-  s.onerror = function () { try { s.remove(); } catch (_) {} };
-  document.head.appendChild(s);
-}
-
 // Escape = hard-stop the in-flight thinking (also: click running status light).
 // Modal Escape handlers take precedence when a modal is open.
 document.addEventListener('keydown', (e) => {
