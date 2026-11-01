@@ -64,3 +64,6 @@ bizagent/
 .DS_Store
 *.swp
 *~
+
+# --- Local agent journals (operator data; removed from public history 2026-10-30) ---
+.agent/
