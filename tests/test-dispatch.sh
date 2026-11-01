@@ -586,3 +586,74 @@ NODE
 then
   fail "provider queue / classifier / banner TTL checks failed"
 fi
+
+# --- Safe mode suspends only product agents; hub PTL keeps turning (2026-11-01) ---
+if ! node - "$ROOT" <<'NODE'
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const root = process.argv[2];
+const { loadRuntimeConfig } = require(path.join(root, 'control-plane/lib/config'));
+const dispatcher = require(path.join(root, 'control-plane/lib/dispatcher'));
+const safeMode = require(path.join(root, 'control-plane/lib/safe-mode'));
+
+function fail(code, msg) {
+  console.error(msg);
+  process.exit(code);
+}
+
+const prevDry = process.env.BIZAGENT_DRY_RUN;
+process.env.BIZAGENT_DRY_RUN = '1';
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-safe-mode-dispatch-'));
+for (const dir of ['inbox', 'outbox', 'logs', 'templates', 'agents/alpha/inbox/archive', 'agents/alpha/outbox']) {
+  fs.mkdirSync(path.join(hub, dir), { recursive: true });
+}
+fs.writeFileSync(path.join(hub, 'agents/alpha/agent.md'), '# alpha\n');
+fs.writeFileSync(path.join(hub, 'templates/dispatch.md.template'), "You are '{{slug}}'.\n");
+fs.writeFileSync(path.join(hub, 'cli.json'), JSON.stringify({
+  _runtime: { executable: 'scripts/bizagent-agent', promptFlag: '-f', flags: { extra: '-y' } },
+  grok: { baseURL: 'https://api.x.ai/v1', keyEnv: 'XAI_API_KEY', models: ['grok-4.5'] },
+}));
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { agent_slots: 2, lock_lease_secs: 60 }, hub_agent: { provider: 'grok', model: 'grok-4.5' } },
+  products: [{ slug: 'alpha', name: 'Alpha', agent_name: 'Agent A', provider: 'grok', projects: [] }],
+}));
+const mail = (dir, name) => fs.writeFileSync(path.join(hub, dir, name), [
+  '---', 'from: hub', 'to: x', 'date: 2026-11-01', 'subject: t', '---', '', 'body', '',
+].join('\n'));
+mail('agents/alpha/inbox', '2026-11-01-alpha.md');
+mail('inbox', '2026-11-01-hub.md');
+
+const stateFile = (slug) => path.join(hub, '.bizagent', 'dispatch-state', `${slug}.json`);
+
+// 1) Safe-mode flag active: product agent suspended, hub still dispatched.
+fs.mkdirSync(path.join(hub, '.bizagent'), { recursive: true });
+if (!safeMode.enterSafeMode(hub, 'health emergency: test')) fail(1, 'enterSafeMode must write the flag');
+const suspended = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (suspended.suspendProductAgents !== true) fail(2, `safe mode must suspend product agents, got ${JSON.stringify(suspended)}`);
+if ((suspended.skippedSuspended || 0) !== 1) fail(3, `safe mode must count the suspended agent, got ${JSON.stringify(suspended)}`);
+if (fs.existsSync(stateFile('alpha'))) fail(4, 'safe mode must NOT mark product-agent mail dispatched');
+if (!fs.existsSync(stateFile('hub'))) fail(5, 'safe mode must still dispatch the hub PTL (markers missing)');
+
+// 2) Explicit config override suspends even without the flag file.
+safeMode.exitSafeMode(hub);
+fs.rmSync(stateFile('hub'), { force: true });
+const forced = dispatcher.dispatchPendingAgents({ ...loadRuntimeConfig(hub), suspendProductAgents: true });
+if (forced.suspendProductAgents !== true || (forced.skippedSuspended || 0) !== 1) {
+  fail(7, `explicit suspendProductAgents must suspend, got ${JSON.stringify(forced)}`);
+}
+if (fs.existsSync(stateFile('alpha'))) fail(8, 'explicit suspension must not dispatch product agents');
+
+// 3) Flag cleared (health recovered): product agents dispatch again.
+const resumed = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (resumed.suspendProductAgents === true) fail(9, 'clearing the flag must resume product agents');
+if (!fs.existsSync(stateFile('alpha'))) fail(10, 'product-agent mail must dispatch once safe mode clears');
+
+fs.rmSync(hub, { recursive: true, force: true });
+if (prevDry === undefined) delete process.env.BIZAGENT_DRY_RUN;
+else process.env.BIZAGENT_DRY_RUN = prevDry;
+NODE
+then
+  fail "safe-mode product-agent suspension checks failed"
+fi

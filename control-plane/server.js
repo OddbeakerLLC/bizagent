@@ -1855,17 +1855,22 @@ function runTick(config) {
   // Snapshot live slugs so a lock drop / cli_exit between ticks pushes the
   // board (amber clears without a page refresh), not only hadWork ticks.
   const activeBefore = activeSlugKey(config);
-  const safeModeActive = safeMode.isSafeMode(config.hub);
-  const routed = safeModeActive ? { delivered: 0, quarantined: 0, warnings: 0 } : routeOutboxes(config.hub);
-  const relayed = safeModeActive ? 0 : syncUserInbox(config); // numeric for hadWork (compat)
+  // Safe mode (health emergency, 2026-11-01 operator request): keep the
+  // control plane and the hub PTL alive — only product-agent dispatches are
+  // suspended (the dispatcher checks the safe-mode flag itself). Mail routing,
+  // user-inbox relay and the hub turn-safety drain stay on so the PTL can run
+  // cleanup turns (e.g. free disk space) and message the operator. Emergency
+  // trigger detection is unchanged (lib/health.js mitigate / safe-mode.js).
+  const routed = routeOutboxes(config.hub);
+  const relayed = syncUserInbox(config); // numeric for hadWork (compat)
   // Backup: if hub CLI exited without the shell safety hook, finish the turn.
   // Safety may route+relay or hard-fail AFTER syncUserInbox — push those ids next.
-  const safetyResults = safeModeActive ? [] : (drainHubTurnSafety(config) || []);
+  const safetyResults = drainHubTurnSafety(config) || [];
   const safetyIds = conversationIdsFromSafetyResults(safetyResults);
   for (const id of safetyIds) {
     try { pushConv(config, id); } catch (_) {}
   }
-  const dispatched = safeModeActive ? {} : (dispatchPendingAgents(config) || {});
+  const dispatched = dispatchPendingAgents(config) || {};
   const launched = Number(dispatched.launched || 0);
   // Launch-ack (and any other same-tick conv mutation) — push by disk stamp.
   // Also covers EXIT-hook child process that mutated conv JSON without broadcast.

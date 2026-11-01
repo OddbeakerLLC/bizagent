@@ -3544,7 +3544,7 @@ function renderHealthBanner(h) {
   el.hidden = false;
   el.className = `health-banner ${red ? 'health-banner-red' : 'health-banner-yellow'}`;
   const title = safeMode
-    ? 'Hub is in safe mode (health emergency) — agents paused, only login and health are served'
+    ? 'Hub is in safe mode (health emergency) — product agents paused; hub PTL still running (cleanup + operator mail)'
     : red
       ? `Hub health: ${level} — agent runs may fail`
       : fallback

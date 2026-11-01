@@ -74,7 +74,7 @@ async function main() {
   if (opts.command === 'dispatch-once') {
     routeOutboxes(config.hub);
     const result = dispatchPendingAgents(config);
-    console.log(`control-plane dispatch: launched=${result.launched} skipped_locked=${result.skippedLocked} skipped_cap=${result.skippedCap}`);
+    console.log(`control-plane dispatch: launched=${result.launched} skipped_locked=${result.skippedLocked} skipped_cap=${result.skippedCap} skipped_suspended=${result.skippedSuspended || 0}`);
     return null;
   }
   if (opts.command === 'ensure-prompts') {

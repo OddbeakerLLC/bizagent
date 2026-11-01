@@ -13,6 +13,7 @@ const {
   pickPendingConversationId,
 } = require('./hub-memory');
 const { pendingMail, writeOutboxMessage } = require('./mail');
+const safeMode = require('./safe-mode');
 const { logEvent, logLatency, logError, appendLog } = require('./log');
 const {
   appendMessage,
@@ -1956,6 +1957,14 @@ function dispatchPendingAgents(config) {
   // it simply re-queues into that provider's bucket on the next tick — the
   // failed provider's cooldown does not follow it.
   const allowConcurrency = config.allowConcurrency !== false;
+  // Safe mode (health emergency, 2026-11-01 operator request): suspend ONLY
+  // product-agent dispatches. The hub PTL keeps its turns so it can run
+  // cleanup (e.g. free disk space) and message the operator. The emergency
+  // trigger itself is untouched (lib/health.js mitigate); this is only the
+  // "what gets stopped" side. Centralized here so every dispatch entry point
+  // (server tick, dispatch-once cron) behaves identically.
+  const suspendProductAgents = config.suspendProductAgents === true
+    || safeMode.isSafeMode(config.hub);
   // allow_concurrency=false (or BIZAGENT_ALLOW_CONCURRENCY=0): at most one
   // live turn at a time across hub + product agents (serial; local CPU).
   const hubSlots = allowConcurrency ? Math.max(1, Number(config.hubSlots || 1)) : 1;
@@ -1984,6 +1993,7 @@ function dispatchPendingAgents(config) {
   let skippedCooldown = 0;
   let skippedQueue = 0;
   let skippedSpacing = 0;
+  let skippedSuspended = 0;
   const retrySecs = dispatchRetrySecs(config);
   const serialBusy = () => !allowConcurrency && (hubRunning + agentRunning) >= 1;
   // Fleet-wide fallback cooldown (unnamed file): gates every launch, for
@@ -2043,6 +2053,10 @@ function dispatchPendingAgents(config) {
   for (const agent of agents) {
     const pending = pendingMail(config.hub, agent.slug);
     if (pending.length === 0) continue;
+    if (suspendProductAgents) {
+      skippedSuspended += 1;
+      continue;
+    }
     const fresh = pendingUndispatchedMail(config.hub, agent.slug, retrySecs, config.lockLeaseSecs);
     if (fresh.length === 0) {
       continue;
@@ -2084,6 +2098,8 @@ function dispatchPendingAgents(config) {
     skippedCooldown,
     skippedQueue,
     skippedSpacing,
+    skippedSuspended,
+    suspendProductAgents,
     running: hubRunning + agentRunning,
     hubRunning,
     agentRunning,
