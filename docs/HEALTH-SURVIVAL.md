@@ -73,10 +73,25 @@ checkpoints) are **never** auto-deleted — warn only.
 ## Boot safe-mode
 
 `control-plane/lib/safe-mode.js`. When the flag `.bizagent/safe-mode.json` is
-present (set automatically on emergency, or by hand), the control plane only
-serves login/setup/logout, the health JSON, and a blocking banner. No agent
-launches, no mail routing, no multi-MB log appends, no session dumps. All other
-APIs get `503` with the health payload so the UI can banner it.
+present (set automatically on emergency, or by hand), the control plane keeps
+serving login/setup/logout, the health JSON, a blocking banner, and **console
+chat** — the gate is method-aware (`routeAllowedInSafeMode(pathname, method)`):
+`GET /api/state`, `GET+POST /api/conversations`,
+`GET /api/conversations/<id>`, `POST /api/conversations/<id>/messages`,
+`GET /api/thinking/stream`, and `POST /api/thinking/stop` pass. Only
+product-agent launches are suspended — the hub PTL keeps turning so it can run
+cleanup (e.g. free disk space) and message the operator; mail routing and the
+user-inbox relay keep running. Everything else (uploads, settings, DELETE
+conversations, library, enterprise, log streams, SSE fallbacks) gets `503`
+with the health payload so the UI can banner it; the console downgrades those
+failures to one quiet status note instead of a per-call error storm.
+
+**Bulky-write guard:** conversation saves (`saveConversation`) and hub-session
+compaction (`compactHubSession`) go through the log-caps bulky-write guard —
+writes ≥256 KB are refused while free space is inside the 1.5 GB reserve, so a
+long conversation cannot eat the reserve during an emergency. A refused write
+is skipped with a stderr breadcrumb (never thrown — the session compaction
+also runs on the read path); chat keeps working.
 
 **Auto-exit:** safe mode also exits itself once health has recovered. Only
 flags whose reason starts with `health emergency` are eligible (operator-set

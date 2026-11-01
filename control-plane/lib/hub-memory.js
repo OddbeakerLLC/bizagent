@@ -906,7 +906,19 @@ function compactHubSession(hub, conversation, sessionOrUserId) {
     (conversation && conversation.user_id) ||
     null;
   const file = hubSessionFile(hub, uid);
-  fs.writeFileSync(file, renderHubSession(conversation || {}, hub));
+  const body = renderHubSession(conversation || {}, hub);
+  // Bulky-write guard (disk-full protection): session dumps >=256 KB are
+  // refused when free space is inside the 1.5 GB reserve. compactHubSession
+  // also runs on the read path (getConversation), so refusal must never throw
+  // — skip the write and keep chat readable during emergencies.
+  try {
+    const guard = require('./log-caps').assertBulkyWriteAllowed(hub, Buffer.byteLength(body));
+    if (!guard.ok) {
+      process.stderr.write(`log-caps: ${guard.reason}; skipped hub session write\n`);
+      return file;
+    }
+  } catch (_err) { /* guard failure must never break session compaction */ }
+  fs.writeFileSync(file, body);
   return file;
 }
 

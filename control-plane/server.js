@@ -687,11 +687,13 @@ async function handleApi(config, req, res) {
 
   if (!requireAuth(config, req, res)) return null;
 
-  // Boot safe-mode: only login + banner + health JSON get through; everything
-  // else is refused with the health payload so the UI can block with a banner.
-  if (safeMode.isSafeMode(config.hub) && !safeMode.routeAllowedInSafeMode(url.pathname)) {
+  // Boot safe-mode: only login + banner + health JSON + chat get through;
+  // everything else is refused with the health payload so the UI can block
+  // with a banner. Method-aware: chat reads/posts pass, destructive routes
+  // (uploads, settings, DELETE conversations, streams) stay blocked.
+  if (safeMode.isSafeMode(config.hub) && !safeMode.routeAllowedInSafeMode(url.pathname, req.method)) {
     return send(res, 503, {
-      error: "hub in safe mode (health emergency) — only login and health are served",
+      error: "hub in safe mode (health emergency) — only login, health, and chat are served",
       safe_mode: true,
       level: "emergency",
       provider_fallback_active: ollamaFallback.isFallbackActive(config.hub),

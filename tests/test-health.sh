@@ -206,14 +206,265 @@ assert(!safeMode.isSafeMode(hub), "fresh hub is not safe mode");
 assert(safeMode.enterSafeMode(hub, "test"), "enterSafeMode should write the flag");
 assert(safeMode.isSafeMode(hub), "safe mode should be active after enter");
 assert(safeMode.readFlag(hub).reason === "test", "flag should carry the reason");
-assert(safeMode.routeAllowedInSafeMode("/api/login"), "login allowed in safe mode");
-assert(safeMode.routeAllowedInSafeMode("/api/health"), "health allowed in safe mode");
-assert(!safeMode.routeAllowedInSafeMode("/api/state"), "state API blocked in safe mode");
+
+// Allowed routes (method-aware): each allowed route with its verb(s).
+assert(safeMode.routeAllowedInSafeMode("/api/login", "POST"), "login POST allowed in safe mode");
+assert(safeMode.routeAllowedInSafeMode("/api/setup", "POST"), "setup POST allowed in safe mode");
+assert(safeMode.routeAllowedInSafeMode("/api/logout", "POST"), "logout POST allowed in safe mode");
+assert(safeMode.routeAllowedInSafeMode("/api/health", "GET"), "health GET allowed in safe mode");
+assert(safeMode.routeAllowedInSafeMode("/api/state", "GET"), "state GET allowed in safe mode (chat stays available)");
+assert(safeMode.routeAllowedInSafeMode("/api/conversations", "GET"), "conversations list GET allowed in safe mode");
+assert(safeMode.routeAllowedInSafeMode("/api/conversations", "POST"), "conversation create POST allowed in safe mode");
+assert(safeMode.routeAllowedInSafeMode("/api/conversations/2026-11-01-chat-abc123", "GET"), "conversation open GET allowed in safe mode");
+assert(safeMode.routeAllowedInSafeMode("/api/conversations/2026-11-01-chat-abc123/messages", "POST"), "message POST allowed in safe mode");
+assert(safeMode.routeAllowedInSafeMode("/api/thinking/stream", "GET"), "thinking stream GET allowed in safe mode");
+assert(safeMode.routeAllowedInSafeMode("/api/thinking/stop", "POST"), "thinking stop POST allowed in safe mode");
+
+// Method gating: right path, wrong verb must stay blocked.
+assert(!safeMode.routeAllowedInSafeMode("/api/login", "GET"), "login GET blocked in safe mode");
+assert(!safeMode.routeAllowedInSafeMode("/api/state", "POST"), "state POST blocked in safe mode");
+assert(!safeMode.routeAllowedInSafeMode("/api/conversations", "DELETE"), "conversations DELETE blocked in safe mode");
+assert(!safeMode.routeAllowedInSafeMode("/api/conversations/2026-11-01-chat-abc123", "DELETE"), "conversation DELETE blocked in safe mode");
+assert(!safeMode.routeAllowedInSafeMode("/api/conversations/2026-11-01-chat-abc123", "POST"), "conversation PUT/POST on the id route blocked in safe mode");
+assert(!safeMode.routeAllowedInSafeMode("/api/conversations/2026-11-01-chat-abc123/messages", "GET"), "messages GET blocked in safe mode");
+
+// Still-blocked routes (any method): uploads, settings, library, enterprise,
+// logs/stream, SSE fallbacks, and everything else.
+for (const p of [
+  "/api/uploads",
+  "/api/settings/dispatch",
+  "/api/profile",
+  "/api/company/files",
+  "/api/enterprise/status",
+  "/api/logs/stream",
+  "/api/state/stream",
+  "/api/conversations/2026-11-01-chat-abc123/stream",
+  "/api/provider-models",
+  "/api/forms/submit",
+  "/api/something-else",
+]) {
+  for (const m of ["GET", "POST", "DELETE", "PUT"]) {
+    assert(!safeMode.routeAllowedInSafeMode(p, m), p + " " + m + " must stay blocked in safe mode");
+  }
+}
+assert(!safeMode.routeAllowedInSafeMode("/api/conversations/2026-11-01-chat-abc123/messages/extra", "POST"),
+  "deep paths under messages must stay blocked");
+
 assert(safeMode.exitSafeMode(hub), "exitSafeMode should clear the flag");
 assert(!safeMode.isSafeMode(hub), "safe mode should be off after exit");
 fs.rmSync(hub, { recursive: true, force: true });
 console.log("  ok: safe-mode gate");
 ' || fail "safe-mode gate"
+
+# ---------------------------------------------------------------------------
+# 3b. Bulky-write guard on conversation + hub-session saves
+# ---------------------------------------------------------------------------
+NODE_EVAL '
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const conversations = require("./control-plane/lib/conversations.js");
+const hubMemory = require("./control-plane/lib/hub-memory.js");
+const assert = (cond, msg) => { if (!cond) { console.error("FAIL: " + msg); process.exit(1); } };
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), "health-conv-guard-"));
+fs.mkdirSync(path.join(hub, ".bizagent"), { recursive: true });
+
+// Normal conditions: save works.
+const conv = conversations.createConversation(hub, "guard test");
+conv.messages.push({ role: "user", content: "hello", created_at: new Date().toISOString() });
+conversations.saveConversation(hub, conv);
+const convFile = conversations.safeConversationFile(hub, conv.id);
+assert(fs.existsSync(convFile), "conversation file written under normal free space");
+const sessionFile = hubMemory.compactHubSession(hub, conv);
+assert(fs.existsSync(sessionFile), "hub session written under normal free space");
+
+// Reserve exceeds free space → bulky writes refused, small ones still pass.
+process.env.BIZAGENT_RESERVED_FREE_BYTES = String(1024 * 1024 * 1024 * 1024); // 1 TB
+try {
+  // Small conversation still saves (under the 256 KB bulky threshold).
+  const small = conversations.createConversation(hub, "small");
+  small.messages.push({ role: "user", content: "hi", created_at: new Date().toISOString() });
+  conversations.saveConversation(hub, small);
+  assert(fs.existsSync(conversations.safeConversationFile(hub, small.id)), "small conversation save must pass the guard");
+
+  // Bulky conversation save is skipped, not thrown, and must not create/extend the file.
+  const before = fs.existsSync(convFile) ? fs.readFileSync(convFile, "utf8") : "";
+  const big = JSON.parse(JSON.stringify(conv));
+  big.id = conv.id;
+  big.messages.push({ role: "user", content: "x".repeat(512 * 1024), created_at: new Date().toISOString() });
+  let threw = null;
+  try { conversations.saveConversation(hub, big); } catch (e) { threw = e; }
+  assert(!threw, "bulky conversation save must be refused quietly, not thrown: " + (threw && threw.message));
+  const after = fs.readFileSync(convFile, "utf8");
+  assert(after === before, "bulky conversation save must not touch the file when refused");
+
+  // Bulky hub-session write is skipped too (read path must never throw).
+  let sessionThrew = null;
+  try { hubMemory.compactHubSession(hub, big); } catch (e) { sessionThrew = e; }
+  assert(!sessionThrew, "bulky hub-session write must be refused quietly, not thrown");
+} finally {
+  delete process.env.BIZAGENT_RESERVED_FREE_BYTES;
+}
+
+// Guard lifted → saves work again.
+conv.messages.push({ role: "hub", content: "back online", created_at: new Date().toISOString() });
+conversations.saveConversation(hub, conv);
+assert(/back online/.test(fs.readFileSync(convFile, "utf8")), "saves resume after the reserve is restored");
+fs.rmSync(hub, { recursive: true, force: true });
+console.log("  ok: bulky-write guard on conversation/session saves");
+' || fail "bulky-write guard saves"
+
+# ---------------------------------------------------------------------------
+# 3c. Safe-mode chat integration: live server in a temp hub
+#     login -> state 200 -> conversations 200 -> message POST enqueues hub
+#     turn -> uploads 503 (safe_mode payload)
+# ---------------------------------------------------------------------------
+if command -v node >/dev/null 2>&1; then
+node - "$ROOT" <<'NODE' || fail "safe-mode chat integration"
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const root = process.argv[2];
+const { createServer } = require(path.join(root, 'control-plane/server'));
+const { loadRuntimeConfig } = require(path.join(root, 'control-plane/lib/config'));
+const { initAuth } = require(path.join(root, 'control-plane/lib/auth'));
+const safeMode = require(path.join(root, 'control-plane/lib/safe-mode'));
+
+function assert(cond, msg) {
+  if (!cond) { console.error('  FAIL: ' + msg); process.exit(1); }
+}
+
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-safe-chat-'));
+fs.mkdirSync(path.join(hub, 'inbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+fs.mkdirSync(path.join(hub, '.bizagent'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({
+  settings: { dispatch: { poll_seconds: 2, max_concurrency: 8, lock_lease_secs: 60 } },
+  products: [],
+}));
+fs.writeFileSync(path.join(hub, 'cli.json'), JSON.stringify({
+  _runtime: { executable: 'scripts/bizagent-agent', promptFlag: '-f', flags: { extra: '-y' } },
+  grok: { baseURL: 'https://api.x.ai/v1', keyEnv: 'XAI_API_KEY', models: ['grok-4.5'] },
+}));
+
+initAuth(hub, 'operator', 's3cret-pass');
+// Health-emergency flag (as the watchdog writes it).
+assert(safeMode.enterSafeMode(hub, 'health emergency: test'), 'enter safe mode');
+
+function request(port, { method, pathname, cookie, body }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: pathname,
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cookie ? { Cookie: cookie } : {}),
+        ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
+      },
+    }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => {
+        let json = null;
+        try { json = data ? JSON.parse(data) : null; } catch (_e) { json = { raw: data }; }
+        resolve({ status: res.statusCode, json, raw: data, headers: res.headers });
+      });
+    });
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+(async () => {
+  const config = loadRuntimeConfig(hub);
+  const server = createServer(config);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    // Blocked without login first (gate sits behind requireAuth).
+    const preAuth = await request(port, { method: 'GET', pathname: '/api/state' });
+    assert(preAuth.status === 401, `unauthenticated state should 401, got ${preAuth.status}`);
+
+    // Login still works in safe mode.
+    const login = await request(port, {
+      method: 'POST',
+      pathname: '/api/login',
+      body: JSON.stringify({ username: 'operator', password: 's3cret-pass' }),
+    });
+    assert(login.status === 200, `login should 200 in safe mode, got ${login.status}`);
+    const setCookie = login.headers['set-cookie'] && login.headers['set-cookie'][0];
+    assert(setCookie, 'login should set a session cookie');
+    const cookie = setCookie.split(';')[0];
+
+    // Chat surface passes the gate.
+    const state = await request(port, { method: 'GET', pathname: '/api/state', cookie });
+    assert(state.status === 200, `GET /api/state should 200 in safe mode, got ${state.status}`);
+
+    const convs = await request(port, { method: 'GET', pathname: '/api/conversations', cookie });
+    assert(convs.status === 200, `GET /api/conversations should 200 in safe mode, got ${convs.status}`);
+
+    const created = await request(port, {
+      method: 'POST',
+      pathname: '/api/conversations',
+      cookie,
+      body: JSON.stringify({ name: 'Safe chat' }),
+    });
+    assert(created.status === 200, `POST /api/conversations should 200 in safe mode, got ${created.status}`);
+    const convId = created.json && created.json.id;
+    assert(convId, 'conversation create should return an id');
+
+    const opened = await request(port, { method: 'GET', pathname: `/api/conversations/${convId}`, cookie });
+    assert(opened.status === 200, `GET /api/conversations/<id> should 200 in safe mode, got ${opened.status}`);
+
+    const msg = await request(port, {
+      method: 'POST',
+      pathname: `/api/conversations/${convId}/messages`,
+      cookie,
+      body: JSON.stringify({ content: 'hello from safe mode' }),
+    });
+    assert(msg.status === 200, `message POST should 200 in safe mode, got ${msg.status}`);
+    // Hub turn enqueued: the console message landed in hub/inbox for the dispatcher.
+    const inboxFiles = fs.readdirSync(path.join(hub, 'inbox')).filter((n) => n.endsWith('.md'));
+    assert(inboxFiles.length >= 1, 'message POST should enqueue a hub turn (hub inbox mail)');
+
+    // Method gating over live HTTP: DELETE conversation stays blocked.
+    const del = await request(port, { method: 'DELETE', pathname: `/api/conversations/${convId}`, cookie });
+    assert(del.status === 503 && del.json && del.json.safe_mode, `DELETE conversation should 503 safe_mode, got ${del.status}`);
+
+    // Non-chat surface stays blocked with the safe_mode payload.
+    const uploads = await request(port, {
+      method: 'POST',
+      pathname: '/api/uploads',
+      cookie,
+      body: JSON.stringify({}),
+    });
+    assert(uploads.status === 503, `uploads should 503 in safe mode, got ${uploads.status}`);
+    assert(uploads.json && uploads.json.safe_mode === true, '503 payload should carry safe_mode: true');
+
+    const settings = await request(port, { method: 'GET', pathname: '/api/settings/dispatch', cookie });
+    assert(settings.status === 503, `settings GET should 503 in safe mode, got ${settings.status}`);
+
+    // Health JSON still served.
+    const health = await request(port, { method: 'GET', pathname: '/api/health' });
+    assert(health.status === 200, `health GET should 200 in safe mode, got ${health.status}`);
+  } finally {
+    server.close();
+    safeMode.exitSafeMode(hub);
+    fs.rmSync(hub, { recursive: true, force: true });
+  }
+  console.log('  ok: safe-mode chat integration');
+})().catch((e) => { console.error('  FAIL: ' + (e && e.message || e)); process.exit(1); });
+NODE
+else
+  echo "  ok: safe-mode chat integration (skipped; node not installed)"
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Ollama fallback trigger: credits/auth/model yes — network/rate-limit no

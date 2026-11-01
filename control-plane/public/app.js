@@ -165,6 +165,16 @@ function setSetupMode(isSetup) {
   document.getElementById('password').autocomplete = isSetup ? 'new-password' : 'current-password';
 }
 
+// Safe-mode quiet note: one status line instead of a per-call error storm.
+// Reset by the health poll once the hub reports it left safe mode.
+let safeModeNoteShown = false;
+
+function showSafeModeNote() {
+  if (safeModeNoteShown) return;
+  safeModeNoteShown = true;
+  setAuthStatus('Hub in safe mode — chat remains available; other actions are paused', 'warn');
+}
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -188,13 +198,17 @@ async function api(path, options = {}) {
   }
   if (!res.ok) {
     const bodyText = await res.text();
-    let message = bodyText || 'Request failed';
-    try {
-      const body = JSON.parse(bodyText);
-      message = body.error || message;
-    } catch (_err) {
-      // Keep the plain response text when the server did not return JSON.
+    let body = null;
+    try { body = JSON.parse(bodyText); } catch (_err) { /* plain text body */ }
+    // Safe-mode 503: downgrade to one quiet status note instead of a per-call
+    // error storm. The thrown error is quiet so non-critical callers that
+    // surface err.message stay calm too.
+    if (res.status === 503 && body && body.safe_mode) {
+      showSafeModeNote();
+      throw new Error('hub in safe mode — chat remains available');
     }
+    let message = bodyText || 'Request failed';
+    if (body) message = body.error || message;
     throw new Error(message);
   }
   return res.json();
@@ -3536,6 +3550,7 @@ function renderHealthBanner(h) {
   const red = safeMode || level === 'critical' || level === 'emergency';
   const yellow = !red && (level === 'warn' || fallback || level === 'unknown' ||
     visibleErrors.length > 0 || cooldown > 0);
+  if (!safeMode) safeModeNoteShown = false; // hub left safe mode — allow the quiet note again
   if (!red && !yellow) {
     el.hidden = true;
     el.innerHTML = '';
@@ -3544,7 +3559,7 @@ function renderHealthBanner(h) {
   el.hidden = false;
   el.className = `health-banner ${red ? 'health-banner-red' : 'health-banner-yellow'}`;
   const title = safeMode
-    ? 'Hub is in safe mode (health emergency) — product agents paused; hub PTL still running (cleanup + operator mail)'
+    ? 'Hub is in safe mode (health emergency) — product agents paused; hub PTL still running; chat remains available'
     : red
       ? `Hub health: ${level} — agent runs may fail`
       : fallback

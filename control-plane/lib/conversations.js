@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { appDir, ensureDir, readJson } = require('./config');
 const { writeJsonAtomic } = require('./atomic-state');
+const { assertBulkyWriteAllowed } = require('./log-caps');
 const { compactHubSession, resetHubSession } = require('./hub-memory');
 const { logEvent } = require('./log');
 
@@ -166,7 +167,20 @@ function saveConversation(hub, conv) {
   }
   conv.updated_at = next;
   compactConversation(conv);
-  fs.writeFileSync(safeConversationFile(hub, conv.id), `${JSON.stringify(conv, null, 2)}\n`);
+  const json = `${JSON.stringify(conv, null, 2)}\n`;
+  // Bulky-write guard (disk-full protection): a long conversation must not eat
+  // the reserved free-space buffer during emergencies. Writes >=256 KB are
+  // refused when free space is inside the 1.5 GB reserve; the save is skipped
+  // (chat keeps working, nothing crashes) and a breadcrumb explains why.
+  let guard = { ok: true };
+  try {
+    guard = assertBulkyWriteAllowed(hub, Buffer.byteLength(json));
+  } catch (_err) { /* guard failure must never break saving */ }
+  if (guard.ok) {
+    fs.writeFileSync(safeConversationFile(hub, conv.id), json);
+  } else {
+    process.stderr.write(`log-caps: ${guard.reason}; skipped conversation save ${conv.id}\n`);
+  }
   compactHubSession(hub, conv);
   return conv;
 }
@@ -783,6 +797,7 @@ module.exports = {
   recordCrossChatAlert,
   recordUserInboxDelivery,
   setActiveConversation,
+  saveConversation,
   shouldStartNewConversation,
   safeConversationFile,
   stampConversationId,

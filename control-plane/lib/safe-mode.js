@@ -90,18 +90,35 @@ function autoExitDecision({ level, flag, okStreak = 0, requiredRuns } = {}) {
 }
 
 /**
- * API gate for safe mode. Returns true when `pathname` may still be served.
- * Everything else gets a 503 with the health payload so the UI can banner it.
+ * API gate for safe mode. Returns true when `pathname` with `method` may still
+ * be served. Everything else gets a 503 with the health payload so the UI can
+ * banner it.
+ *
+ * Method-aware (2026-11-01 operator decision): chat remains available during
+ * emergencies — state reads, conversation list/open/create, message posts, and
+ * the hub thinking stream pass. Everything else stays blocked (uploads,
+ * settings, DELETE conversations, library, enterprise, logs/stream, SSE
+ * fallbacks).
  */
-function routeAllowedInSafeMode(pathname) {
-  const allowed = new Set([
-    '/api/login',
-    '/api/setup',
-    '/api/logout',
-    '/api/health',
-    '/api/safe-mode',
-  ]);
-  return allowed.has(pathname);
+function routeAllowedInSafeMode(pathname, method) {
+  const m = String(method || 'GET').toUpperCase();
+  const allowed = {
+    '/api/login': ['POST'],
+    '/api/setup': ['POST'],
+    '/api/logout': ['POST'],
+    '/api/health': ['GET'],
+    '/api/safe-mode': ['GET'],
+    '/api/state': ['GET'],
+    '/api/conversations': ['GET', 'POST'],
+    '/api/thinking/stream': ['GET'],
+    '/api/thinking/stop': ['POST'],
+  };
+  if (allowed[pathname] && allowed[pathname].includes(m)) return true;
+  // GET /api/conversations/<id> — open a chat (never DELETE).
+  if (m === 'GET' && /^\/api\/conversations\/[^/]+$/.test(pathname)) return true;
+  // POST /api/conversations/<id>/messages — send a chat message.
+  if (m === 'POST' && /^\/api\/conversations\/[^/]+\/messages$/.test(pathname)) return true;
+  return false;
 }
 
 module.exports = {
