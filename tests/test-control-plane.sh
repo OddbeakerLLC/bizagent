@@ -2386,6 +2386,42 @@ const tldrMulti = sandbox.buildSpokenSummary('TLDR: ' + multiPeriod + '\n\nBody.
 if (tldrMulti !== multiPeriod) {
   console.error('labeled TLDR clipped a multi-period summary:', tldrMulti); process.exit(24);
 }
+
+// Regression (hub dispatch 2026-11-03): the speech scrubber must CONVERT dense
+// tokens (filenames, hex SHAs, kebab/snake identifiers) to speakable form, not
+// drop them — dropping ate sentence-final tokens and hollowed out sentences.
+const scrubCases = [
+  ['The change is in server.js.', 'server dot js'],
+  ['You can find it in the README.md.', 'readme dot md'],
+  ['The commit hash is a4c139fc8d8b2fd6.', 'a 4 c 1 3 9 f'],
+  ['We renamed it to user-profile-settings-handler.', 'user profile settings handler'],
+  ['You should check the docs.', 'you should check the docs'],
+];
+for (const [scrubIn, scrubWant] of scrubCases) {
+  const scrubOut = sandbox.scrubDenseSpeechTokens(scrubIn);
+  if (!scrubOut || !scrubOut.toLowerCase().includes(scrubWant)) {
+    console.error('scrubber dropped/mangled sentence-final token:', scrubIn, '->', scrubOut); process.exit(25);
+  }
+}
+// Plain numbers and hex-letter English words are left alone (SHA regex guards).
+const scrubNum = sandbox.scrubDenseSpeechTokens('About 2880000 samples were run.');
+if (!scrubNum.includes('2880000')) {
+  console.error('scrubber mangled a plain number:', scrubNum); process.exit(26);
+}
+const scrubWord = sandbox.scrubDenseSpeechTokens('The config was defaced.');
+if (!scrubWord.includes('defaced')) {
+  console.error('scrubber mangled an English word:', scrubWord); process.exit(27);
+}
+// Hollow residue is cleared only when the WHOLE sentence is residue; a real
+// tail after real content survives.
+const scrubHollow = sandbox.scrubDenseSpeechTokens('Updated and scripts See agents.');
+if (scrubHollow !== '') {
+  console.error('hollow residue sentence not cleared:', scrubHollow); process.exit(28);
+}
+const scrubTail = sandbox.scrubDenseSpeechTokens('Fixed the parser and updated the docs.');
+if (!/fixed the parser and updated the docs/i.test(scrubTail)) {
+  console.error('scrubber deleted a real content tail:', scrubTail); process.exit(29);
+}
 NODE
   then
     fail "renderMarkdown regression: numbers in chat messages render as literal 'undefined'"
