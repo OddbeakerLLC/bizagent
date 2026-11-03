@@ -1501,8 +1501,10 @@ function pathToSpeech(path) {
 }
 
 /**
- * Drop filenames, SHAs, and other dense tokens that sound awful in TTS.
- * Paths are spoken (via pathToSpeech) rather than dropped.
+ * Convert filenames, SHAs, and other dense tokens into speakable form instead
+ * of dropping them. Dropping ate sentence-final tokens ("The change is in
+ * server.js." → "The change is in."); converting keeps the sentence whole.
+ * Paths are spoken (via pathToSpeech); filenames/hex/identifiers likewise.
  * Used by hub-reply summary mode (not the lighter buildSpokenText path).
  */
 function scrubDenseSpeechTokens(text) {
@@ -1522,24 +1524,41 @@ function scrubDenseSpeechTokens(text) {
   t = t.replace(/(?:(?:~[\w.-]*)\/|\/|\.{1,2}\/)(?:[\w.-]+\/)*[\w.-]+\/?/g, (m) => ` ${pathToSpeech(m)} `);
   t = t.replace(/\b(?:[\w.-]+\/){1,}[\w.-]*\/?/g, (m) => ` ${pathToSpeech(m)} `);
   t = t.replace(/\b[A-Za-z]:\\[^\s]+/g, (m) => ` ${pathToSpeech(m)} `);
-  // Bare filenames with common extensions
+  // Bare filenames with common extensions → speakable ("server.js" →
+  // "server dot js"), not dropped — dropping ate sentence-final filenames
+  // ("You can find it in the README.md." → "You can find it in the.").
   t = t.replace(
     /\b[\w.-]+\.(?:js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|kt|md|markdown|txt|json|jsonc|ya?ml|toml|ini|env|sh|bash|zsh|ps1|css|scss|html?|vue|svelte|wasm|lock|wav|mp3|png|jpe?g|gif|svg|webp|ico|puml|sql|proto|gradle|xml|csv|tsv|log|diff|patch)\b/gi,
-    ' '
+    (m) => ` ${pathToSpeech(m)} `
   );
-  // Short git SHAs / commit-ish hex
-  t = t.replace(/\b[0-9a-f]{7,40}\b/gi, ' ');
-  // long kebab or snake identifiers (agent slugs, once-keys, etc.)
-  t = t.replace(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+){3,}\b/g, ' ');
-  t = t.replace(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+){3,}\b/g, ' ');
+  // Short git SHAs / commit-ish hex → spelled out ("a4c139f" → "a 4 c 1 3 9 f"),
+  // not dropped — dropping ate sentence-final hashes ("The commit hash is
+  // a4c139fc8d8b2fd6." → "The commit hash is."). Requires at least one digit
+  // AND one a-f letter so plain numbers ("2880000") and hex-letter English
+  // words ("defaced") are left alone.
+  t = t.replace(
+    /\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/gi,
+    (m) => ` ${m.split('').join(' ')} `
+  );
+  // Long kebab or snake identifiers (agent slugs, once-keys, etc.) → speakable
+  // ("user-profile-settings-handler" → "user profile settings handler"), not
+  // dropped — dropping ate sentence-final identifiers.
+  t = t.replace(/\b[a-z][a-z0-9]*(?:-[a-z0-9]+){3,}\b/g, (m) => ` ${m.replace(/[-_]+/g, ' ')} `);
+  t = t.replace(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+){3,}\b/g, (m) => ` ${m.replace(/_+/g, ' ')} `);
   // Collapse leftover punctuation / connector noise after token drops
   t = t.replace(/[`*_#~<>[\](){}|\\/]/g, ' ');
-  // "Updated and scripts See agents." style leftovers after path wipe — only when
-  // the tail is hollow verbs/connectors/file-ish words (no real content after).
-  t = t.replace(
-    /\b(?:updated|changed|modified|edited|touched|fixed|added|removed|deleted|see|check|review)\b(?:\s+(?:and|or|with|via|from|to|in|on|at|of|for|the|a|an|also|files?|paths?|scripts?|docs?|commits?|agents?|repos?|branches?|main|master))*\s*[.:]?\s*$/gi,
-    ' '
-  );
+  // Hollow residue ("Updated and scripts See agents." after path wipes): clear
+  // it ONLY when the whole sentence is verbs/connectors/file-ish words. Never
+  // delete a tail when real content precedes it — that ate sentences like
+  // "You should check the docs." down to "You should" (same bug class as the
+  // dangling-connector last-word cut below).
+  if (
+    /^(?:\s*(?:updated|changed|modified|edited|touched|fixed|added|removed|deleted|see|check|review)\b(?:\s+(?:and|or|with|via|from|to|in|on|at|of|for|the|a|an|also|files?|paths?|scripts?|docs?|commits?|agents?|repos?|branches?|main|master))*)+\s*[.:]?\s*$/i.test(
+      t
+    )
+  ) {
+    t = '';
+  }
   // Dangling connectors only when stacked or sentence-initial residue
   // (" and or .", leading "to."). Do NOT strip a real final word like
   // "…toggle on." / "…ship it to production." — that was cutting the last word.
