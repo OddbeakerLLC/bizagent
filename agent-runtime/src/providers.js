@@ -52,6 +52,13 @@ const PROVIDERS = {
     optionalKey: true,
     fallbackKey: "ollama",
   },
+  beakernet: {
+    // Local ternary engine (bb serve); mirrors the cli.json entry.
+    baseURL: "http://127.0.0.1:8901/v1",
+    keyEnv: "BEAKERNET_API_KEY",
+    defaultModel: "prism-bonsai-27b",
+    optionalKey: true,
+  },
 };
 
 function listProviders() {
@@ -71,7 +78,16 @@ function resolveProvider(opts = {}) {
 
   let base = (name && PROVIDERS[name]) || null;
 
-  if (!base && !opts.baseURL && !process.env.BIZAGENT_AGENT_BASE_URL) {
+  // An unknown provider name paired with an explicit base URL is a custom
+  // provider (e.g. a cli.json entry this catalog doesn't list). Route by the
+  // requested name instead of silently falling back to grok — the fallback
+  // made llmapi send the model to the wrong upstream (x.ai) even though the
+  // caller passed --base-url.
+  const explicitBase =
+    opts.baseURL || process.env.BIZAGENT_AGENT_BASE_URL || null;
+  const customProvider = !!(name && !PROVIDERS[name] && explicitBase);
+
+  if (!base && !customProvider && !explicitBase) {
     for (const key of listProviders()) {
       const p = PROVIDERS[key];
       if (process.env[p.keyEnv]) {
@@ -80,23 +96,25 @@ function resolveProvider(opts = {}) {
       }
     }
   }
-  if (!base) {
+  if (!base && !customProvider) {
     base = PROVIDERS.grok;
   }
 
-  let providerName =
-    name && PROVIDERS[name]
-      ? name
-      : Object.keys(PROVIDERS).find((k) => PROVIDERS[k] === base) || "custom";
-  if (providerName === "xai") providerName = "grok";
-  if (providerName === "openai") providerName = "chatgpt";
+  let providerName;
+  if (customProvider) {
+    providerName = name;
+  } else {
+    providerName =
+      name && PROVIDERS[name]
+        ? name
+        : Object.keys(PROVIDERS).find((k) => PROVIDERS[k] === base) || "custom";
+    if (providerName === "xai") providerName = "grok";
+    if (providerName === "openai") providerName = "chatgpt";
+  }
 
-  const baseURL =
-    opts.baseURL ||
-    process.env.BIZAGENT_AGENT_BASE_URL ||
-    base.baseURL;
+  const baseURL = explicitBase || base.baseURL;
 
-  const keyEnv = base.keyEnv || "OPENAI_API_KEY";
+  const keyEnv = (base && base.keyEnv) || "OPENAI_API_KEY";
   let apiKey =
     opts.apiKey ||
     process.env.BIZAGENT_AGENT_API_KEY ||
@@ -108,7 +126,7 @@ function resolveProvider(opts = {}) {
     apiKey = process.env.GOOGLE_API_KEY;
   }
 
-  if (!apiKey && base.optionalKey) {
+  if (!apiKey && base && base.optionalKey) {
     apiKey = base.fallbackKey || "local";
   }
 
