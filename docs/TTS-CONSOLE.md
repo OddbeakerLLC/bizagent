@@ -5,8 +5,8 @@ Optional text-to-speech for hub→operator console replies.
 ## Switch
 
 - **Where:** Topbar auth controls — `TTS` toggle button (next to Library / Company).
-- **Default:** OFF.
-- **Persistence:** `localStorage` key `bizagent.tts.enabled` (`"1"` / absent).
+- **Default:** **ON** — a fresh browser profile (no stored preference) starts with TTS on; an explicit choice always wins.
+- **Persistence:** `localStorage` key `bizagent.tts.enabled` — `"1"` = explicit ON, `"0"` = explicit OFF (stored, not removed, so OFF survives reload), absent = default ON.
 - **Scope:** Browser-local only (no registry/server setting for the toggle).
 
 ## Engine
@@ -117,7 +117,7 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
 - Turning TTS **off** hard-stops immediately: bumps play generation, cancels synth **without** resume, stops BufferSource / HTMLAudio, and **suspends** the AudioContext so a late `source.start()` after an in-flight decode cannot be heard. `ttsEnabled` is cleared first so async synthesize/play paths bail before starting audio. No browser `speechSynthesis` fallback while disabled.
 - Turning TTS **on** resumes AudioContext under the click gesture and speaks the confirmation phrase.
 - Sending a user message cancels in-flight speech (avoids talking over the next turn).
-- Persistence: OFF removes `bizagent.tts.enabled`; ON sets `"1"`. Hard-refresh restores the chosen state (still needs one off→on click after reload to re-unlock autoplay if ON was restored).
+- Persistence: ON sets `bizagent.tts.enabled = "1"`, OFF sets `"0"` — an explicit OFF is stored (not removed), so it wins on reload. Hard-refresh restores the chosen state (still needs one click to re-unlock autoplay — see Autoplay / unlock).
 
 ## Multi-reply reliability (Kokoro + browser)
 
@@ -170,6 +170,18 @@ Browsers often block both `speechSynthesis.speak()` and `HTMLAudioElement.play()
 
 Restoring TTS from `localStorage` on reload does **not** auto-prime (no gesture yet). Click the TTS button off→on once after reload if speech is silent. After that, **every** new hub reply should speak via Kokoro without re-toggling when `:9201` is up.
 
+**Default-ON with no gesture yet (2026-11-08):** a fresh profile starts ON, so the
+first hub reply may be spoken before any click has happened. In that state a
+play-only failure (autoplay-blocked Web Audio / HTMLAudio) falls back to browser
+`speechSynthesis` — `ttsPlayFailureAllowsBrowserFallback()` — and if neither engine
+can speak the toggle shows the existing unavailable state
+(`TTS on by default — click TTS once to unlock speech`) instead of failing
+silently. After the first click primes the tab, play-only failures stay on the
+Kokoro path exactly as before. The toggle title carries
+`· click once to unlock speech` until a gesture happens, and `index.html` static
+markup paints the default-on state (`aria-pressed`/`aria-checked` true, label
+`TTS ✓`) so first paint matches `updateTtsToggleUi()`.
+
 ## Verify
 
 ```bash
@@ -182,6 +194,9 @@ curl -sS -b 'bizagent_session=…' http://127.0.0.1:8787/api/tts/health
 # → {"ok":true,"available":true,"url":"http://127.0.0.1:9201",...}
 
 # 3. UI: hard-refresh console → enable TTS → hear Kokoro confirmation (not OS voice).
+#    Fresh profile (no localStorage key) → toggle already reads "TTS ✓" at first
+#    paint; click once to unlock speech. Turning it OFF stores "0" and a reload
+#    keeps it OFF.
 #    Toggle title should include "oddbeaker-tts". Send a message → hub reply also Kokoro.
 #    Debug: localStorage.setItem('bizagent.tts.debug','1'); reload → look for
 #    "[bizagent TTS] server webaudio play" (not "server speak failed → browser").

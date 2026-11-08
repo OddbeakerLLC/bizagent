@@ -2427,6 +2427,143 @@ NODE
     fail "renderMarkdown regression: numbers in chat messages render as literal 'undefined'"
   fi
 
+  # Regression (hub dispatch 2026-11-08): console TTS defaults ON for a fresh
+  # profile, an explicit OFF persists and wins on reload, first paint reflects
+  # the default-on state, and a no-gesture tab degrades gracefully.
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(`${root}/control-plane/public/markdown.js`, 'utf8')
+  + '\n' + fs.readFileSync(`${root}/control-plane/public/app.js`, 'utf8');
+const noop = () => {};
+const el = () => ({
+  addEventListener: noop,
+  textContent: '',
+  innerHTML: '',
+  dataset: {},
+  value: '',
+  style: {},
+  classList: { toggle: noop, add: noop, remove: noop, contains: () => false },
+  setAttribute: noop,
+  getAttribute: () => null,
+  appendChild: noop,
+  removeChild: noop,
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  title: '',
+  disabled: false,
+  checked: false,
+  focus: noop,
+  click: noop,
+});
+const store = new Map();
+const realSetTimeout = globalThis.setTimeout;
+const storage = {
+  getItem: (k) => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => { store.set(k, String(v)); },
+  removeItem: (k) => { store.delete(k); },
+};
+const label = { textContent: '' };
+const btn = {
+  dataset: {},
+  attrs: {},
+  title: '',
+  classes: new Set(),
+  classList: {
+    toggle: (c, on) => { if (on) btn.classes.add(c); else btn.classes.delete(c); },
+    add: (c) => btn.classes.add(c),
+    remove: (c) => btn.classes.delete(c),
+    contains: (c) => btn.classes.has(c),
+  },
+  setAttribute: (k, v) => { btn.attrs[k] = String(v); },
+  querySelector: () => label,
+  addEventListener: noop,
+};
+const sandbox = {
+  document: {
+    getElementById: (id) => (id === 'ttsToggle' ? btn : el()),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: el,
+    addEventListener: noop,
+    body: el(),
+    documentElement: el(),
+  },
+  setInterval: () => 0,
+  setTimeout: (fn, ms) => realSetTimeout(fn, ms),
+  clearInterval: noop,
+  clearTimeout: noop,
+  localStorage: storage,
+  sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  navigator: { userAgent: 'node-test' },
+  location: { hash: '', href: 'http://localhost/', pathname: '/', search: '' },
+  history: { replaceState: noop, pushState: noop },
+  speechSynthesis: undefined,
+  SpeechSynthesisUtterance: function () {},
+  Audio: function () { this.play = () => Promise.resolve(); this.pause = noop; },
+  URL: URL,
+  Blob: function () {},
+  fetch: () => Promise.reject(new Error('no network in test')),
+  EventSource: function () { this.onmessage = null; this.onerror = null; this.close = noop; },
+  console,
+  addEventListener: noop,
+  removeEventListener: noop,
+};
+sandbox.window = sandbox;
+sandbox.self = sandbox;
+sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox);
+
+const KEY = 'bizagent.tts.enabled';
+if (store.size !== 0) { console.error('test storage is not a fresh profile'); process.exit(1); }
+
+// Fresh profile (no stored preference) → TTS ON, and first paint shows it.
+if (sandbox.loadTtsEnabled() !== true) { console.error('fresh profile should default TTS ON'); process.exit(2); }
+sandbox.bindTtsToggle();
+if (!btn.classes.has('active')) { console.error('first paint should show TTS active:', [...btn.classes]); process.exit(3); }
+if (label.textContent !== 'TTS ✓') { console.error('first paint label should read "TTS ✓":', label.textContent); process.exit(4); }
+if (btn.attrs['aria-pressed'] !== 'true' || btn.attrs['aria-checked'] !== 'true') {
+  console.error('first paint aria should be true:', btn.attrs); process.exit(5);
+}
+if (!btn.title.includes('ON')) { console.error('first paint title should read ON:', btn.title); process.exit(6); }
+if (!btn.title.includes('click once to unlock speech')) { console.error('no-gesture hint missing:', btn.title); process.exit(7); }
+
+// Explicit OFF persists (stored as "0", not removed) and wins on reload.
+sandbox.setTtsEnabled(false);
+if (store.get(KEY) !== '0') { console.error('explicit OFF must persist as "0":', store.get(KEY)); process.exit(8); }
+if (sandbox.loadTtsEnabled() !== false) { console.error('explicit OFF must win on reload'); process.exit(9); }
+if (btn.classes.has('active') || label.textContent !== 'TTS') {
+  console.error('OFF paint wrong:', label.textContent, [...btn.classes]); process.exit(10);
+}
+// Explicit ON still persists.
+sandbox.setTtsEnabled(true);
+if (store.get(KEY) !== '1' || sandbox.loadTtsEnabled() !== true) { console.error('explicit ON must persist'); process.exit(11); }
+
+// Graceful autoplay handling: a play-only failure falls back to browser speech
+// only while no user gesture has happened; after the toggle-ON gesture it stays
+// on the Kokoro path (the operator-visible bug fix must not regress).
+if (!sandbox.ttsPlayFailureAllowsBrowserFallback({ code: 'tts_play_failed' })) {
+  console.error('no-gesture play failure should allow browser fallback'); process.exit(12);
+}
+sandbox.primeTtsOnEnable();
+if (sandbox.ttsPlayFailureAllowsBrowserFallback({ code: 'tts_play_failed' })) {
+  console.error('after gesture unlock, play failure must stay on the server path'); process.exit(13);
+}
+
+// Nothing usable (server down + no speechSynthesis) → visible state, not silence.
+sandbox.speakTtsText('Reply ready — see the console.', { raw: true });
+setTimeout(() => {
+  if (!btn.title.includes('No TTS')) { console.error('unavailable state not shown:', btn.title); process.exit(14); }
+  if (!btn.classes.has('tts-unavailable')) { console.error('unavailable class missing:', [...btn.classes]); process.exit(15); }
+  console.log('tts default-on checks ok');
+}, 30);
+NODE
+  then
+    fail "console TTS default-on regression (fresh profile / explicit off / first paint / no-gesture fallback)"
+  fi
+
   # Regression: registry.json changes (new agents, dispatch settings) must be
   # picked up by a long-running control-plane process without a restart.
   if ! node - "$ROOT" <<'NODE'

@@ -1125,18 +1125,24 @@ function ensureTtsResumed() {
   } catch (_) { /* ignore */ }
 }
 
+/**
+ * TTS is ON by default (operator decision 2026-11-08).
+ * Absent key = fresh profile = ON. An explicit choice always wins: '1' = ON,
+ * '0' = explicit OFF — OFF is *stored*, not removed, so it survives reloads.
+ */
 function loadTtsEnabled() {
   try {
-    return __storage.getItem(TTS_STORAGE_KEY) === '1';
+    const raw = __storage.getItem(TTS_STORAGE_KEY);
+    if (raw === null || raw === undefined) return true;
+    return raw === '1';
   } catch (_) {
-    return false;
+    return true;
   }
 }
 
 function saveTtsEnabled(on) {
   try {
-    if (on) __storage.setItem(TTS_STORAGE_KEY, '1');
-    else __storage.removeItem(TTS_STORAGE_KEY);
+    __storage.setItem(TTS_STORAGE_KEY, on ? '1' : '0');
   } catch (_) { /* ignore */ }
 }
 
@@ -1163,6 +1169,8 @@ function updateTtsToggleUi() {
     } else if (ttsEnabled && ttsServerAvailable === false) {
       title += ' · browser voice fallback';
     }
+    // Default-on has no user gesture yet, so browsers can still block speech.
+    if (ttsEnabled && !ttsGestureUnlocked) title += ' · click once to unlock speech';
     btn.title = title;
   }
 }
@@ -1170,6 +1178,15 @@ function updateTtsToggleUi() {
 function setTtsUnavailable(reason) {
   ttsUnavailableReason = reason || '';
   updateTtsToggleUi();
+}
+
+/**
+ * Default-on state with no user gesture yet: when neither engine could speak,
+ * show that on the toggle rather than failing silently.
+ */
+function noteTtsNeedsGesture() {
+  if (ttsUnavailableReason || ttsGestureUnlocked) return;
+  setTtsUnavailable('TTS on by default — click TTS once to unlock speech');
 }
 
 function logTtsSpeakErrorOnce(err) {
@@ -1182,6 +1199,18 @@ function logTtsSpeakErrorOnce(err) {
       ttsSynthSnapshot(),
     );
   } catch (_) { /* ignore */ }
+}
+
+/**
+ * Play-only failure (Kokoro synthesized fine, local playback refused).
+ * Normally stay on the server path — never speechSynthesis (that was the
+ * unwanted fallback the operator heard). Exception: TTS is default-ON and this
+ * tab has had no user gesture yet, so Web Audio / HTMLAudio are autoplay
+ * blocked — browser speechSynthesis is the graceful fallback there.
+ */
+function ttsPlayFailureAllowsBrowserFallback(err) {
+  if (!ttsGestureUnlocked) return true;
+  return !(err && (err.code === 'tts_play_failed' || err.serverOk));
 }
 
 /**
@@ -2182,14 +2211,22 @@ function speakTtsText(text, opts) {
         const msg = String(err && err.message || err || '');
         const playOnly = !!(err && (err.code === 'tts_play_failed' || err.serverOk));
         if (playOnly) {
-          // Kokoro synthesized OK; local play failed. Stay on server path — never
-          // speechSynthesis (that was the unwanted fallback the operator heard).
-          allowBrowserFallback = false;
-          ttsServerAvailable = true;
-          logTtsSpeakErrorOnce(err);
-          logTtsDebug('server play failed (no browser fallback)', msg);
-          if (ttsUnavailableReason) setTtsUnavailable('');
-          updateTtsToggleUi();
+          if (ttsPlayFailureAllowsBrowserFallback(err)) {
+            // Default-on with no gesture yet: playback refused by the autoplay
+            // gate — fall back to browser speech instead of failing silently.
+            allowBrowserFallback = true;
+            logTtsSpeakErrorOnce(err);
+            logTtsDebug('server play blocked (no user gesture yet) → browser', msg);
+          } else {
+            // Kokoro synthesized OK; local play failed. Stay on server path — never
+            // speechSynthesis (that was the unwanted fallback the operator heard).
+            allowBrowserFallback = false;
+            ttsServerAvailable = true;
+            logTtsSpeakErrorOnce(err);
+            logTtsDebug('server play failed (no browser fallback)', msg);
+            if (ttsUnavailableReason) setTtsUnavailable('');
+            updateTtsToggleUi();
+          }
         } else {
           // Transport/API failure — real service problem.
           if (/synthesize HTTP|missing proxied|Failed to fetch|NetworkError|TTS unavailable|502|503|401|403/i.test(msg)
@@ -2205,14 +2242,16 @@ function speakTtsText(text, opts) {
       if (!ttsPlayStillActive(gen)) return;
       if (!allowBrowserFallback) return;
       softUnlockBrowserSynth();
-      speakViaBrowserTts(spokenText, gen);
+      if (!speakViaBrowserTts(spokenText, gen)) noteTtsNeedsGesture();
       updateTtsToggleUi();
     })();
     return true;
   }
 
   softUnlockBrowserSynth();
-  return speakViaBrowserTts(spokenText, gen);
+  const browserSpoke = speakViaBrowserTts(spokenText, gen);
+  if (!browserSpoke) noteTtsNeedsGesture();
+  return browserSpoke;
 }
 
 function speakHubReply(text) {
