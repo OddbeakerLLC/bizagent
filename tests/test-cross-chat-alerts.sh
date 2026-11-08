@@ -58,6 +58,22 @@ dispatcher.recordAgentError(hub, "bizagent", 1, "boom again", null);
 assert((conv.getConversation(hub, b.id).messages || []).some((m) => m.role === "status"),
   "falls back to active chat when origin gone");
 
+// Chat-product binding (2026-11-08): status pointers share the alert shape but stay
+// a distinct kind, carry the chat the report landed in, and clear when the operator
+// opens the chat they were viewing.
+const boundChat = conv.createConversation(hub, "Bound chat");
+conv.updateConversationProducts(hub, boundChat.id, "bizagent");
+conv.recordCrossChatAlert(hub, b.id, "bizagent", "nightly report", {
+  kind: "pointer",
+  destination_conversation_id: boundChat.id,
+});
+alerts = conv.listCrossChatAlerts(hub);
+const pointer = alerts.find((x) => x.kind === "pointer");
+assert(pointer && pointer.destination_conversation_id === boundChat.id, "pointer stored with its destination chat");
+assert(alerts.some((x) => (x.kind || "error") === "error"), "error alert kept alongside the pointer (kinds stay distinct)");
+conv.clearCrossChatAlerts(hub, b.id);
+assert(!conv.listCrossChatAlerts(hub).some((x) => x.kind === "pointer"), "pointer clears when the viewing chat is opened");
+
 fs.rmSync(hub, { recursive: true, force: true });
 console.log("  ok: cross-chat-alerts");
 ' || fail "cross-chat-alerts node test"

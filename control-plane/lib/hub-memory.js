@@ -27,8 +27,15 @@ function hubTurnsDir(hub) {
   return path.join(hubPromptDir(hub), 'turns');
 }
 
-function hubSessionFile(hub, sessionOrUserId) {
-  return path.join(appDir(hub), 'hub-session.md');
+/**
+ * Session memory file. Per-chat since 2026-11-08: `.bizagent/sessions/<conv-id>.md`
+ * so hub context stays scoped to that chat's bound products. A hub-level file
+ * remains as the fallback when no conversation is known (first-run / boot).
+ */
+function hubSessionFile(hub, conversation) {
+  const id = typeof conversation === 'string' ? conversation : (conversation && conversation.id);
+  if (!id) return path.join(appDir(hub), 'hub-session.md');
+  return path.join(appDir(hub), 'sessions', `${id}.md`);
 }
 
 function hubRuntimeCwd(hub) {
@@ -71,6 +78,7 @@ function classifyRegistryState(hub) {
  */
 function deriveHubRuntimePrompt(hub) {
   const sessionRel = path.relative(hub, hubSessionFile(hub));
+  const sessionsRel = path.relative(hub, path.join(appDir(hub), 'sessions'));
   const hubAbs = path.resolve(hub);
   const regState = classifyRegistryState(hub);
   const systemStateBlock = (() => {
@@ -156,9 +164,9 @@ function deriveHubRuntimePrompt(hub) {
     '## Channel rules (non-negotiable)',
     '',
     '- **Stdout is debug only.** Nothing you print is shown to the operator.',
-    '- **Operator-visible text:** write markdown body only to `RESERVED_REPLY_BODY` (CP-pre-created). Free-form `outbox/` for `to: user` is banned.',
-    '- **One operator-visible reply per turn** — never both reserved body and `write-message --to user`.',
+    '- **Operator-visible text:** write markdown body only to `RESERVED_REPLY_BODY` (CP-pre-created); free-form `outbox/` for `to: user` is banned — exactly one reply per turn.',
     '- Product-agent mail uses write-message. Agent→hub: **at most one** short user-visible summary (no duplicate "done" notices).',
+    '- **Chat routing:** answer in the asking chat; proactive reports → bound chat (max 3 products) or General + pointer; unassigned chats are chat-only (no agent dispatch).',
     '',
     '## This-turn order (outbox-first)',
     '',
@@ -194,9 +202,8 @@ function deriveHubRuntimePrompt(hub) {
     '',
     '## Runtime Memory (CP-owned)',
     '',
-    `\`${sessionRel}\` is current session memory (rolling summary + recent turns). The control plane already compacted it.`,
-    '**Read-only for you.** Do not compress, rewrite, or "keep compact" this file — the CP owns that.',
-    'Use the **Pending mail** and **Session** sections of the turn prompt when provided; open the session file only if the turn prompt lacks what you need.',
+    `\`${sessionsRel}/<conversation_id>.md\` is **this chat's** session memory (rolling summary + recent turns). The CP already compacted it.`,
+    '**Read-only for you.** Do not compress, rewrite, or "keep compact" it — the CP owns that. Use the **Pending mail** / **Session** sections first; open the file only if the turn prompt lacks what you need.',
     '',
     '## On-demand references (open only if this turn needs them)',
     '',
@@ -470,6 +477,9 @@ function isConsoleOperatorMail(file, body) {
  * else oldest pending mail with a conversation_id (FIFO agent reports).
  */
 function pickPendingConversationId(hub) {
+  // Lazy require: conversations → hub-memory at module load; this keeps the
+  // route-time stamping and the turn-time choice on the SAME resolver.
+  const conversations = require('./conversations');
   recoverPendingConversationIds(hub);
   const pending = listPendingInboxFiles(hub);
   let oldest = '';
@@ -481,7 +491,12 @@ function pickPendingConversationId(hub) {
     } catch (_err) {
       continue;
     }
-    const cid = parseConversationId(body);
+    const resolved = conversations.resolveConversationForMail(hub, {
+      from: parseFrom(body),
+      to: parseTo(body),
+      conversationId: parseConversationId(body),
+    });
+    const cid = resolved.conversationId;
     if (!cid) continue;
     if (!oldest) oldest = cid;
     if (isConsoleOperatorMail(file, body)) newestOperator = cid;
@@ -498,14 +513,6 @@ function buildHubTurnPrompt(hub, opts) {
   ensureHubRuntimePrompt(hub);
   ensureDir(hubTurnsDir(hub));
   const hubAbs = path.resolve(hub);
-  const sessionPath = hubSessionFile(hub);
-  const sessionRel = path.relative(hub, sessionPath);
-  let sessionBody = '';
-  try {
-    sessionBody = fs.readFileSync(sessionPath, 'utf8');
-  } catch (_err) {
-    sessionBody = '_No session file yet._';
-  }
   // Agent→hub mail often has no conversation_id. Steal one from archive
   // (same sender via from:/filename) so a cold launch cannot crash the CP.
   recoverPendingConversationIds(hub);
@@ -541,6 +548,22 @@ function buildHubTurnPrompt(hub, opts) {
   // If somehow missing, fail fast rather than cold-launch
   if (!convId) {
     throw new Error('hub-turn-prompt: conversation_id is required (warm-launch guarantee violated)');
+  }
+
+  // Per-chat session memory: `.bizagent/sessions/<conv-id>.md`, scoped to the
+  // products bound to this chat (written only on mutation, not on poll).
+  const conversations = require('./conversations');
+  const chatConv = conversations.getConversation(hub, convId) || {};
+  const boundProducts = chatConv.products || [];
+  const chatOnly = conversations.isUnassignedConversation(hub, convId);
+  const sessionPath = hubSessionFile(hub, convId);
+  ensureDir(path.dirname(sessionPath));
+  const sessionRel = path.relative(hub, sessionPath);
+  let sessionBody = '';
+  try {
+    sessionBody = fs.readFileSync(sessionPath, 'utf8');
+  } catch (_err) {
+    sessionBody = '_No session file for this chat yet._';
   }
 
   // Lazy require avoids circular load (conversations → hub-memory → hub-turn-safety).
@@ -599,8 +622,12 @@ function buildHubTurnPrompt(hub, opts) {
     '',
     `- Hub absolute path: \`${hubAbs}\``,
     `- conversation_id: \`${convId}\``,
+    `- Chat products (bound): ${boundProducts.length ? boundProducts.join(', ') : 'none — explicit no-product chat'}`,
+    ...(chatOnly
+      ? ['- **Chat-only chat:** no product/agent association. Answer directly here; do not dispatch a product agent and do not use product-scoped journal/mail routing. Ask the operator to bind a product if this needs product work.']
+      : []),
     `- RESERVED_REPLY_BODY: \`${reservedBodyAbs}\``,
-    `- Session file (read-only, already compacted by CP): \`${sessionRel}\``,
+    `- Session file for this chat (read-only, already compacted by CP): \`${sessionRel}\``,
     `- Pending inbox files: ${pending.length}`,
     '',
     deliveryBlock,
@@ -864,10 +891,12 @@ function renderHubSession(conversation, hub) {
   const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
   const recent = messages.slice(-MAX_RECENT_TURNS);
   const older = messages.slice(0, Math.max(0, messages.length - recent.length));
+  const products = Array.isArray(conversation.products) ? conversation.products : [];
   return [
     '# Hub Session Memory',
     '',
     `Conversation: ${conversation.name || 'Conversation'}`,
+    `Bound products: ${products.length ? products.join(', ') : 'none (General)'}`,
     `Started: ${conversation.created_at || 'unknown'}`,
     `Updated: ${conversation.updated_at || new Date().toISOString()}`,
     '',
@@ -882,13 +911,10 @@ function renderHubSession(conversation, hub) {
   ].join('\n');
 }
 
-function resetHubSession(hub, conversation, sessionOrUserId) {
+function resetHubSession(hub, conversation) {
   ensureDir(appDir(hub));
-  const uid =
-    sessionOrUserId ||
-    (conversation && conversation.user_id) ||
-    null;
-  const file = hubSessionFile(hub, uid);
+  const file = hubSessionFile(hub, conversation);
+  ensureDir(path.dirname(file));
   const conv = {
     name: (conversation && conversation.name) || 'Conversation',
     created_at: (conversation && conversation.created_at) || new Date().toISOString(),
@@ -899,13 +925,10 @@ function resetHubSession(hub, conversation, sessionOrUserId) {
   return file;
 }
 
-function compactHubSession(hub, conversation, sessionOrUserId) {
+function compactHubSession(hub, conversation) {
   ensureDir(appDir(hub));
-  const uid =
-    sessionOrUserId ||
-    (conversation && conversation.user_id) ||
-    null;
-  const file = hubSessionFile(hub, uid);
+  const file = hubSessionFile(hub, conversation);
+  ensureDir(path.dirname(file));
   const body = renderHubSession(conversation || {}, hub);
   // Bulky-write guard (disk-full protection): session dumps >=256 KB are
   // refused when free space is inside the 1.5 GB reserve. compactHubSession

@@ -147,6 +147,18 @@ function runStartupRecovery(config, dispatcher) {
     actions.tmp_files_removed = cleanTmpFiles(appDir(hub), TMP_MAX_AGE_MS);
   } catch (_err) { /* best-effort */ }
 
+  // 6. Chat-product binding (2026-11-08): mark bindings that point at products
+  //    no longer in the registry (never silently prune) and make sure a
+  //    configured hub has its pinned General landing chat.
+  try {
+    const conversations = require('./conversations');
+    actions.stale_bindings_marked = conversations.syncStaleBindings(hub);
+    if (conversations.registrySlugs(hub).length) {
+      const general = conversations.ensureGeneralConversation(hub);
+      if (general) actions.general_conversation = general.id;
+    }
+  } catch (_err) { /* best-effort */ }
+
   try {
     logEvent(hub, {
       event: 'control_plane_recovery',

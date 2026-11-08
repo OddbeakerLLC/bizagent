@@ -953,6 +953,52 @@ body.logs-page {
 .auth-controls button.btn-secondary:hover {
   background: #f3f4f6;
 }
+/* Chat-product binding (2026-11-08): explicit product state per chat. */
+.chat-products {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: min(320px, 40vw);
+}
+.chat-products-summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: #4b5563;
+}
+.chat-products-label {
+  color: #6b7280;
+  font-weight: 500;
+  margin-right: 6px;
+}
+.chat-products-state {
+  color: #172033;
+}
+.chat-products-state.is-none {
+  color: #6b7280;
+  font-style: italic;
+}
+.chat-products-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  background: #f9fafb;
+}
+.chat-products-body select {
+  min-width: 200px;
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #ffffff;
+}
+.chat-products-note {
+  margin: 0;
+  font-size: 12px;
+  color: #6b7280;
+}
 .nav-drawer-toggle {
   width: 40px;
   height: 40px;
@@ -1623,6 +1669,9 @@ button {
   line-height: 1.4;
   background: #9a6b00;
   color: #fff;
+}
+.cross-chat-alert.pointer {
+  background: #374151;
 }
 .cross-chat-alert-link {
   all: unset;

@@ -82,6 +82,7 @@ const {
   createConversation,
   clearCrossChatAlerts,
   deleteConversation,
+  ensureGeneralConversation,
   getConversation,
   listConversations,
   listCrossChatAlerts,
@@ -89,6 +90,7 @@ const {
   setActiveConversation,
   shouldStartNewConversation,
   STATUS_ERROR_KIND,
+  updateConversationProducts,
   writeHubInboxMessage,
 } = require("./lib/conversations");
 const {
@@ -937,14 +939,28 @@ async function handleApi(config, req, res) {
 
   if (url.pathname === "/api/conversations" && req.method === "POST") {
     const body = await parseBody(req);
-    return send(res, 200, createConversation(config.hub, body.name));
+    return send(res, 200, createConversation(config.hub, body.name, {
+      products: body.products,
+      kind: body.kind,
+      pinned: body.pinned,
+      // Explicit "no product" choice (chat-only scratch channel).
+      unassigned: body.unassigned === true,
+    }));
   }
 
   // --- Cross-conversation waiting indicator (lightweight, one line) ---
+  // kind 'error' = an agent error waiting in another chat; kind 'pointer' = a
+  // proactive report that landed in the chat bound to that product. Both render
+  // as a status-bar link (never spoken by TTS).
   if (url.pathname === "/api/cross-chat-alerts" && req.method === "GET") {
     const alerts = listCrossChatAlerts(config.hub).map((a) => {
       const conv = getConversation(config.hub, a.conversationId);
-      return { ...a, conversation_name: (conv && conv.name) || "" };
+      const destination = getConversation(config.hub, a.destination_conversation_id || a.conversationId);
+      return {
+        ...a,
+        conversation_name: (conv && conv.name) || "",
+        destination_name: (destination && destination.name) || "",
+      };
     });
     return send(res, 200, { alerts });
   }
@@ -1779,6 +1795,17 @@ async function handleApi(config, req, res) {
     return send(res, 200, { ok: true, id });
   }
 
+  // Chat-product binding: operator confirms an inferred binding or overrides it
+  // by hand. A manual change clears products_inferred; cap is 3 products per chat.
+  if (conversationMatch && req.method === "PATCH") {
+    const id = decodeURIComponent(conversationMatch[1]);
+    const body = await parseBody(req);
+    const conv = updateConversationProducts(config.hub, id, body.products);
+    if (!conv) return send(res, 404, { error: "conversation not found" });
+    didChangeState();
+    return send(res, 200, conv);
+  }
+
   const messageMatch = url.pathname.match(
     /^\/api\/conversations\/([^/]+)\/messages$/,
   );
@@ -1786,8 +1813,14 @@ async function handleApi(config, req, res) {
     const start = Date.now();
     const body = await parseBody(req);
     const content = body.content || "";
+    const askedIn = getConversation(config.hub, decodeURIComponent(messageMatch[1]));
+    // "new conversation X" inside a bound chat inherits that chat's products;
+    // inside an explicitly unassigned chat it inherits nothing (stays chat-only).
     const id = shouldStartNewConversation(content)
-      ? createConversation(config.hub, conversationNameFromContent(content)).id
+      ? createConversation(config.hub, conversationNameFromContent(content), {
+          products: (askedIn && askedIn.products) || [],
+          unassigned: !!(askedIn && askedIn.unassigned === true),
+        }).id
       : decodeURIComponent(messageMatch[1]);
 
     // Optional attachments: paths must already exist under uploads/ or company/.

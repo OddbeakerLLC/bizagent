@@ -136,4 +136,26 @@ if (!/MINIMAL/i.test(p2)) process.exit(6);
 process.exit(0);
 NODE
 
+# Chat-product binding (2026-11-08): pinned General landing chat exists only for
+# configured hubs. A first-run hub keeps the installer Welcome chat — no General.
+if command -v node >/dev/null 2>&1; then
+node - "$ROOT" <<'NODE' || fail "pinned General checks failed"
+const fs = require('fs'); const path = require('path'); const os = require('os');
+const conv = require(path.join(process.argv[2], 'control-plane/lib/conversations'));
+const err = (m) => { console.error('FAIL: ' + m); process.exit(1); };
+const firstRun = fs.mkdtempSync(path.join(os.tmpdir(), 'first-run-general-'));
+fs.writeFileSync(path.join(firstRun, 'registry.json'), JSON.stringify({ org: '', products: [] }));
+if (conv.ensureGeneralConversation(firstRun) !== null) err('first-run hub must not get a pinned General');
+const configured = fs.mkdtempSync(path.join(os.tmpdir(), 'configured-general-'));
+fs.writeFileSync(path.join(configured, 'registry.json'), JSON.stringify({ org: 'X', products: [{ slug: 'a', name: 'A' }] }));
+const general = conv.ensureGeneralConversation(configured);
+if (!general || !general.pinned || conv.conversationKind(general) !== 'general') err('configured hub missing pinned General');
+if (general.unassigned !== true) err('General must be an explicit no-product chat');
+if (conv.ensureGeneralConversation(configured).id !== general.id) err('General creation must be idempotent');
+fs.rmSync(firstRun, { recursive: true, force: true });
+fs.rmSync(configured, { recursive: true, force: true });
+process.exit(0);
+NODE
+fi
+
 echo "  ok: first-run seed + install wiring"

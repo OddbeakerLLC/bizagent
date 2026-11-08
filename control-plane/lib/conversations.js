@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { appDir, ensureDir, readJson } = require('./config');
+const { appDir, ensureDir, readJson, loadRegistry } = require('./config');
 const { writeJsonAtomic } = require('./atomic-state');
 const { assertBulkyWriteAllowed } = require('./log-caps');
 const { compactHubSession, resetHubSession } = require('./hub-memory');
@@ -10,6 +10,11 @@ const MAX_STORED_MESSAGES = 48;
 const KEEP_RECENT_MESSAGES = 24;
 const MAX_SUMMARY_CHARS = 6000;
 const VALID_CONVERSATION_ID = /^\d{4}-\d{2}-\d{2}-[a-z0-9-]+-[a-f0-9]{6}$/;
+/** Chat-product binding (2026-11-08): a chat may be bound to at most 3 products. */
+const MAX_BOUND_PRODUCTS = 3;
+/** Pinned landing chat for configured hubs: hub topics + products with no chat of their own. */
+const GENERAL_CONVERSATION_NAME = 'General';
+const VALID_SLUG = /^[A-Za-z0-9._-]+$/;
 const userInboxDeliveries = new Map();
 
 function conversationsDir(hub) {
@@ -60,6 +65,237 @@ function compactConversation(conv) {
   return conv;
 }
 
+// --- Chat-product binding (2026-11-08) -------------------------------------
+// A conversation is bound to the registry products it pertains to. Routing for
+// agent→hub mail is deterministic: the chat the operator asked in owns answers;
+// unsolicited reports go to the chat bound to the sender product.
+
+/** Clean a product list: registry slugs only, deduped, capped at MAX_BOUND_PRODUCTS. */
+function normalizeProducts(value) {
+  const raw = Array.isArray(value) ? value : value == null ? [] : [value];
+  const out = [];
+  for (const item of raw) {
+    const slug = String(item || '').trim().toLowerCase();
+    if (!slug || !VALID_SLUG.test(slug)) continue;
+    if (!out.includes(slug)) out.push(slug);
+    if (out.length >= MAX_BOUND_PRODUCTS) break;
+  }
+  return out;
+}
+
+function conversationKind(conv) {
+  if (!conv) return 'general';
+  if (conv.kind === 'product') return 'product';
+  return normalizeProducts(conv.products).length ? 'product' : 'general';
+}
+
+/**
+ * Explicitly unassigned chat (2026-11-08): the operator chose "no product", so
+ * the absence of an association is a stored state, not a gap the UI has to
+ * guess at. Chats created before this feature have no `unassigned` field and
+ * keep their existing routing behaviour.
+ *
+ * An unassigned chat is chat-only: the hub answers directly there, no product
+ * agent work is attributed to it, and product reports are never routed into it
+ * (the resolver sends them to the bound chat or pinned General).
+ */
+function isUnassignedConversation(hub, idOrConv) {
+  const conv = typeof idOrConv === 'string' ? getConversation(hub, idOrConv) : idOrConv;
+  if (!conv) return false;
+  return conv.unassigned === true && normalizeProducts(conv.products).length === 0;
+}
+
+function registrySlugs(hub) {
+  try {
+    const registry = loadRegistry(hub);
+    return (Array.isArray(registry.products) ? registry.products : [])
+      .map((p) => String((p && p.slug) || '').trim().toLowerCase())
+      .filter(Boolean);
+  } catch (_err) {
+    return [];
+  }
+}
+
+function isProductSlug(hub, slug) {
+  return registrySlugs(hub).includes(String(slug || '').trim().toLowerCase());
+}
+
+/** All conversations bound to a slug, newest activity first. */
+function boundConversationsForProduct(hub, slug) {
+  const want = String(slug || '').trim().toLowerCase();
+  if (!want) return [];
+  return listConversations(hub)
+    .filter((conv) => normalizeProducts(conv.products).includes(want))
+    .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+}
+
+/** The pinned General chat, or null (never created on the read path). */
+function getGeneralConversation(hub) {
+  const list = listConversations(hub);
+  const general = list.find((conv) => conv.pinned && conversationKind(conv) === 'general');
+  return general || null;
+}
+
+/**
+ * Pinned General landing chat — created only for configured hubs (first-run
+ * keeps the installer Welcome chat). Idempotent.
+ */
+function ensureGeneralConversation(hub) {
+  const existing = getGeneralConversation(hub);
+  if (existing) return existing;
+  if (!registrySlugs(hub).length) return null;
+  ensureDir(conversationsDir(hub));
+  return createConversation(hub, GENERAL_CONVERSATION_NAME, {
+    kind: 'general',
+    pinned: true,
+    unassigned: true,
+  });
+}
+
+/**
+ * Bind/unbind products on a conversation. Manual change = operator override,
+ * so the inferred flag clears. Cap MAX_BOUND_PRODUCTS enforced here.
+ */
+function updateConversationProducts(hub, id, products, opts = {}) {
+  const conv = getConversation(hub, id);
+  if (!conv) return null;
+  const next = normalizeProducts(products);
+  conv.products = next;
+  conv.kind = next.length ? 'product' : 'general';
+  // An operator-set empty list is an explicit "no product" state, not a gap.
+  conv.unassigned = next.length === 0;
+  if (opts.inferred === true) conv.products_inferred = true;
+  else conv.products_inferred = false;   // manual override / confirmation
+  const known = new Set(registrySlugs(hub));
+  conv.products_stale = normalizeProducts(conv.products_stale || []).filter((s) => known.has(s));
+  return saveConversation(hub, conv);
+}
+
+/**
+ * Product deleted from the registry: mark the binding stale on every chat that
+ * still references it. Never prune silently — the operator may re-add the slug.
+ */
+function markStaleBindings(hub, slug) {
+  const want = String(slug || '').trim().toLowerCase();
+  if (!want) return 0;
+  let changed = 0;
+  for (const entry of listConversations(hub)) {
+    const conv = getConversation(hub, entry.id);
+    if (!conv) continue;
+    const stale = normalizeProducts(conv.products_stale || []);
+    if (normalizeProducts(conv.products).includes(want) && !stale.includes(want)) {
+      stale.push(want);
+      conv.products_stale = stale;
+      conv.binding_stale = true;
+      saveConversation(hub, conv);
+      changed += 1;
+    }
+  }
+  return changed;
+}
+
+/** Compare every binding against the registry and mark dangling slugs stale. */
+function syncStaleBindings(hub) {
+  const known = new Set(registrySlugs(hub));
+  let changed = 0;
+  for (const entry of listConversations(hub)) {
+    const conv = getConversation(hub, entry.id);
+    if (!conv) continue;
+    const dangling = normalizeProducts(conv.products).filter((s) => !known.has(s));
+    const stale = normalizeProducts(conv.products_stale || []);
+    const additions = dangling.filter((s) => !stale.includes(s));
+    if (!additions.length) continue;
+    conv.products_stale = normalizeProducts(stale.concat(additions));
+    conv.binding_stale = true;
+    saveConversation(hub, conv);
+    changed += 1;
+  }
+  return changed;
+}
+
+/**
+ * Chat that owns a work item — the chat the operator asked in.
+ * agent→hub: the chat that dispatched this slug's work (pending-agent-work).
+ * hub→user / hub→agent: the conversation that started the in-flight hub turn.
+ */
+function workItemOriginConversationId(hub, mail = {}) {
+  const from = String(mail.from || '').trim().toLowerCase();
+  const to = String(mail.to || '').trim().toLowerCase();
+  if (to === 'hub' && from && from !== 'hub' && from !== 'user') {
+    return getPendingAgentWorkConversationId(hub, from);
+  }
+  return getOriginatingConversationId(hub);
+}
+
+/**
+ * The one resolver used by BOTH route-time stamping (mail.js) and turn-time
+ * conversation choice (dispatcher/hub-memory) — they must never disagree.
+ *
+ * Priority (operator rule, 2026-11-08):
+ *   1. explicit conversation_id — always wins.
+ *   2. the chat the operator asked the question in (work-item origin).
+ *   3. unsolicited report (no operator input pending): the chat bound to the
+ *      sender product; multiple → most recently active bound chat.
+ *   4. pinned General.
+ *   5. the chat the operator is currently viewing.
+ * Returns { conversationId, pointerConversationId, reason, proactive }.
+ * The pointer (status role, never spoken by TTS) goes to the viewing chat when
+ * a proactive report lands somewhere else.
+ */
+function resolveConversationForMail(hub, mail = {}) {
+  const from = String(mail.from || '').trim().toLowerCase();
+  const to = String(mail.to || '').trim().toLowerCase();
+  const explicit = String(mail.conversationId || '').trim();
+  if (explicit && VALID_CONVERSATION_ID.test(explicit)) {
+    // A mail that already carries a conversation_id always wins — including ids
+    // recovered from inbox-archive by same sender (hub-memory), where the chat
+    // file may be gone. Callers that need a live chat check existence.
+    return { conversationId: explicit, pointerConversationId: null, reason: 'explicit', proactive: false };
+  }
+
+  const origin = workItemOriginConversationId(hub, { from, to });
+  const proactive = !origin;
+  let destination = origin;
+  let reason = origin ? 'origin' : '';
+
+  if (!destination && proactive && isProductSlug(hub, from)) {
+    const bound = boundConversationsForProduct(hub, from);
+    if (bound.length) {
+      destination = bound[0].id;
+      reason = 'bound';
+    }
+  }
+  if (!destination) {
+    const general = getGeneralConversation(hub);
+    if (general) {
+      destination = general.id;
+      reason = 'general';
+    }
+  }
+  if (!destination) {
+    const active = getActiveConversationId(hub, STAMP_ACTIVE_MAX_AGE_MS);
+    // Chat-only guard: an explicitly unassigned chat never receives a proactive
+    // product report (the hub answers directly there). Answers to a question
+    // asked in that chat still land in it via the origin branch above.
+    if (active && !(proactive && isUnassignedConversation(hub, active))) {
+      destination = active;
+      reason = 'active';
+    }
+  }
+
+  let pointerConversationId = null;
+  if (proactive && destination) {
+    const viewing = getActiveConversationId(hub, STAMP_ACTIVE_MAX_AGE_MS);
+    if (viewing && viewing !== destination) pointerConversationId = viewing;
+  }
+  return {
+    conversationId: destination || null,
+    pointerConversationId,
+    reason: reason || 'none',
+    proactive,
+  };
+}
+
 function shouldStartNewConversation(content) {
   return /^(new conversation|start new conversation|new topic|change topic)\b/i.test(String(content || '').trim());
 }
@@ -94,15 +330,40 @@ function listConversations(hub) {
     .filter((name) => name.endsWith('.json'))
     .map((name) => readJson(path.join(conversationsDir(hub), name), null))
     .filter(Boolean)
-    .map((conv) => ({ id: conv.id, name: conv.name, updated_at: conv.updated_at }))
+    .map((conv) => ({
+      id: conv.id,
+      name: conv.name,
+      updated_at: conv.updated_at,
+      products: normalizeProducts(conv.products),
+      kind: conversationKind(conv),
+      pinned: conv.pinned === true,
+      products_inferred: conv.products_inferred === true,
+      products_stale: normalizeProducts(conv.products_stale || []),
+      unassigned: conv.unassigned === true && normalizeProducts(conv.products).length === 0,
+    }))
     .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
 }
 
-function createConversation(hub, name) {
+function createConversation(hub, name, opts = {}) {
   ensureDir(conversationsDir(hub));
   const now = new Date().toISOString();
   const id = `${now.slice(0, 10)}-${slugify(name)}-${Math.random().toString(16).slice(2, 8)}`;
-  const conv = { id, name: name || 'Conversation', created_at: now, updated_at: now, summary: '', messages: [] };
+  const products = normalizeProducts(opts.products);
+  const conv = {
+    id,
+    name: name || 'Conversation',
+    created_at: now,
+    updated_at: now,
+    summary: '',
+    messages: [],
+    products,
+    kind: opts.kind || (products.length ? 'product' : 'general'),
+    pinned: opts.pinned === true,
+    products_inferred: opts.products_inferred === true,
+    unassigned: opts.unassigned === true && products.length === 0,
+  };
+  const stale = normalizeProducts(opts.products_stale || []);
+  if (stale.length) conv.products_stale = stale;
   fs.writeFileSync(safeConversationFile(hub, id), `${JSON.stringify(conv, null, 2)}\n`);
   resetHubSession(hub, conv);
   return conv;
@@ -116,7 +377,9 @@ function getConversation(hub, id) {
     return null;
   }
   const conv = readJson(file, null);
-  if (conv) compactHubSession(hub, conv);
+  // Session compaction is mutation-scoped only (saveConversation / createConversation).
+  // getConversation runs on every WS/SSE poll, so compaction here would rewrite
+  // the per-chat session file on each poll.
   return conv;
 }
 
@@ -389,6 +652,11 @@ function writePendingAgentWork(hub, bySlug) {
  */
 function recordPendingAgentWork(hub, slug, conversationId) {
   if (!slug || !conversationId || !getConversation(hub, conversationId)) return false;
+  // Chat-only guard (2026-11-08): an explicitly unassigned chat must not own
+  // product-agent work — the hub answers directly there, so agent replies are
+  // never attributed back into a scratch chat (they go to the bound chat or
+  // pinned General). Chats with no `unassigned` flag keep old behaviour.
+  if (isUnassignedConversation(hub, conversationId)) return false;
   const bySlug = readPendingAgentWork(hub);
   const key = String(slug);
   const now = new Date().toISOString();
@@ -512,16 +780,21 @@ function writeCrossChatAlerts(hub, alerts) {
  * Remember that conversationId has an unread agent error waiting.
  * One entry per (conversation, slug); newest wins; bounded list.
  */
-function recordCrossChatAlert(hub, conversationId, slug, title) {
+function recordCrossChatAlert(hub, conversationId, slug, title, opts = {}) {
   if (!conversationId || !getConversation(hub, conversationId)) return false;
+  const kind = String(opts.kind || 'error');
+  const destination = String(opts.destination_conversation_id || conversationId);
+  if (destination !== conversationId && !getConversation(hub, destination)) return false;
   const alerts = readCrossChatAlerts(hub);
   const next = alerts.filter(
-    (a) => !(a && a.conversationId === conversationId && a.slug === slug),
+    (a) => !(a && a.conversationId === conversationId && a.slug === slug && (a.kind || 'error') === kind),
   );
   next.push({
     conversationId: String(conversationId),
     slug: String(slug || ''),
     title: String(title || 'agent error').slice(0, 120),
+    kind,
+    destination_conversation_id: destination,
     ts: new Date().toISOString(),
   });
   writeCrossChatAlerts(hub, next.slice(-CROSS_CHAT_ALERT_MAX_ENTRIES));
@@ -703,29 +976,17 @@ function getOriginatingConversationId(hub) {
 }
 
 /**
- * Id to stamp on mail missing conversation_id.
- *
- * When fromSlug is set (agent→hub completions):
- *   1. pending hub→agent work for that slug — the chat that dispatched the agent
- *   2. last-viewed console chat (long TTL) — last resort only
- *   Never use the in-flight hub turn: that is whichever chat the operator is
- *   talking to *now*, and must not steal another product's completion mail.
- *
- * When fromSlug is absent (hub→user and other unscoped mail):
- *   1. in-flight originating hub turn (never overridden by active UI chat)
- *   2. last-viewed console chat (long TTL) — last resort only
+ * Id to stamp on mail missing conversation_id — thin wrapper over the single
+ * shared resolver (resolveConversationForMail) so route-time stamping and
+ * turn-time conversation choice can never disagree.
  *
  * @param {string} [fromSlug] - product agent slug when routing agent→hub mail
  */
 function getStampConversationId(hub, fromSlug) {
-  if (fromSlug) {
-    const pending = getPendingAgentWorkConversationId(hub, fromSlug);
-    if (pending) return pending;
-    return getActiveConversationId(hub, STAMP_ACTIVE_MAX_AGE_MS);
-  }
-  const originating = getOriginatingConversationId(hub);
-  if (originating) return originating;
-  return getActiveConversationId(hub, STAMP_ACTIVE_MAX_AGE_MS);
+  const mail = fromSlug
+    ? { from: fromSlug, to: 'hub' }
+    : { from: 'hub', to: 'user' };
+  return resolveConversationForMail(hub, mail).conversationId;
 }
 
 function deleteConversation(hub, id) {
@@ -765,17 +1026,23 @@ module.exports = {
   PENDING_AGENT_WORK_MAX_AGE_MS,
   AGENT_COMPLETION_KIND,
   AGENT_COMPLETION_TEXT,
+  GENERAL_CONVERSATION_NAME,
+  MAX_BOUND_PRODUCTS,
   activeConversationFile,
   appendMessage,
   assertValidConversationId,
+  boundConversationsForProduct,
+  conversationKind,
   conversationNameFromContent,
   clearPendingAgentWorkForConversation,
   clearCrossChatAlerts,
   createConversation,
   deleteConversation,
+  ensureGeneralConversation,
   frontmatterValue,
   getActiveConversationId,
   getConversation,
+  getGeneralConversation,
   getOriginatingConversationId,
   getPendingAgentWorkConversationId,
   getStampConversationId,
@@ -786,10 +1053,14 @@ module.exports = {
     const msgs = (conv && Array.isArray(conv.messages)) ? conv.messages : [];
     return isNearDuplicateHubReply(msgs, body);
   },
+  isProductSlug,
+  isUnassignedConversation,
   LAUNCH_ACK_KIND,
   LAUNCH_ACK_TEXT,
   listConversations,
   listCrossChatAlerts,
+  markStaleBindings,
+  normalizeProducts,
   pendingAgentWorkFile,
   postAgentCompletionNotice,
   postLaunchAck,
@@ -797,6 +1068,8 @@ module.exports = {
   recordPendingAgentWork,
   recordCrossChatAlert,
   recordUserInboxDelivery,
+  registrySlugs,
+  resolveConversationForMail,
   setActiveConversation,
   saveConversation,
   shouldStartNewConversation,
@@ -806,7 +1079,10 @@ module.exports = {
   stripLaunchAcks,
   stripTransientStatuses,
   supersedeLaunchAcks,
+  syncStaleBindings,
+  updateConversationProducts,
   userInbox,
+  workItemOriginConversationId,
   writeFileUnique,
   writeHubInboxMessage,
 };

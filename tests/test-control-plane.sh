@@ -2871,7 +2871,10 @@ if (!turn.includes('Hi') || !turn.includes('2026-07-24-test-abc123')) {
   console.error('turn prompt missing pending mail body or conversation_id');
   process.exit(5);
 }
-if (!turn.includes(path.basename(hubSessionFile(hub))) && !/hub-session\.md/.test(turn)) {
+// Per-chat session memory (2026-11-08): the turn prompt points at this chat's file
+// (`.bizagent/sessions/<conversation_id>.md`); the hub-level file stays the fallback.
+const chatSession = path.basename(hubSessionFile(hub, '2026-07-24-test-abc123'));
+if (!turn.includes(chatSession) && !/hub-session\.md/.test(turn)) {
   console.error('turn prompt missing session pointer');
   process.exit(6);
 }
@@ -3380,7 +3383,12 @@ if (!threw) {
 const conv = createConversation(hub, 'Named');
 const { appendMessage } = require(`${root}/control-plane/lib/conversations`);
 appendMessage(hub, conv.id, 'user', 'hello there');
-const sessionPath = path.join(hub, '.bizagent', 'hub-session.md');
+// Per-chat session memory (2026-11-08): this chat's file is the session; the
+// hub-level hub-session.md remains the fallback for chats with no conversation.
+const chatSessionPath = path.join(hub, '.bizagent', 'sessions', `${conv.id}.md`);
+const sessionPath = fs.existsSync(chatSessionPath)
+  ? chatSessionPath
+  : path.join(hub, '.bizagent', 'hub-session.md');
 const session = fs.readFileSync(sessionPath, 'utf8');
 if (!session.includes('### Ada -') && !session.includes('- Ada:')) {
   // compact writes recent turns with role label
@@ -3962,6 +3970,50 @@ if (!messagesRoot.children[0].className.includes('system')) err('hub reply class
 NODE
 then
   fail "banner/chat error dedupe checks failed"
+fi
+
+
+# --- Chat-product binding (2026-11-08): server + per-chat session wiring ---
+grep -q 'conversationMatch && req.method === "PATCH"' "$ROOT/control-plane/server.js" \
+  || fail "PATCH /api/conversations/<id> product-binding route missing"
+grep -q 'destination_name' "$ROOT/control-plane/server.js" \
+  || fail "cross-chat alert API must report the pointer destination chat"
+grep -q 'shouldStartNewConversation' "$ROOT/control-plane/server.js" \
+  || fail "new-conversation trigger missing from the message route"
+
+if command -v node >/dev/null 2>&1; then
+node - "$ROOT" <<'NODE' || fail "chat-product binding wiring checks failed"
+const fs = require('fs'); const path = require('path'); const os = require('os');
+const ROOT = process.argv[2];
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'cp-binding-wiring-'));
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({ org: 'X', products: [{ slug: 'alpha', name: 'Alpha' }] }));
+const conv = require(path.join(ROOT, 'control-plane/lib/conversations'));
+const mem = require(path.join(ROOT, 'control-plane/lib/hub-memory'));
+const { appDir } = require(path.join(ROOT, 'control-plane/lib/config'));
+const err = (m) => { console.error('FAIL: ' + m); process.exit(1); };
+
+const chat = conv.createConversation(hub, 'Alpha work');
+conv.updateConversationProducts(hub, chat.id, ['alpha']);
+const sessionFile = mem.hubSessionFile(hub, chat.id);
+if (sessionFile !== path.join(appDir(hub), 'sessions', `${chat.id}.md`)) err('per-chat session path wrong: ' + sessionFile);
+if (mem.hubSessionFile(hub) !== path.join(appDir(hub), 'hub-session.md')) err('hub-level session fallback changed');
+
+conv.appendMessage(hub, chat.id, 'hub', 'reply in bound chat');
+if (!fs.existsSync(sessionFile)) err('per-chat session file not written on mutation');
+const before = fs.statSync(sessionFile).mtimeMs;
+conv.getConversation(hub, chat.id);   // WS/SSE poll (read path)
+if (fs.statSync(sessionFile).mtimeMs !== before) err('read path rewrote the session file (compaction must be mutation-scoped)');
+if (!fs.readFileSync(sessionFile, 'utf8').includes('Bound products: alpha')) err('session header missing bound products');
+
+const scratch = conv.createConversation(hub, 'Nothing in particular', { unassigned: true });
+if (!conv.isUnassignedConversation(hub, scratch.id)) err('explicit no-product chat not detected');
+if (conv.recordPendingAgentWork(hub, 'alpha', scratch.id) !== false) err('chat-only chat must not own product-agent work');
+const prompt = mem.deriveHubRuntimePrompt(hub);
+if (!/chat-only/i.test(prompt)) err('hub prompt missing the chat-only rule for unassigned chats');
+if (!/<conversation_id>\.md/.test(prompt)) err('hub prompt missing the per-chat session path');
+fs.rmSync(hub, { recursive: true, force: true });
+process.exit(0);
+NODE
 fi
 
 

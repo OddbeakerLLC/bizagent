@@ -5,8 +5,10 @@ const {
   getStampConversationId,
   appendMessage,
   postAgentCompletionNotice,
+  recordCrossChatAlert,
   recordPendingAgentWork,
   recordUserInboxDelivery,
+  resolveConversationForMail,
   stampConversationId,
   userInbox,
 } = require('./conversations');
@@ -124,14 +126,22 @@ function writeContentUnique(dir, basename, content) {
 }
 
 /**
- * For mail missing conversation_id: stamp via getStampConversationId.
- * agent→hub (fromSlug set): pending hub→agent work for that slug, else last-viewed.
- * hub→user / unscoped: in-flight originating hub turn, else last-viewed.
+ * For mail missing conversation_id: stamp via the single shared resolver
+ * (conversations.resolveConversationForMail) so route-time stamping and the
+ * hub turn's conversation choice can never disagree.
+ *
+ * Priority: explicit conversation_id → the chat the operator asked in
+ * (work-item origin) → the chat bound to the sender product (unsolicited
+ * report) → pinned General → the chat the operator is viewing.
+ * When a proactive report lands in a chat the operator is not viewing, a
+ * status-role pointer (never spoken by TTS) is left in the viewing chat.
  * Never overwrites an existing conversation_id.
- * @param {string} [fromSlug] - product agent slug for agent→hub completions
+ *
+ * @param {object} mail - { from, to, conversationId, subject }
  */
-function maybeStampUserConversationId(hub, text, base, fromSlug) {
-  const stampId = getStampConversationId(hub, fromSlug);
+function maybeStampUserConversationId(hub, text, base, mail = {}) {
+  const resolved = resolveConversationForMail(hub, mail);
+  const stampId = resolved.conversationId;
   if (!stampId) return text;
   const stamped = stampConversationId(text, stampId);
   if (stamped !== text) {
@@ -139,8 +149,27 @@ function maybeStampUserConversationId(hub, text, base, fromSlug) {
       event: 'conversation_id_stamp',
       conversation_id: stampId,
       file: base,
-      from: fromSlug || ''
+      from: mail.from || '',
+      reason: resolved.reason,
     });
+  }
+  // Pointer in the chat the operator is viewing (same shape as cross-chat
+  // error alerts, but kind 'pointer' so the console renders it as a link and
+  // TTS never speaks it).
+  if (resolved.pointerConversationId) {
+    try {
+      recordCrossChatAlert(hub, resolved.pointerConversationId, mail.from || 'hub', mail.subject || 'report', {
+        kind: 'pointer',
+        destination_conversation_id: stampId,
+      });
+      logEvent(hub, {
+        event: 'cross_chat_pointer',
+        conversation_id: resolved.pointerConversationId,
+        destination_conversation_id: stampId,
+        from: mail.from || '',
+        file: base,
+      });
+    } catch (_err) { /* non-fatal */ }
   }
   return stamped;
 }
@@ -323,7 +352,13 @@ function routeOutboxes(hub) {
       const isHubToAgent = (from === 'hub') && to && to !== 'user' && to !== 'hub';
       const shouldStamp = (to === 'user') || isAgentToHub;
       if (shouldStamp) {
-        const stamped = maybeStampUserConversationId(hub, text, base, isAgentToHub ? from : undefined);
+        const mail = {
+          from,
+          to,
+          conversationId: frontmatterValue(text, 'conversation_id'),
+          subject: frontmatterValue(text, 'subject'),
+        };
+        const stamped = maybeStampUserConversationId(hub, text, base, mail);
         if (stamped !== text) {
           deliveredFile = writeContentUnique(dest, base, stamped);
           fs.unlinkSync(file);

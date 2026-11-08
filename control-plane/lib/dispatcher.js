@@ -20,11 +20,13 @@ const {
   createConversation,
   getActiveConversationId,
   getConversation,
+  getGeneralConversation,
   getPendingAgentWorkConversationId,
   listConversations,
   postLaunchAck,
   postAgentCompletionNotice,
   recordCrossChatAlert,
+  resolveConversationForMail,
   STATUS_ERROR_KIND,
   writeFileUnique,
 } = require('./conversations');
@@ -156,6 +158,8 @@ function nowIso() {
 /**
  * Get conversation_id for hub dispatch.
  * ALWAYS returns a valid conversation_id — never null.
+ * Uses the shared resolver (conversations.resolveConversationForMail via
+ * pickPendingConversationId) so route-time stamping and turn-time choice agree.
  * Newest operator/user console mail wins (the chat they are waiting in);
  * else oldest pending mail with a conversation_id (FIFO agent reports).
  */
@@ -180,7 +184,13 @@ function getHubConversationId(hub) {
   const activeId = getActiveConversationId(hub, 24 * 60 * 60 * 1000); // 24h TTL
   if (activeId) return activeId;
 
-  // Fourth: System conversation (always-warm guarantee)
+  // Fourth: pinned General, then System conversation (always-warm guarantee)
+  try {
+    const general = getGeneralConversation(hub);
+    if (general) return general.id;
+  } catch (_err) {
+    /* ignore */
+  }
   const sysConv = createConversation(hub, 'System');
   return sysConv.id;
 }
@@ -221,22 +231,20 @@ function readStderrTail(stderrFile, maxBytes = 2500) {
 
 /**
  * Resolve a conversation to show operator-facing agent failures.
- * Prefer explicit id → originating conversation for this slug's outstanding
- * work (pending-agent-work) → active chat → most recently updated conversation.
+ * Same shared resolver as route-time stamping: explicit id → the chat that
+ * dispatched this slug's work → the chat bound to the sender product → General
+ * → active chat → most recently updated conversation.
  */
 function resolveAlertConversationId(hub, conversationId, slug) {
-  if (conversationId && getConversation(hub, conversationId)) return conversationId;
-  // The conversation that dispatched this agent's work owns its errors —
-  // never broadcast into whatever chat the operator happens to have open.
   try {
-    const origin = slug ? getPendingAgentWorkConversationId(hub, slug) : null;
-    if (origin && getConversation(hub, origin)) return origin;
-  } catch (_err) {
-    /* ignore */
-  }
-  try {
-    const active = getActiveConversationId(hub, 24 * 60 * 60 * 1000);
-    if (active && getConversation(hub, active)) return active;
+    const resolved = resolveConversationForMail(hub, {
+      from: slug || 'hub',
+      to: 'hub',
+      conversationId,
+    });
+    if (resolved.conversationId && getConversation(hub, resolved.conversationId)) {
+      return resolved.conversationId;
+    }
   } catch (_err) {
     /* ignore */
   }

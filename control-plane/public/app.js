@@ -2757,6 +2757,74 @@ async function saveDisplayName() {
   }
 }
 
+// --- Chat-product binding (2026-11-08) -------------------------------------
+// A chat is bound to up to 3 registry products, or explicitly to none. An
+// unassigned chat is a chat-only scratch channel: the hub answers directly and
+// no product agent work is attributed to it. The UI shows the state explicitly
+// instead of guessing a product from the chat name ("None?").
+const MAX_BOUND_PRODUCTS = 3;
+
+function productDisplayName(slug) {
+  const agent = (lastAgentsList || []).find((a) => a && a.slug === slug);
+  return (agent && (agent.name || agent.agentName)) || slug;
+}
+
+/** Explicit product-state label for a chat — never an inferred guess. */
+function conversationProductLabel(conv) {
+  if (!conv) return 'no product';
+  const products = Array.isArray(conv.products) ? conv.products : [];
+  if (!products.length) return conv.unassigned === true ? 'no product' : 'unbound';
+  const names = products.map(productDisplayName);
+  return names.join(', ') + (conv.products_inferred ? ' (inferred)' : '');
+}
+
+function conversationOptionLabel(conv) {
+  return `${conv.name} · ${conversationProductLabel(conv)}`;
+}
+
+function renderChatProducts(conv) {
+  const panel = document.getElementById('chatProducts');
+  if (!panel) return;
+  const state = document.getElementById('chatProductsState');
+  const select = document.getElementById('chatProductsSelect');
+  const products = conv && Array.isArray(conv.products) ? conv.products : [];
+  if (state) {
+    state.textContent = conversationProductLabel(conv);
+    state.className = `chat-products-state${products.length ? '' : ' is-none'}`;
+  }
+  if (select) {
+    select.innerHTML = '';
+    (lastAgentsList || [])
+      .filter((a) => a && a.slug && a.slug !== 'hub')
+      .forEach((agent) => {
+        const option = document.createElement('option');
+        option.value = agent.slug;
+        option.textContent = agent.name || agent.agentName || agent.slug;
+        option.selected = products.includes(agent.slug);
+        select.appendChild(option);
+      });
+    const note = document.getElementById('chatProductsNote');
+    if (note) {
+      note.textContent = products.length >= MAX_BOUND_PRODUCTS
+        ? `cap ${MAX_BOUND_PRODUCTS} products per chat — unbind one to change`
+        : 'select products, or choose “no product” for a chat-only scratch chat';
+    }
+  }
+}
+
+async function setChatProducts(products) {
+  if (!currentConversation) return null;
+  const conv = await api(`/api/conversations/${encodeURIComponent(currentConversation)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ products }),
+  });
+  const select = document.getElementById('conversationSelect');
+  const option = select && select.querySelector ? select.querySelector(`option[value="${conv.id}"]`) : null;
+  if (option) option.textContent = conversationOptionLabel(conv);
+  renderChatProducts(conv);
+  return conv;
+}
+
 async function loadConversations() {
   let convs = await api('/api/conversations');
   if (convs.length === 0) {
@@ -2768,7 +2836,7 @@ async function loadConversations() {
   convs.forEach((conv) => {
     const option = document.createElement('option');
     option.value = conv.id;
-    option.textContent = conv.name;
+    option.textContent = conversationOptionLabel(conv);
     select.appendChild(option);
   });
   // Prefer installer Welcome / first-run chat so the first bubble is visible (and TTS can speak it).
@@ -2806,6 +2874,7 @@ async function loadConversation(id) {
   const conv = await api(`/api/conversations/${encodeURIComponent(id)}`);
   const messages = conv.messages || [];
   lastConversationStamp = conversationPollStamp(conv);
+  renderChatProducts(conv);
   // Only reset TTS baseline when opening/switching conversations (not soft reloads).
   // Hard load always re-baselines so history is not read aloud.
   ttsPrimed = false;
@@ -3321,10 +3390,34 @@ document.getElementById('newConversation').addEventListener('click', async () =>
   }
   const name = window.prompt('Conversation name', 'New conversation');
   if (!name) return;
-  const conv = await api('/api/conversations', { method: 'POST', body: JSON.stringify({ name }) });
+  // New chats start explicitly unassigned (chat-only); bind products with the
+  // product picker below, or inherit them from the chat you are in via
+  // "new conversation X" in the composer.
+  const conv = await api('/api/conversations', {
+    method: 'POST',
+    body: JSON.stringify({ name, unassigned: true }),
+  });
   currentConversation = conv.id;
   await loadConversations();
 });
+
+// Chat-product binding: explicit multi-select (cap 3) + explicit "no product".
+const chatProductsSelect = document.getElementById('chatProductsSelect');
+if (chatProductsSelect) {
+  chatProductsSelect.addEventListener('change', () => {
+    const picked = Array.from(chatProductsSelect.selectedOptions || []).map((o) => o.value).filter(Boolean);
+    setChatProducts(picked).catch((err) => setNameStatus(err.message || 'Could not save products', 'warn'));
+  });
+}
+const chatProductsClear = document.getElementById('chatProductsClear');
+if (chatProductsClear) {
+  chatProductsClear.addEventListener('click', () => {
+    if (chatProductsSelect) {
+      Array.from(chatProductsSelect.options || []).forEach((o) => { o.selected = false; });
+    }
+    setChatProducts([]).catch((err) => setNameStatus(err.message || 'Could not save products', 'warn'));
+  });
+}
 document.getElementById('deleteConversation').addEventListener('click', async () => {
   if (!currentConversation) return;
   const select = document.getElementById('conversationSelect');
@@ -3768,12 +3861,32 @@ document.addEventListener('click', (ev) => {
 // the originating conversation, which clears the indicator server-side.
 let crossChatAlertsCache = [];
 
+/** Which alerts the operator should see in the chat they are viewing. */
+function crossChatAlertVisibleFor(alert, currentId) {
+  if (!alert || !alert.conversationId) return false;
+  return alert.kind === 'pointer'
+    ? alert.conversationId === currentId
+    : alert.conversationId !== currentId;
+}
+
+/** Where the badge click jumps: pointer → where the report landed. */
+function crossChatAlertTargetId(alert) {
+  if (!alert) return '';
+  return alert.kind === 'pointer'
+    ? (alert.destination_conversation_id || alert.conversationId)
+    : alert.conversationId;
+}
+
 function renderCrossChatAlerts() {
   const el = document.getElementById('crossChatAlert');
   if (!el) return;
-  const waiting = crossChatAlertsCache.filter(
-    (a) => a && a.conversationId && a.conversationId !== currentConversation,
-  );
+  // Two shapes, both status-role (never spoken by TTS):
+  //  - kind 'error': the report/error lives in a chat the operator is NOT
+  //    viewing → badge here, click jumps to that chat.
+  //  - kind 'pointer': a proactive report landed in the chat bound to the
+  //    sender product; the pointer lives in the chat the operator IS viewing
+  //    (2026-11-08 operator rule) → click jumps to where it landed.
+  const waiting = crossChatAlertsCache.filter((a) => crossChatAlertVisibleFor(a, currentConversation));
   if (!waiting.length) {
     el.hidden = true;
     el.innerHTML = '';
@@ -3781,11 +3894,18 @@ function renderCrossChatAlerts() {
   }
   const first = waiting[0];
   const extra = waiting.length > 1 ? ` (+${waiting.length - 1} more)` : '';
+  const isPointer = first.kind === 'pointer';
+  const target = crossChatAlertTargetId(first);
   const name = first.conversation_name || 'another conversation';
+  const destination = first.destination_name || name;
   el.hidden = false;
+  el.className = `cross-chat-alert${isPointer ? ' pointer' : ''}`;
   el.innerHTML =
-    `<button type="button" class="cross-chat-alert-link" data-conv-id="${first.conversationId}">` +
-    `⚠ Agent error waiting in “${name}”${extra} — click to view</button>`;
+    `<button type="button" class="cross-chat-alert-link" data-conv-id="${target}">` +
+    (isPointer
+      ? `↪ report landed in “${destination}”${extra} — click to view`
+      : `⚠ Agent error waiting in “${name}”${extra} — click to view`) +
+    `</button>`;
 }
 
 async function pollCrossChatAlerts() {
