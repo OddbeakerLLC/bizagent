@@ -197,8 +197,9 @@ function appendMessage(hub, id, role, content, meta = {}) {
   }
   const msg = { role, content, created_at: new Date().toISOString() };
   if (meta.kind) msg.kind = meta.kind;
-  // DGen form-request / form-submitted metadata (no secrets — specs and ids only).
-  for (const key of ['form_id', 'agent', 'form']) {
+  // DGen form-request / form-submitted metadata (no secrets — specs and ids only),
+  // plus the health-banner error key so the console can dedupe banner vs chat.
+  for (const key of ['form_id', 'agent', 'form', 'error_key']) {
     if (meta[key] !== undefined) msg[key] = meta[key];
   }
   if (Array.isArray(meta.attachments) && meta.attachments.length) {

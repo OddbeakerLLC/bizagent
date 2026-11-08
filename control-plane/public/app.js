@@ -2490,7 +2490,13 @@ function bindTtsToggle() {
 function renderMessages(messages) {
   const root = document.getElementById('messages');
   root.innerHTML = '';
-  messages.forEach((msg) => {
+  const list = Array.isArray(messages) ? messages : [];
+  lastRenderedMessages = list;
+  const bannerKeys = bannerDisplayedErrorKeys(lastHealthData);
+  lastChatDedupeKeys = bannerKeys;
+  list.forEach((msg) => {
+    // Already shown as a card in the health banner — skip the duplicate bubble.
+    if (chatBubbleIsCoveredByBanner(msg, bannerKeys)) return;
     const el = document.createElement('div');
     el.className = messageClassName(msg);
     const author = messageAuthorLabel(msg);
@@ -3592,14 +3598,16 @@ function bannerErrorKey(e) {
   return `${e.slug || ''}|${e.ts || ''}|${e.title || ''}`;
 }
 
-function renderHealthBanner(h) {
-  lastHealthData = h;
-  const el = document.getElementById('healthBanner');
-  if (!el) return;
+// Error cards actually rendered in the banner (newest first, capped).
+const BANNER_ERROR_CARD_CAP = 5;
+
+// Banner display state, shared by the banner render and the chat dedupe so both
+// use exactly the same rules for "is this error currently shown in the banner".
+function bannerDisplayState(h) {
   const level = (h && h.level) || 'unknown';
-  const safeMode = !!h.safe_mode;
-  const fallback = !!h.provider_fallback_active;
-  const bad = (h.checks || []).filter((c) => c.level && c.level !== 'ok');
+  const safeMode = !!(h && h.safe_mode);
+  const fallback = !!(h && h.provider_fallback_active);
+  const bad = ((h && h.checks) || []).filter((c) => c.level && c.level !== 'ok');
   const recentErrors = h && Array.isArray(h.recent_errors) ? h.recent_errors : [];
   const visibleErrors = recentErrors.filter((e) => !dismissedBannerErrors.has(bannerErrorKey(e)));
   const cooldown = h && Number(h.rate_limit_cooldown_secs) > 0
@@ -3608,10 +3616,71 @@ function renderHealthBanner(h) {
   const red = safeMode || level === 'critical' || level === 'emergency';
   const yellow = !red && (level === 'warn' || fallback || level === 'unknown' ||
     visibleErrors.length > 0 || cooldown > 0);
+  return { level, safeMode, fallback, bad, visibleErrors, cooldown, red, yellow, shown: red || yellow };
+}
+
+let connectionLostShown = false;
+
+/** Keys the banner is currently displaying (empty when the banner is hidden). */
+function bannerDisplayedErrorKeys(h) {
+  // Connection-lost banner replaces the error cards — nothing is being shown,
+  // so the chat keeps its bubbles.
+  if (connectionLostShown) return new Set();
+  const state = bannerDisplayState(h);
+  if (!state.shown) return new Set();
+  return new Set(state.visibleErrors.slice(0, BANNER_ERROR_CARD_CAP).map(bannerErrorKey));
+}
+
+// Chat ↔ banner dedupe (hub dispatch 2026-11-08, operator request): an error the
+// banner is currently showing must not also render as a chat bubble. Both sides
+// use the same key — the server stamps error status messages with `error_key`
+// (dispatcher.bannerErrorKey, same formula as bannerErrorKey above). The chat
+// stays the fallback whenever the banner is not actually showing the item:
+// banner hidden, card filtered/dismissed, no health payload yet, or a message
+// with no key (operator-stop lines, hub hard-fails, history from before this
+// change). TTS is unaffected — status messages are never spoken.
+function chatBubbleIsCoveredByBanner(msg, keys) {
+  if (!msg || msg.role !== 'status' || msg.kind !== 'error') return false;
+  const key = String(msg.error_key || '');
+  return !!key && keys.has(key);
+}
+
+let lastRenderedMessages = [];
+let lastChatDedupeKeys = new Set();
+
+// Re-render the chat when a message's coverage changes (error appears in the
+// banner after the chat already rendered it, or the banner card is dismissed /
+// ages out and the bubble must come back as the fallback).
+function syncChatBannerDedupe() {
+  const keys = bannerDisplayedErrorKeys(lastHealthData);
+  const prev = lastChatDedupeKeys;
+  const touched = (lastRenderedMessages || []).some(
+    (m) => m && m.error_key && (keys.has(m.error_key) !== prev.has(m.error_key)),
+  );
+  lastChatDedupeKeys = keys;
+  if (!touched) return;
+  renderMessages(lastRenderedMessages);
+}
+
+function renderHealthBanner(h) {
+  lastHealthData = h;
+  const el = document.getElementById('healthBanner');
+  if (!el) return;
+  const state = bannerDisplayState(h);
+  const level = state.level;
+  const safeMode = state.safeMode;
+  const fallback = state.fallback;
+  const bad = state.bad;
+  const visibleErrors = state.visibleErrors;
+  const cooldown = state.cooldown;
+  const red = state.red;
+  const yellow = state.yellow;
   if (!safeMode) safeModeNoteShown = false; // hub left safe mode — allow the quiet note again
+  connectionLostShown = false;
   if (!red && !yellow) {
     el.hidden = true;
     el.innerHTML = '';
+    syncChatBannerDedupe();
     return;
   }
   el.hidden = false;
@@ -3631,7 +3700,7 @@ function renderHealthBanner(h) {
   const cooldownHtml = cooldown > 0
     ? `<span class="health-banner-detail">Dispatches paused for ${cooldown}s (rate-limit cooldown) — auto-resumes.</span>`
     : '';
-  const errorsHtml = visibleErrors.slice(0, 5).map((e) => {
+  const errorsHtml = visibleErrors.slice(0, BANNER_ERROR_CARD_CAP).map((e) => {
     const agent = e.slug ? ` — ${bannerEscape(e.slug)}` : '';
     const fix = e.fix ? ` Fix: ${bannerEscape(e.fix)}` : '';
     return (
@@ -3649,6 +3718,7 @@ function renderHealthBanner(h) {
     errorsHtml +
     (safeMode ? `<span class="health-banner-detail">Current health: ${level}. The hub will exit safe mode automatically once health is back to ok.</span>` : '') +
     (fallback && !safeMode ? '<span class="health-banner-detail">Fix the paid provider (top up / new key) to restore normal turns.</span>' : '');
+  syncChatBannerDedupe();
 }
 
 function renderConnectionLostBanner() {
@@ -3659,6 +3729,8 @@ function renderConnectionLostBanner() {
   el.innerHTML =
     '<strong>Connection to hub lost</strong>' +
     '<span class="health-banner-detail">The console cannot reach the hub server — retrying…</span>';
+  connectionLostShown = true;
+  syncChatBannerDedupe();
 }
 
 let healthConnFailures = 0;

@@ -107,7 +107,11 @@ probes cannot flap the flag.
    red = safe mode / critical / emergency; yellow = warn or
    `provider_fallback_active`. Persisted server-side — stays until green.
 2. **Console chat line** once per incident (30-min dedupe) so it lands in
-   conversation history.
+   conversation history. It is skipped while the same error is showing as a card
+   in the banner — both use the same key (`slug|ts|title`; the dispatcher stamps
+   it on the message as `error_key`). The chat is the fallback whenever the
+   banner is not actually showing that item: hidden banner, dismissed card,
+   connection-lost banner, cap overflow, or a message with no key.
 3. **Out-of-band:** systemd `OnFailure=` → `health-alert-failure.sh` writes
    `HEALTH-ALERT.md` and posts the optional webhook — works with port 8787 down.
 4. **Local last-resort:** `HEALTH-ALERT.md` in the hub root (Library can show

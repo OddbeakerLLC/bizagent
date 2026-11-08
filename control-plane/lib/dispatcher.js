@@ -404,6 +404,15 @@ function recentErrorsFile(hub) {
 }
 
 /**
+ * Stable key for a recent-error card. Must match `bannerErrorKey()` in
+ * control-plane/public/app.js — the console uses it for banner dismissal and
+ * for skipping a chat bubble that the banner is already showing.
+ */
+function bannerErrorKey(entry) {
+  return `${entry.slug || ''}|${entry.ts || ''}|${entry.title || ''}`;
+}
+
+/**
  * Ring buffer of recent classified agent/hub errors, surfaced by the console
  * health banner (operator request 2026-10-21: connection / rate-limit /
  * provider errors should be visible at the top of the page, not only as
@@ -493,6 +502,16 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   // One-time notice when a provider's queue transitions into the held state
   // (operator request 2026-10-23: hold the mail and say so, never loop).
   if (queueHold && cid) {
+    const holdEntry = {
+      ts: Date.now(),
+      slug,
+      exitCode,
+      kind: 'dispatch_held',
+      title: `Provider queue held (${provider || 'fleet'})`,
+      summary: `${queueHold.consecutive} consecutive failures — pending mail held, no more auto-retries.`,
+      fix: 'Fix the provider, then have the hub resume the queue.',
+      conversationId: cid || '',
+    };
     try {
       const holdMsg = [
         `**Provider queue: pending mail held for \`${provider || 'fleet'}\`**`,
@@ -501,37 +520,31 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
         '',
         '**Fix:** Resolve the provider issue, then tell the hub to resume the queue — it clears the hold and re-dispatches the held mail.',
       ].join('\n');
-      appendMessage(hub, cid, 'status', holdMsg, { kind: STATUS_ERROR_KIND });
+      // `error_key` = the same key the console banner uses, so the chat skips
+      // this bubble while the banner card is showing (chat stays the fallback).
+      appendMessage(hub, cid, 'status', holdMsg, { kind: STATUS_ERROR_KIND, error_key: bannerErrorKey(holdEntry) });
       notifyConversationMutated(hub, cid);
     } catch (_err) { /* ignore */ }
     try {
-      recordRecentError(hub, {
-        ts: Date.now(),
-        slug,
-        exitCode,
-        kind: 'dispatch_held',
-        title: `Provider queue held (${provider || 'fleet'})`,
-        summary: `${queueHold.consecutive} consecutive failures — pending mail held, no more auto-retries.`,
-        fix: 'Fix the provider, then have the hub resume the queue.',
-        conversationId: cid || '',
-      });
+      recordRecentError(hub, holdEntry);
     } catch (_err) { /* ignore */ }
   }
 
   // Operator request (2026-10-21): feed the console health banner so recent
   // connection / rate-limit / provider errors are visible at the top of the
   // page even when the operator is in another conversation.
+  const recentEntry = {
+    ts: Date.now(),
+    slug,
+    exitCode,
+    kind,
+    title: classified ? classified.title : 'Agent failure',
+    summary: classified ? classified.summary : 'The run ended without a clean success.',
+    fix: classified ? classified.fix : `See logs/dispatch-${slug}.log`,
+    conversationId: cid || '',
+  };
   try {
-    recordRecentError(hub, {
-      ts: Date.now(),
-      slug,
-      exitCode,
-      kind,
-      title: classified ? classified.title : 'Agent failure',
-      summary: classified ? classified.summary : 'The run ended without a clean success.',
-      fix: classified ? classified.fix : `See logs/dispatch-${slug}.log`,
-      conversationId: cid || '',
-    });
+    recordRecentError(hub, recentEntry);
   } catch (_err) { /* ignore */ }
 
   const dateStr = new Date().toISOString().slice(0, 10);
@@ -545,7 +558,9 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   let postedToChat = false;
   if (cid) {
     try {
-      appendMessage(hub, cid, 'status', errorMsg, { kind: STATUS_ERROR_KIND });
+      // Same key as the banner card (chat skips the bubble while the banner is
+      // showing it; the chat is the fallback when the banner is not).
+      appendMessage(hub, cid, 'status', errorMsg, { kind: STATUS_ERROR_KIND, error_key: bannerErrorKey(recentEntry) });
       postedToChat = true;
       try {
         notifyConversationMutated(hub, cid);
@@ -2148,6 +2163,7 @@ module.exports = {
   clearDispatchState,
   clearDispatchStateUnlessOperatorStop,
   backoffFailedDispatch,
+  bannerErrorKey,
   agentRetrySecs,
   isProtectedStopPid,
   iterationCapTaskHint,

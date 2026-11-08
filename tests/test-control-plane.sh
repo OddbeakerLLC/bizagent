@@ -3771,5 +3771,198 @@ then
   fail "thinking-logs unit checks failed"
 fi
 
+  # Regression (hub dispatch 2026-11-08): the dispatcher stamps error status
+  # messages with the same key the console banner uses, and appendMessage keeps
+  # it on the stored message so the console can dedupe banner vs chat.
+  if ! node - "$ROOT" "$TMP2" <<'NODE'
+const root = process.argv[2];
+const hub = process.argv[3];
+const fs = require('fs');
+const path = require('path');
+const dispatcher = require(`${root}/control-plane/lib/dispatcher`);
+const { createConversation, getConversation, appendMessage } = require(`${root}/control-plane/lib/conversations`);
+if (typeof dispatcher.bannerErrorKey !== 'function') {
+  console.error('dispatcher must export bannerErrorKey (shared with the console banner)');
+  process.exit(1);
+}
+const entry = { ts: 1700000000000, slug: 'beakernet', title: 'Rate limit' };
+const key = dispatcher.bannerErrorKey(entry);
+if (key !== 'beakernet|1700000000000|Rate limit') {
+  console.error('bannerErrorKey formula changed:', key);
+  process.exit(2);
+}
+if (dispatcher.bannerErrorKey({}) !== '||') {
+  console.error('bannerErrorKey must tolerate missing fields:', dispatcher.bannerErrorKey({}));
+  process.exit(3);
+}
+fs.mkdirSync(path.join(hub, 'outbox'), { recursive: true });
+fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({ settings: {}, products: [] }));
+const conv = createConversation(hub, 'Banner Dedupe');
+appendMessage(hub, conv.id, 'status', 'boom — 429', { kind: 'error', error_key: key });
+const saved = getConversation(hub, conv.id);
+const msg = saved.messages[saved.messages.length - 1];
+if (msg.kind !== 'error') { console.error('error status kind lost:', msg); process.exit(4); }
+if (msg.error_key !== key) { console.error('error_key not stored on the message:', msg); process.exit(5); }
+// A status error with no key (operator-stop line, hub hard-fail) stays a chat bubble.
+appendMessage(hub, conv.id, 'status', 'Stopped by operator (Escape).', { kind: 'error' });
+const noKey = getConversation(hub, conv.id).messages.slice(-1)[0];
+if (noKey.error_key !== undefined) { console.error('unexpected key on an unstamped message:', noKey); process.exit(6); }
+NODE
+then
+  fail "banner error key (server side) failed"
+fi
+
+  # Regression (hub dispatch 2026-11-08): an error the health banner is currently
+  # showing must not also render as a chat bubble. The chat stays the fallback
+  # when the banner is not actually showing it (hidden banner, dismissed card,
+  # no health payload, cap overflow, or a message with no key), and the status
+  # kinds the banner never shows (launch-ack / form-request / form-submitted)
+  # always render.
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(`${root}/control-plane/public/markdown.js`, 'utf8')
+  + '\n' + fs.readFileSync(`${root}/control-plane/public/app.js`, 'utf8');
+const noop = () => {};
+const makeEl = () => {
+  const el = {
+    children: [],
+    innerHTML: '',
+    textContent: '',
+    className: '',
+    dataset: {},
+    attrs: {},
+    hidden: false,
+    title: '',
+    value: '',
+    style: {},
+    classList: { toggle: noop, add: noop, remove: noop, contains: () => false },
+    setAttribute: (k, v) => { el.attrs[k] = String(v); },
+    getAttribute: (k) => (k === 'class' ? el.className : (el.attrs[k] || '')),
+    appendChild: (child) => { el.children.push(child); return child; },
+    removeChild: noop,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    addEventListener: noop,
+    focus: noop,
+    click: noop,
+  };
+  return el;
+};
+const messagesRoot = makeEl();
+// renderMessages clears the panel with innerHTML = '' — mirror that here.
+Object.defineProperty(messagesRoot, 'innerHTML', {
+  get: () => '',
+  set: (v) => { if (v === '') messagesRoot.children = []; },
+});
+const bannerEl = makeEl();
+const byId = { messages: messagesRoot, healthBanner: bannerEl };
+const clickHandlers = [];
+const sandbox = {
+  document: {
+    getElementById: (id) => byId[id] || makeEl(),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: makeEl,
+    addEventListener: (type, fn) => { if (type === 'click') clickHandlers.push(fn); },
+    body: makeEl(),
+    documentElement: makeEl(),
+  },
+  setInterval: () => 0,
+  setTimeout: () => 0,
+  clearInterval: noop,
+  clearTimeout: noop,
+  localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  navigator: { userAgent: 'node-test' },
+  location: { hash: '', href: 'http://localhost/', pathname: '/', search: '' },
+  history: { replaceState: noop, pushState: noop },
+  speechSynthesis: undefined,
+  SpeechSynthesisUtterance: function () {},
+  Audio: function () { this.play = () => Promise.resolve(); this.pause = noop; },
+  URL: URL,
+  Blob: function () {},
+  fetch: () => Promise.reject(new Error('no network in test')),
+  EventSource: function () { this.onmessage = null; this.onerror = null; this.close = noop; },
+  console,
+  addEventListener: noop,
+  removeEventListener: noop,
+};
+sandbox.window = sandbox;
+sandbox.self = sandbox;
+sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox);
+
+const err = (m) => { console.error(m); process.exit(1); };
+// Fresh ts: banner dismissals prune entries older than 24h.
+const entryTs = Date.now() - 60000;
+const entry = { ts: entryTs, slug: 'beakernet', title: 'Rate limit' };
+const key = sandbox.bannerErrorKey(entry);
+if (key !== `beakernet|${entryTs}|Rate limit`) err('console bannerErrorKey formula changed: ' + key);
+
+const errMsg = { role: 'status', kind: 'error', content: 'beakernet failed (429)', created_at: '2026-11-08T10:00:00.000Z', error_key: key };
+const ackMsg = { role: 'status', kind: 'launch-ack', content: 'Working. Stand by...', created_at: '2026-11-08T10:00:01.000Z' };
+const formMsg = { role: 'status', kind: 'form-request', content: '', form_id: 'f1', agent: 'hub', form: { title: 'Key' }, created_at: '2026-11-08T10:00:02.000Z' };
+const submittedMsg = { role: 'status', kind: 'form-submitted', content: '', form_id: 'f1', created_at: '2026-11-08T10:00:03.000Z' };
+const all = [errMsg, ackMsg, formMsg, submittedMsg];
+
+// 1. No health payload yet → chat is the fallback; everything renders.
+sandbox.renderMessages(all);
+if (messagesRoot.children.length !== 4) err('no health payload: chat must still show the error bubble, got ' + messagesRoot.children.length);
+
+// 2. Banner shows the card → the duplicate bubble is skipped.
+sandbox.renderHealthBanner({ level: 'warn', checks: [], recent_errors: [entry], rate_limit_cooldown_secs: 0 });
+if (bannerEl.hidden) err('warn level with a visible error should show the banner');
+if (!bannerEl.innerHTML.includes('data-key="' + key + '"')) err('banner card missing the shared key');
+sandbox.renderMessages(all);
+if (messagesRoot.children.length !== 3) err('banner is showing the error: chat bubble should be skipped, got ' + messagesRoot.children.length);
+if (messagesRoot.children.some((c) => c.className.includes('error'))) err('deduped error bubble still rendered');
+
+// 3. Arrival race: the chat rendered before the banner picked the error up, then
+//    a health poll syncs it without a conversation poll.
+sandbox.renderHealthBanner({ level: 'ok', checks: [], recent_errors: [], rate_limit_cooldown_secs: 0 });
+if (!bannerEl.hidden) err('healthy hub should hide the banner');
+sandbox.renderMessages(all);
+if (messagesRoot.children.length !== 4) err('hidden banner: chat must show the error bubble, got ' + messagesRoot.children.length);
+sandbox.renderHealthBanner({ level: 'warn', checks: [], recent_errors: [entry], rate_limit_cooldown_secs: 0 });
+if (messagesRoot.children.length !== 3) err('health poll should drop the now-covered bubble, got ' + messagesRoot.children.length);
+
+// 4. Dismiss the card → the banner no longer shows it → the chat bubble returns.
+const fakeBtn = { getAttribute: (name) => (name === 'data-key' ? key : null) };
+const ev = { target: { closest: () => fakeBtn } };
+clickHandlers.forEach((fn) => fn(ev));
+if (messagesRoot.children.length !== 4) err('dismissed card: chat must be the fallback, got ' + messagesRoot.children.length);
+
+// 5. Only cards actually rendered in the banner count (5-card cap).
+const six = Array.from({ length: 6 }, (_x, i) => ({ ts: Date.now() - 60000 + i, slug: 'p' + i, title: 'E' + i }));
+const sixHealth = { level: 'warn', checks: [], recent_errors: six, rate_limit_cooldown_secs: 0 };
+sandbox.renderHealthBanner(sixHealth);
+const shown = sandbox.bannerDisplayedErrorKeys(sixHealth);
+if (shown.size !== 5) err('banner cap: expected 5 displayed keys, got ' + shown.size);
+const sixthKey = sandbox.bannerErrorKey(six[5]);
+if (shown.has(sixthKey)) err('6th error is not displayed in the banner, its chat bubble must remain');
+sandbox.renderMessages(six.map((e) => ({ role: 'status', kind: 'error', content: 'x', created_at: '2026-11-08T10:00:00.000Z', error_key: sandbox.bannerErrorKey(e) })));
+if (messagesRoot.children.length !== 1) err('cap overflow: only the 6th bubble should render, got ' + messagesRoot.children.length);
+
+// 6. Unstamped error messages (operator-stop, hub hard-fail, pre-2026-11-08 history) render.
+sandbox.renderMessages([{ role: 'status', kind: 'error', content: 'Stopped by operator (Escape).', created_at: '2026-11-08T10:00:00.000Z' }]);
+if (messagesRoot.children.length !== 1) err('error message without a key must still render, got ' + messagesRoot.children.length);
+
+// 7. Non-status roles are never deduped (hub reply renders even while the
+//    banner shows an error in the same conversation).
+const firstKey = sandbox.bannerErrorKey(six[0]);
+sandbox.renderMessages([
+  { role: 'hub', content: 'reply', created_at: '2026-11-08T10:00:00.000Z' },
+  { role: 'status', kind: 'error', content: 'x', created_at: '2026-11-08T10:00:00.000Z', error_key: firstKey },
+]);
+if (messagesRoot.children.length !== 1) err('hub reply must render while the banner shows the error, got ' + messagesRoot.children.length);
+if (!messagesRoot.children[0].className.includes('system')) err('hub reply class wrong:', messagesRoot.children[0].className);
+NODE
+then
+  fail "banner/chat error dedupe checks failed"
+fi
+
 
 echo "  ok: control-plane"
