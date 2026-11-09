@@ -2356,6 +2356,13 @@ if (!ttsFence.includes('<div class="spoken-aside">')
 if (ttsFence.includes('<pre><code>Spoken') || ttsFence.includes('```') || !ttsFence.includes('<h2>Body</h2>')) {
   console.error('tts fence leaked markers or lost body:', ttsFence); process.exit(19);
 }
+// TLDR re-speak: with a message key the aside icon is a real button carrying the key.
+const ttsRespeak = sandbox.renderMarkdown('```tts\nSpoken one. Spoken two.\n```\n\nBody.', 'key|22|Spoken one. Spoken two.');
+if (!ttsRespeak.includes('class="spoken-aside-speak"')
+    || !ttsRespeak.includes('data-tldr-key="key|22|Spoken one. Spoken two."')
+    || !ttsRespeak.includes('aria-label="Re-speak this summary"')) {
+  console.error('tts aside should render a re-speak button carrying the message key:', ttsRespeak); process.exit(167);
+}
 // Non-tts fences still render as code blocks.
 const plainFence = sandbox.renderMarkdown('```\nplain code\n```');
 if (!plainFence.includes('<pre><code>plain code</code></pre>')) {

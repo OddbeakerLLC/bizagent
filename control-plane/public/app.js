@@ -988,6 +988,16 @@ function hubMessageKey(msg) {
   return `${msg.created_at || ''}|${String(msg.content || '').length}|${String(msg.content || '').slice(0, 80)}`;
 }
 
+/** Key used by a TLDR re-speak button; falls back for non-hub replies. */
+function tldrMessageKey(msg) {
+  if (!msg) return '';
+  return hubMessageKey(msg)
+    || `${msg.role || 'msg'}|${msg.created_at || ''}|${String(msg.content || '').length}`;
+}
+
+/** message key → raw reply content, so a TLDR button can resolve its reply text. */
+const tldrContentByKey = new Map();
+
 function getSpeechSynthesis() {
   if (typeof window === 'undefined') return null;
   return window.speechSynthesis || null;
@@ -2490,6 +2500,7 @@ function bindTtsToggle() {
 function renderMessages(messages) {
   const root = document.getElementById('messages');
   root.innerHTML = '';
+  tldrContentByKey.clear();
   const list = Array.isArray(messages) ? messages : [];
   lastRenderedMessages = list;
   const bannerKeys = bannerDisplayedErrorKeys(lastHealthData);
@@ -2499,6 +2510,8 @@ function renderMessages(messages) {
     if (chatBubbleIsCoveredByBanner(msg, bannerKeys)) return;
     const el = document.createElement('div');
     el.className = messageClassName(msg);
+    const key = tldrMessageKey(msg);
+    if (key) tldrContentByKey.set(key, String(msg.content || ''));
     const author = messageAuthorLabel(msg);
     const timeLabel = messageTimeLabel(msg);
     if (author || timeLabel) {
@@ -2541,7 +2554,7 @@ function renderMessages(messages) {
     } else if (msg.role === 'status' && msg.kind === 'form-submitted') {
       body.innerHTML = renderMarkdown('✅ Form submitted — values were delivered to the requesting agent without entering the chat.');
     } else {
-      body.innerHTML = renderMarkdown(msg.content);
+      body.innerHTML = renderMarkdown(msg.content, key);
     }
     el.appendChild(body);
     if (Array.isArray(msg.attachments) && msg.attachments.length) {
@@ -2779,37 +2792,23 @@ function conversationProductLabel(conv) {
 }
 
 function conversationOptionLabel(conv) {
-  return `${conv.name} · ${conversationProductLabel(conv)}`;
+  // Product names stay out of the dropdown (operator request 2026-11-09);
+  // they render on the smaller line below the select instead.
+  return conv && conv.name ? conv.name : '';
 }
 
+/** Products currently bound to the open conversation (slugs). */
+let currentConversationProducts = [];
+
 function renderChatProducts(conv) {
-  const panel = document.getElementById('chatProducts');
-  if (!panel) return;
-  const state = document.getElementById('chatProductsState');
-  const select = document.getElementById('chatProductsSelect');
-  const products = conv && Array.isArray(conv.products) ? conv.products : [];
-  if (state) {
-    state.textContent = conversationProductLabel(conv);
-    state.className = `chat-products-state${products.length ? '' : ' is-none'}`;
-  }
-  if (select) {
-    select.innerHTML = '';
-    (lastAgentsList || [])
-      .filter((a) => a && a.slug && a.slug !== 'hub')
-      .forEach((agent) => {
-        const option = document.createElement('option');
-        option.value = agent.slug;
-        option.textContent = agent.name || agent.agentName || agent.slug;
-        option.selected = products.includes(agent.slug);
-        select.appendChild(option);
-      });
-    const note = document.getElementById('chatProductsNote');
-    if (note) {
-      note.textContent = products.length >= MAX_BOUND_PRODUCTS
-        ? `cap ${MAX_BOUND_PRODUCTS} products per chat — unbind one to change`
-        : 'select products, or choose “no product” for a chat-only scratch chat';
-    }
-  }
+  // Product name(s) render on their own line directly below the conversation
+  // dropdown, in a smaller font — not inside the dropdown options.
+  const line = document.getElementById('conversationProductsLine');
+  currentConversationProducts = conv && Array.isArray(conv.products) ? conv.products.slice() : [];
+  if (!line) return;
+  const products = currentConversationProducts;
+  line.textContent = conversationProductLabel(conv);
+  line.className = `conversation-products-line${products.length ? '' : ' is-none'}`;
 }
 
 async function setChatProducts(products) {
@@ -2831,6 +2830,9 @@ async function loadConversations() {
     const created = await api('/api/conversations', { method: 'POST', body: JSON.stringify({ name: 'Main' }) });
     convs = [{ id: created.id, name: created.name }];
   }
+  // Ascending order (oldest first) — the server sends most-recently-updated
+  // first; the operator wants the list flipped (2026-11-09).
+  convs = convs.slice().sort((a, b) => String(a.updated_at || '').localeCompare(String(b.updated_at || '')));
   const select = document.getElementById('conversationSelect');
   select.innerHTML = '';
   convs.forEach((conv) => {
@@ -2845,7 +2847,9 @@ async function loadConversations() {
       const n = String(c.name || '').toLowerCase();
       return n === 'welcome' || n.includes('first-run') || n.includes('first run');
     });
-    currentConversation = (welcome && welcome.id) || convs[0].id;
+    // Fallback keeps the previous "most recently updated" default: after the
+    // ascending sort that is the last entry, not the first.
+    currentConversation = (welcome && welcome.id) || convs[convs.length - 1].id;
   }
   select.value = currentConversation;
   await loadConversation(currentConversation);
@@ -3401,23 +3405,94 @@ document.getElementById('newConversation').addEventListener('click', async () =>
   await loadConversations();
 });
 
-// Chat-product binding: explicit multi-select (cap 3) + explicit "no product".
-const chatProductsSelect = document.getElementById('chatProductsSelect');
-if (chatProductsSelect) {
-  chatProductsSelect.addEventListener('change', () => {
-    const picked = Array.from(chatProductsSelect.selectedOptions || []).map((o) => o.value).filter(Boolean);
-    setChatProducts(picked).catch((err) => setNameStatus(err.message || 'Could not save products', 'warn'));
-  });
+// Chat-product binding: a button opens the product picker dialog (same modal
+// style as the other console dialogs). Checkboxes list products alphabetically;
+// confirm applies the binding (none checked = explicitly "no product", cap 3).
+function setChatProductsModalStatus(text) {
+  const el = document.getElementById('chatProductsModalStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.hidden = !text;
 }
-const chatProductsClear = document.getElementById('chatProductsClear');
-if (chatProductsClear) {
-  chatProductsClear.addEventListener('click', () => {
-    if (chatProductsSelect) {
-      Array.from(chatProductsSelect.options || []).forEach((o) => { o.selected = false; });
-    }
-    setChatProducts([]).catch((err) => setNameStatus(err.message || 'Could not save products', 'warn'));
-  });
+
+function updateChatProductsModalCap() {
+  const list = document.getElementById('chatProductsModalList');
+  const note = document.getElementById('chatProductsModalNote');
+  if (!list) return;
+  const boxes = Array.from(list.querySelectorAll('input[type="checkbox"]'));
+  const checked = boxes.filter((b) => b.checked);
+  boxes.forEach((b) => { b.disabled = !b.checked && checked.length >= MAX_BOUND_PRODUCTS; });
+  if (note) {
+    note.textContent = checked.length >= MAX_BOUND_PRODUCTS
+      ? `cap ${MAX_BOUND_PRODUCTS} products per chat — uncheck one to change`
+      : 'check the products to bind to this chat; none checked = chat-only (no product)';
+  }
 }
+
+function openChatProductsModal() {
+  const modal = document.getElementById('chatProductsModal');
+  const list = document.getElementById('chatProductsModalList');
+  if (!modal || !list) return;
+  const agents = (lastAgentsList || [])
+    .filter((a) => a && a.slug && a.slug !== 'hub')
+    .map((a) => ({ slug: a.slug, name: a.name || a.agentName || a.slug }))
+    .sort((x, y) => x.name.localeCompare(y.name, undefined, { sensitivity: 'base' }));
+  list.innerHTML = '';
+  agents.forEach((agent) => {
+    const row = document.createElement('label');
+    row.className = 'chat-products-option';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = agent.slug;
+    box.checked = currentConversationProducts.includes(agent.slug);
+    box.addEventListener('change', updateChatProductsModalCap);
+    const text = document.createElement('span');
+    text.textContent = agent.name;
+    row.appendChild(box);
+    row.appendChild(text);
+    list.appendChild(row);
+  });
+  if (!agents.length) {
+    const empty = document.createElement('p');
+    empty.className = 'chat-products-note';
+    empty.textContent = 'No products registered yet.';
+    list.appendChild(empty);
+  }
+  updateChatProductsModalCap();
+  setChatProductsModalStatus('');
+  modal.hidden = false;
+  const first = list.querySelector('input[type="checkbox"]');
+  if (first) first.focus();
+}
+
+function closeChatProductsModal() {
+  const modal = document.getElementById('chatProductsModal');
+  if (modal) modal.hidden = true;
+}
+
+async function saveChatProductsModal() {
+  const list = document.getElementById('chatProductsModalList');
+  if (!list) return;
+  const picked = Array.from(list.querySelectorAll('input[type="checkbox"]'))
+    .filter((b) => b.checked)
+    .map((b) => b.value)
+    .filter(Boolean);
+  try {
+    await setChatProducts(picked);
+    closeChatProductsModal();
+  } catch (err) {
+    setChatProductsModalStatus(err.message || 'Could not save products');
+  }
+}
+
+const chatProductsButton = document.getElementById('chatProductsButton');
+if (chatProductsButton) chatProductsButton.addEventListener('click', openChatProductsModal);
+const chatProductsModalSave = document.getElementById('chatProductsModalSave');
+if (chatProductsModalSave) chatProductsModalSave.addEventListener('click', saveChatProductsModal);
+const chatProductsModalCancel = document.getElementById('chatProductsModalCancel');
+if (chatProductsModalCancel) chatProductsModalCancel.addEventListener('click', closeChatProductsModal);
+const chatProductsModalClose = document.getElementById('chatProductsModalClose');
+if (chatProductsModalClose) chatProductsModalClose.addEventListener('click', closeChatProductsModal);
 document.getElementById('deleteConversation').addEventListener('click', async () => {
   if (!currentConversation) return;
   const select = document.getElementById('conversationSelect');
@@ -3853,6 +3928,24 @@ document.addEventListener('click', (ev) => {
   dismissedBannerErrors.add(key);
   saveDismissedBannerErrors();
   if (lastHealthData) renderHealthBanner(lastHealthData);
+});
+
+// TLDR bubble: tapping the speaker re-speaks that reply's summary through the
+// existing speakTtsText path (generation token + stop-prior-speech reused).
+// No WAV cache this pass — repeat taps re-synthesize.
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest && ev.target.closest('.spoken-aside-speak');
+  if (!btn) return;
+  const key = btn.getAttribute('data-tldr-key');
+  const content = key ? tldrContentByKey.get(key) : '';
+  if (!content) return;
+  // The tap is a real user gesture, so audio unlock is safe: if TTS is off,
+  // re-enable it for this reply instead of doing nothing.
+  if (!ttsEnabled) {
+    ttsGestureUnlocked = true;
+    setTtsEnabled(true);
+  }
+  speakTtsText(content, { summary: true });
 });
 
 // --- Cross-conversation waiting indicator -------------------------------------

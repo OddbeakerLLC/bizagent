@@ -170,7 +170,7 @@ function renderInline(text) {
   return s;
 }
 
-function renderMarkdown(text) {
+function renderMarkdown(text, messageKey) {
   // Hub TTS markers (speak path reads raw body before render):
   // 1) Preferred: fenced ```tts block — rendered as a labeled "Summary"
   //    aside (not a code block) by the fence handler below; speak path unaffected.
@@ -352,10 +352,15 @@ function renderMarkdown(text) {
         // Summary aside (spoken text): labeled, tinted, hard-wrapped (never a
         // scrollable code box, even for long unbroken strings).
         const body = escapeHtml(codeLines.join('\n').trim());
+        // Speaker icon is a real re-speak button: app.js resolves the message
+        // key back to that reply's text and calls speakTtsText(..., {summary:true}).
+        const keyAttr = escapeHtml(String(messageKey || ''));
         htmlParts.push(
           '<div class="spoken-aside">'
           + '<div class="spoken-aside-header">'
+          + `<button type="button" class="spoken-aside-speak" data-tldr-key="${keyAttr}" aria-label="Re-speak this summary" title="Re-speak this summary">`
           + '<svg class="spoken-aside-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>'
+          + '</button>'
           + '<span>Summary</span>'
           + '</div>'
           + `<div class="spoken-aside-body">${body}</div>`

@@ -953,49 +953,46 @@ body.logs-page {
 .auth-controls button.btn-secondary:hover {
   background: #f3f4f6;
 }
-/* Chat-product binding (2026-11-08): explicit product state per chat. */
-.chat-products {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-width: min(320px, 40vw);
-}
-.chat-products-summary {
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-  color: #4b5563;
-}
-.chat-products-label {
-  color: #6b7280;
-  font-weight: 500;
-  margin-right: 6px;
-}
-.chat-products-state {
+/* Chat-product binding (2026-11-09): product names on a line below the
+   conversation dropdown; the picker itself lives in a modal dialog. */
+.conversation-products-line {
+  font-size: 12px;
   color: #172033;
+  max-width: min(320px, 40vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.chat-products-state.is-none {
+.conversation-products-line.is-none {
   color: #6b7280;
   font-style: italic;
 }
-.chat-products-body {
+.chat-products-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px 10px;
-  border: 1px solid #d1d5db;
-  border-radius: 10px;
-  background: #f9fafb;
+  max-height: 40vh;
+  overflow: auto;
+  padding: 2px 0;
 }
-.chat-products-body select {
-  min-width: 200px;
-  padding: 4px 6px;
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
-  background: #ffffff;
+.chat-products-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #111827;
+  cursor: pointer;
+}
+.chat-products-option input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+.chat-products-option input[type="checkbox"]:disabled + span {
+  color: #9ca3af;
 }
 .chat-products-note {
-  margin: 0;
+  margin: 8px 0 0;
   font-size: 12px;
   color: #6b7280;
 }
@@ -1328,6 +1325,21 @@ button {
   margin-bottom: 3px;
 }
 .spoken-aside-header .spoken-aside-icon { flex: 0 0 auto; }
+/* Re-speak button (the speaker icon) — stays visually part of the header. */
+.spoken-aside-header .spoken-aside-speak {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.spoken-aside-header .spoken-aside-speak:hover { background: rgba(29, 78, 216, 0.16); }
+.spoken-aside-header .spoken-aside-speak:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 1px; }
+.spoken-aside-header .spoken-aside-speak:active { background: rgba(29, 78, 216, 0.24); }
 .spoken-aside-body {
   font-size: 0.92em;
   font-style: italic;

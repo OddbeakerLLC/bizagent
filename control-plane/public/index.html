@@ -10,7 +10,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="BizAgent">
-  <link rel="stylesheet" href="/styles.css?v=20261108-chat-product-binding">
+  <link rel="stylesheet" href="/styles.css?v=20261109-console-products-sort">
 </head>
 <body>
   <div id="healthBanner" class="health-banner" hidden></div>
@@ -27,17 +27,8 @@
         <div id="conversationMenu" class="conversation-menu">
           <label for="conversationSelect">Conversation</label>
           <select id="conversationSelect"></select>
-          <details id="chatProducts" class="chat-products" title="Products bound to this chat">
-            <summary class="chat-products-summary">
-              <span class="chat-products-label">products</span>
-              <span id="chatProductsState" class="chat-products-state">no product</span>
-            </summary>
-            <div class="chat-products-body">
-              <select id="chatProductsSelect" multiple size="4" aria-label="Products bound to this chat (max 3)"></select>
-              <button id="chatProductsClear" type="button" class="btn-secondary" title="Explicitly bind this chat to no product (chat-only)">no product</button>
-              <p id="chatProductsNote" class="chat-products-note"></p>
-            </div>
-          </details>
+          <div id="conversationProductsLine" class="conversation-products-line is-none" title="Products bound to this chat"></div>
+          <button id="chatProductsButton" type="button" class="btn-secondary" title="Choose the products bound to this chat">products</button>
           <button id="newConversation" type="button" title="New conversation" aria-label="New conversation">+</button>
           <button id="deleteConversation" type="button" class="btn-secondary" title="Delete conversation" aria-label="Delete conversation">Delete</button>
         </div>
@@ -119,6 +110,25 @@
     </div>
   </div>
 
+  <div id="chatProductsModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="chatProductsModalTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="chatProductsModalTitle">Products for this chat</h3>
+        <button id="chatProductsModalClose" type="button" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="form-modal-desc">Check the products to bind to this conversation (max 3). Leave all unchecked to make it a chat-only conversation with no product.</p>
+        <div id="chatProductsModalList" class="chat-products-list"></div>
+        <p id="chatProductsModalNote" class="chat-products-note"></p>
+        <p id="chatProductsModalStatus" class="modal-status auth-status" hidden></p>
+      </div>
+      <div class="modal-footer">
+        <button id="chatProductsModalCancel" type="button" class="btn-secondary">Cancel</button>
+        <button id="chatProductsModalSave" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <div id="formModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="formModalTitle">
     <div class="modal-content">
       <div class="modal-header">
@@ -176,8 +186,8 @@
   </div>
 
   <script src="/enterprise/enterprise-panel.js" onerror="/* enterprise optional */"></script>
-  <script src="/markdown.js?v=20261017-intraword-underscore"></script>
-  <script src="/app.js?v=20261108-chat-product-binding"></script>
+  <script src="/markdown.js?v=20261109-console-products-sort"></script>
+  <script src="/app.js?v=20261109-console-products-sort"></script>
   <script>
     // PWA: register the app-shell service worker (secure contexts only; silent no-op otherwise).
     if ('serviceWorker' in navigator && window.isSecureContext) {
