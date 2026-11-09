@@ -651,4 +651,41 @@ fs.rmSync(hub, { recursive: true, force: true });
 console.log("  ok: safe-mode auto-exit stateful");
 ' || fail "safe-mode auto-exit stateful"
 
+# ---------------------------------------------------------------------------
+# 10. Health levels are banner-only: no chat post (operator rule 2026-11-08)
+# ---------------------------------------------------------------------------
+NODE_EVAL '
+const health = require("./control-plane/lib/health.js");
+const conversations = require("./control-plane/lib/conversations.js");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const assert = (cond, msg) => { if (!cond) { console.error("FAIL: " + msg); process.exit(1); } };
+const hub = fs.mkdtempSync(path.join(os.tmpdir(), "health-banner-only-"));
+fs.mkdirSync(path.join(hub, "logs"), { recursive: true });
+fs.mkdirSync(path.join(hub, ".bizagent"), { recursive: true });
+fs.writeFileSync(path.join(hub, "registry.json"), JSON.stringify({ settings: {}, products: [] }));
+// Force a non-ok level regardless of the test machine: sparse logs file past the warn line.
+fs.writeFileSync(path.join(hub, "logs", "big.log"), "");
+fs.truncateSync(path.join(hub, "logs", "big.log"), 201 * 1024 * 1024);
+
+assert(typeof health.postHealthChatLine !== "function", "health must not expose a chat-posting path (banner-only rule)");
+
+const conv = conversations.createConversation(hub, "Health Banner Only");
+const report = health.runHealthCheck(hub, { mitigate: false });
+assert(report.level !== "ok", "test hub should be non-ok, got " + report.level);
+const saved = conversations.getConversation(hub, conv.id);
+assert(saved.messages.length === 0, "health level must not post a chat message, got " + saved.messages.length);
+assert(fs.existsSync(path.join(hub, "logs", "health.json")), "logs/health.json must still carry the health detail");
+assert(fs.readFileSync(path.join(hub, "logs", "health.status"), "utf8").startsWith(report.level), "logs/health.status must still record the level");
+assert(!fs.existsSync(path.join(hub, ".bizagent", "health-chat-stamp.json")), "no chat-dedupe stamp should be written");
+
+// Chat stays the channel for session-scoped errors (model/API, dispatch, file-not-found).
+conversations.appendMessage(hub, conv.id, "status", "beakernet failed (429)", { kind: "error" });
+const after = conversations.getConversation(hub, conv.id).messages;
+assert(after.length === 1 && after[0].kind === "error", "non-health session errors must still reach chat");
+fs.rmSync(hub, { recursive: true, force: true });
+console.log("  ok: health levels banner-only (no chat post)");
+' || fail "health banner-only"
+
 echo "  ok: test-health"

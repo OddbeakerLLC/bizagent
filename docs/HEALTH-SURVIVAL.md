@@ -106,12 +106,16 @@ probes cannot flap the flag.
 1. **UI banner** on every console page (`/api/health`, polled every 30s):
    red = safe mode / critical / emergency; yellow = warn or
    `provider_fallback_active`. Persisted server-side — stays until green.
-2. **Console chat line** once per incident (30-min dedupe) so it lands in
-   conversation history. It is skipped while the same error is showing as a card
-   in the banner — both use the same key (`slug|ts|title`; the dispatcher stamps
-   it on the message as `error_key`). The chat is the fallback whenever the
-   banner is not actually showing that item: hidden banner, dismissed card,
-   connection-lost banner, cap overflow, or a message with no key.
+   Health levels (warn / emergency) are **banner-only** — the watchdog never
+   posts a health line into chat (operator rule 2026-11-08). The health detail
+   stays in `logs/health.json` + `logs/health.status` and in the banner card.
+2. **Console chat** carries everything that pertains to the chat session itself:
+   agent/model/API failures, file-not-found, dispatch problems. An error bubble
+   is skipped while the same error is showing as a card in the banner — both use
+   the same key (`slug|ts|title`; the dispatcher stamps it on the message as
+   `error_key`). The chat is the fallback whenever the banner is not actually
+   showing that item: hidden banner, dismissed card, connection-lost banner, cap
+   overflow, or a message with no key.
 3. **Out-of-band:** systemd `OnFailure=` → `health-alert-failure.sh` writes
    `HEALTH-ALERT.md` and posts the optional webhook — works with port 8787 down.
 4. **Local last-resort:** `HEALTH-ALERT.md` in the hub root (Library can show
@@ -144,4 +148,5 @@ only).
 safe-mode gate + auto-exit, keyless-provider check (ollama no-key → skipped,
 grok no-key → critical), fallback trigger (credits/auth/model vs
 network/rate-limit), out-of-process probe end-to-end, growth-rate sampling,
-HEALTH-ALERT lifecycle.
+HEALTH-ALERT lifecycle, banner-only health (non-ok run appends no chat message;
+non-health session errors still reach chat).

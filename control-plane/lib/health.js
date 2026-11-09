@@ -542,46 +542,11 @@ function updateHealthAlertFile(hub, report) {
   }
 }
 
-/**
- * Console chat line, once per incident (dedupe ~30 min) so it lands in history.
- */
-function postHealthChatLine(hub, report) {
-  if (report.level === 'ok') return false;
-  const stampFile = path.join(hub, '.bizagent', 'health-chat-stamp.json');
-  const key = `${report.level}`;
-  let prev = null;
-  try {
-    prev = JSON.parse(fs.readFileSync(stampFile, 'utf8'));
-  } catch (_err) { /* ignore */ }
-  const now = Date.now();
-  if (prev && prev.key === key && now - Number(prev.ts || 0) < 30 * 60 * 1000) return false;
-  try {
-    writeJsonAtomic(stampFile, { key, ts: now });
-  } catch (_err) { /* ignore */ }
-
-  const bad = (report.checks || []).filter((c) => c.level !== 'ok');
-  const body = [
-    `**Hub health: ${report.level}**`,
-    '',
-    ...bad.map((c) => `- ${c.name}: ${c.detail}`),
-    '',
-    report.level === 'emergency'
-      ? 'Auto-mitigation ran (logs capped, archives pruned, agent launches paused). Product artifacts were not touched.'
-      : 'Watch this space — details in `logs/health.json`.',
-  ].join('\n');
-  try {
-    const { listConversations, appendMessage } = require('./conversations');
-    const convs = (listConversations(hub) || [])
-      .slice()
-      .sort((a, b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')));
-    const cid = convs[0] && convs[0].id;
-    if (!cid) return false;
-    appendMessage(hub, cid, 'status', body, { kind: 'health' });
-    return true;
-  } catch (_err) {
-    return false;
-  }
-}
+// Health levels are banner-only (operator rule 2026-11-08): warn/emergency are
+// shown in the console health banner and in `logs/health.json`, never as a chat
+// bubble. Chat stays reserved for things that pertain to the chat session itself
+// (model/API failures, file-not-found, dispatch problems) — see
+// `dispatcher.recordAgentError`, which still posts error bubbles.
 
 // ---------------------------------------------------------------------------
 // Emergency auto-mitigation (no LLM involved)
@@ -693,9 +658,6 @@ function runHealthCheck(hub, { mitigate: doMitigate = true } = {}) {
   try {
     updateHealthAlertFile(hub, report);
   } catch (_err) { /* ignore */ }
-  try {
-    postHealthChatLine(hub, report);
-  } catch (_err) { /* ignore */ }
   let actions = [];
   if (doMitigate) {
     try {
@@ -717,7 +679,6 @@ module.exports = {
   providerKeyPresent,
   maybeAutoExitSafeMode,
   mitigate,
-  postHealthChatLine,
   runHealthCheck,
   sample,
   updateHealthAlertFile,
