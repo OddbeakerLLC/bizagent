@@ -276,7 +276,6 @@ function routeOutboxes(hub) {
   let warnings = 0;
   let quarantined = 0;
   const startTime = Date.now();
-  const tRoute = new Date().toISOString();
   for (const outbox of outboxes(hub)) {
     for (const file of markdownFiles(outbox)) {
       const text = fs.readFileSync(file, 'utf8');
@@ -515,7 +514,9 @@ function writeOutboxMessage(hub, opts = {}) {
     }
   }
 
-  const date = opts.date || new Date().toISOString().slice(0, 10);
+  // Frontmatter `date:` and the filename are operator-visible — host-local
+  // time, so mail written late in the local day gets the right day.
+  const date = opts.date || require('./local-time').localDateString();
   const kind = String(opts.kind || '').trim();
   const header = [
     '---',

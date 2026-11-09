@@ -546,8 +546,11 @@ function postAgentCompletionNotice(hub, conversationId, slug) {
 function writeHubInboxMessage(hub, content, conversationId, opts = {}) {
   const start = Date.now();
   const now = new Date();
-  const date = now.toISOString().slice(0, 10);
-  const stamp = now.toISOString().replace(/[-:TZ.]/g, '').slice(0, 17);
+  // Operator-visible filename + frontmatter date use host-local time (the
+  // console displays these); message created_at fields stay ISO-UTC.
+  const { localDateString, localCompactStamp } = require('./local-time');
+  const date = localDateString(now);
+  const stamp = localCompactStamp(now);
   const header = [
     '---',
     'from: operator',

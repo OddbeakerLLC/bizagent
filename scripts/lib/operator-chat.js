@@ -74,7 +74,8 @@ function fmtTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return String(iso);
-  return d.toISOString().slice(11, 19);
+  const { localTimeString } = require('../control-plane/lib/local-time');
+  return localTimeString(d);
 }
 
 function roleLabel(role) {

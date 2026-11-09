@@ -555,7 +555,7 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
     recordRecentError(hub, recentEntry);
   } catch (_err) { /* ignore */ }
 
-  const dateStr = new Date().toISOString().slice(0, 10);
+  const dateStr = require('./local-time').localDateString();
   const subject = classified
     ? classified.kind === 'credits'
       ? 'LLM credits exhausted'

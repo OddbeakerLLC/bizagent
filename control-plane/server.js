@@ -490,7 +490,7 @@ function getAgentDetail(hub, slug) {
 
   let journal = null;
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = require("./lib/local-time").localDateString();
     let journalPath = path.join(journalDir, `${today}.md`);
     if (!fs.existsSync(journalPath)) {
       const files = fs
@@ -1107,7 +1107,7 @@ async function handleApi(config, req, res) {
       try {
         const journalDir = path.join(config.hub, "journal");
         fs.mkdirSync(journalDir, { recursive: true });
-        const day = new Date().toISOString().slice(0, 10);
+        const day = require("./lib/local-time").localDateString();
         const jpath = path.join(journalDir, `${day}.md`);
         const line = `- [Company] Uploaded \`company/${written.path}\` via control plane (${written.size} bytes)\n`;
         if (!fs.existsSync(jpath)) {

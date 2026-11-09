@@ -47,7 +47,7 @@ function assertSlug(slug) {
 }
 
 function stampPrefix() {
-  const iso = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 15);
+  const iso = require('./local-time').localCompactStampSecs();
   const rnd = crypto.randomBytes(2).toString('hex');
   return `${iso}-${rnd}`;
 }

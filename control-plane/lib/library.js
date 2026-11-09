@@ -156,7 +156,7 @@ function slugifyTitle(title) {
 }
 
 function newId() {
-  const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const day = require('./local-time').localDateString().replace(/-/g, '');
   const rnd = crypto.randomBytes(4).toString('hex');
   return `lib_${day}_${rnd}`;
 }
@@ -790,7 +790,7 @@ function addLibraryDocument(hub, opts = {}) {
 
   ensureLibrary(hub);
   const root = hubRoot(hub);
-  const day = new Date().toISOString().slice(0, 10);
+  const day = require('./local-time').localDateString();
   let filename = opts.filename
     ? safeFilename(opts.filename)
     : safeFilename(`${day}-${slugifyTitle(title)}.md`);
@@ -872,7 +872,7 @@ function addLibraryDocument(hub, opts = {}) {
  */
 function addLibraryDiagram(hub, opts = {}) {
   const title = String(opts.title || 'Diagram').trim() || 'Diagram';
-  const day = new Date().toISOString().slice(0, 10);
+  const day = require('./local-time').localDateString();
   const filename = opts.filename
     ? safeFilename(opts.filename)
     : safeFilename(`${day}-${slugifyTitle(title)}.puml`);

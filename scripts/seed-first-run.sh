@@ -24,7 +24,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Framework tree that ships control-plane/lib (same as HUB on real install).
 FRAMEWORK="$(cd "$SCRIPT_DIR/.." && pwd)"
 HUB="$(cd "${HUB:-$FRAMEWORK}" && pwd)"
-TODAY="$(date -u +%Y-%m-%d)"
+# Local date — the first-run mail filename + frontmatter date are operator-visible.
+TODAY="$(date +%Y-%m-%d)"
 INBOX="$HUB/inbox"
 ARCHIVE="$HUB/inbox/archive"
 MARKER="$HUB/.bizagent/first-run-seeded"
