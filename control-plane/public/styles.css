@@ -927,6 +927,14 @@ body.logs-page {
   color: #4b5563;
   font-weight: 650;
 }
+/* Column stack so the product line renders on its own line directly below
+   the dropdown (operator request 2026-11-09), not beside it. */
+.conversation-select-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
 .conversation-menu select {
   min-width: 240px;
   max-width: min(420px, 45vw);
@@ -1523,6 +1531,8 @@ button {
     min-width: 0;
     width: 100%;
     max-width: none;
+  }
+  .conversation-select-stack {
     flex: 1 1 100%;
   }
   .auth-panel,

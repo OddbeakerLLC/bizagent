@@ -26,8 +26,10 @@
       <header class="topbar">
         <div id="conversationMenu" class="conversation-menu">
           <label for="conversationSelect">Conversation</label>
-          <select id="conversationSelect"></select>
-          <div id="conversationProductsLine" class="conversation-products-line is-none" title="Products bound to this chat"></div>
+          <div class="conversation-select-stack">
+            <select id="conversationSelect"></select>
+            <div id="conversationProductsLine" class="conversation-products-line is-none" title="Products bound to this chat"></div>
+          </div>
           <button id="chatProductsButton" type="button" class="btn-secondary" title="Choose the products bound to this chat">products</button>
           <button id="newConversation" type="button" title="New conversation" aria-label="New conversation">+</button>
           <button id="deleteConversation" type="button" class="btn-secondary" title="Delete conversation" aria-label="Delete conversation">Delete</button>
