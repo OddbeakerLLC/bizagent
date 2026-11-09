@@ -2824,15 +2824,24 @@ async function setChatProducts(products) {
   return conv;
 }
 
+// Last selected conversation persists across reloads (operator request 2026-11-09).
+const LAST_CONVERSATION_KEY = 'BIZAGENT_LAST_CONVERSATION';
+function readLastConversationId() {
+  try { return localStorage.getItem(LAST_CONVERSATION_KEY) || ''; } catch (_) { return ''; }
+}
+function saveLastConversation(id) {
+  try { if (id) localStorage.setItem(LAST_CONVERSATION_KEY, String(id)); } catch (_) {}
+}
+
 async function loadConversations() {
   let convs = await api('/api/conversations');
   if (convs.length === 0) {
     const created = await api('/api/conversations', { method: 'POST', body: JSON.stringify({ name: 'Main' }) });
     convs = [{ id: created.id, name: created.name }];
   }
-  // Ascending order (oldest first) — the server sends most-recently-updated
-  // first; the operator wants the list flipped (2026-11-09).
-  convs = convs.slice().sort((a, b) => String(a.updated_at || '').localeCompare(String(b.updated_at || '')));
+  // Alphabetical by display name (operator request 2026-11-09); the server
+  // sends most-recently-updated first.
+  convs = convs.slice().sort((a, b) => conversationOptionLabel(a).localeCompare(conversationOptionLabel(b)));
   const select = document.getElementById('conversationSelect');
   select.innerHTML = '';
   convs.forEach((conv) => {
@@ -2847,9 +2856,14 @@ async function loadConversations() {
       const n = String(c.name || '').toLowerCase();
       return n === 'welcome' || n.includes('first-run') || n.includes('first run');
     });
-    // Fallback keeps the previous "most recently updated" default: after the
-    // ascending sort that is the last entry, not the first.
-    currentConversation = (welcome && welcome.id) || convs[convs.length - 1].id;
+    // Restore the last selected conversation across reloads (operator request
+    // 2026-11-09); with no saved selection keep the previous default: the
+    // Welcome/first-run chat, else the most recently updated conversation
+    // (independent of the alphabetical sort above).
+    const savedId = readLastConversationId();
+    const saved = savedId && convs.find((c) => c.id === savedId);
+    const mostRecent = convs.slice().sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')))[0];
+    currentConversation = (saved && saved.id) || (welcome && welcome.id) || (mostRecent && mostRecent.id) || convs[0].id;
   }
   select.value = currentConversation;
   await loadConversation(currentConversation);
@@ -2873,6 +2887,7 @@ async function softReloadConversation(id) {
 async function loadConversation(id) {
   const switching = id !== currentConversation;
   currentConversation = id;
+  saveLastConversation(id);
   // Prefer WS subscribe for conversation feed; falls back to SSE inside subscribeConversation.
   subscribeConversation(id);
   const conv = await api(`/api/conversations/${encodeURIComponent(id)}`);
