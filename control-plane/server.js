@@ -2188,6 +2188,31 @@ function start(hubInput) {
   };
   healthTick();
   setInterval(healthTick, 45 * 1000);
+  // Listen errors (port busy, permissions, ...) previously fell through to the
+  // uncaughtException crash handler, which only writes a structured-log event —
+  // the console/server log stayed empty and a fresh install looked broken with
+  // no diagnosable reason. Surface the common cases directly.
+  server.on('error', (err) => {
+    const detail = (err && (err.stack || err.message)) || String(err);
+    try {
+      logEvent(config.hub, {
+        event: 'control_plane_start',
+        status: 'error',
+        error: (err && err.code) || 'listen_error',
+        message: String(err && err.message || detail).slice(0, 300),
+        host: config.host,
+        port: config.port,
+      });
+    } catch (_err) { /* never block the error report on logging */ }
+    if (err && err.code === 'EADDRINUSE') {
+      console.error(`${new Date().toISOString()} bizagent-control-plane: cannot listen on ${config.host}:${config.port} — port already in use.`);
+      console.error('  Another process (often a control plane from a previous install) is bound to it.');
+      console.error('  Fix: stop that process, or change the port — BIZAGENT_PORT env var or registry.json settings.control_plane.port — then start again.');
+    } else {
+      console.error(`${new Date().toISOString()} bizagent-control-plane: server error: ${detail}`);
+    }
+    process.exit(1);
+  });
   server.listen(config.port, config.host, () => {
     const scheme = server.tlsActive ? "https" : "http";
     const bindUrl = `${scheme}://${config.host}:${config.port}`;

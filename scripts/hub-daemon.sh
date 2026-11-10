@@ -34,10 +34,13 @@ is_running() {
       fi
     fi
   fi
-  # socket + scan fallback
+  # socket + scan fallback — scoped to THIS hub's daemon. A bare pgrep for
+  # 'hub-daemon.js' can return another hub's daemon on a multi-hub machine,
+  # which made start report "already running" and never start ours.
   if [ -S "$SOCK" ]; then
     local p
-    p="$(pgrep -f 'hub-daemon.js' 2>/dev/null | head -n1 || true)"
+    p="$(pgrep -af 'hub-daemon\.js' 2>/dev/null \
+      | grep -F -- "--hub $HUB" | head -n1 | cut -d' ' -f1 || true)"
     if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
       echo "$p"
       return 0
@@ -110,10 +113,13 @@ stop_daemon() {
     sleep 0.3
     kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
   fi
-  # any stragglers
-  pgrep -f 'hub-daemon.js' 2>/dev/null | while read -r p; do
-    kill "$p" 2>/dev/null || true
-  done
+  # any stragglers for THIS hub only — the old fleet-wide
+  # `pgrep -f hub-daemon.js` sweep killed every hub's daemon on the machine.
+  pgrep -af 'hub-daemon\.js' 2>/dev/null \
+    | grep -F -- "--hub $HUB" | cut -d' ' -f1 \
+    | while read -r p; do
+        kill "$p" 2>/dev/null || true
+      done || true
   rm -f "$PID_FILE" "$SOCK"
   echo "hub-daemon stopped"
 }

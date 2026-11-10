@@ -3536,7 +3536,13 @@ if (errMsgs2.length !== 1) {
   process.exit(7);
 }
 const journal = fs.readFileSync(
-  path.join(hub, 'journal', new Date().toISOString().slice(0, 10) + '.md'),
+  path.join(hub, 'journal', (() => {
+    // server.js stamps journal day files with the host-LOCAL date
+    // (control-plane/lib/local-time.js), not UTC — match it here.
+    const d = new Date();
+    const loc = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return loc + '.md';
+  })()),
   'utf8',
 );
 if (!/Incident.*bizagent/i.test(journal)) {
@@ -4022,6 +4028,26 @@ fs.rmSync(hub, { recursive: true, force: true });
 process.exit(0);
 NODE
 fi
+
+
+# EADDRINUSE: a port-in-use start must fail LOUDLY. The old silent crash
+# (uncaughtException → structured-log only) left "failed to start; see log"
+# with an empty server log — a fresh install looked broken with no reason
+# (2026-11-10 installer bug report).
+EADDR_HUB="$(mktemp -d "${TMPDIR:-/tmp}/bizagent-eaddrinuse-XXXXXX")"
+mkdir -p "$EADDR_HUB/.bizagent" "$EADDR_HUB/logs"
+EADDR_PORT="$(node -e 'const s=require("net").createServer();s.listen(0,"0.0.0.0",()=>{console.log(s.address().port);s.close()})')"
+node -e "const s=require('net').createServer();s.listen($EADDR_PORT,'0.0.0.0',()=>{setTimeout(()=>process.exit(0),20000)})" &
+EADDR_HOLDER=$!
+sleep 0.5
+EADDR_OUT="$(BIZAGENT_PORT="$EADDR_PORT" timeout 30 node "$SERVER" serve --hub "$EADDR_HUB" 2>&1 || true)"
+kill "$EADDR_HOLDER" 2>/dev/null || true
+wait "$EADDR_HOLDER" 2>/dev/null || true
+case "$EADDR_OUT" in
+  *"already in use"*) ;;
+  *) rm -rf "$EADDR_HUB"; fail "port-in-use start did not report the busy port clearly" ;;
+esac
+rm -rf "$EADDR_HUB"
 
 
 echo "  ok: control-plane"

@@ -42,6 +42,14 @@ note() { printf "  ${DIM}%s${NC}\n" "$1"; }
 warn() { printf "  ${YELLOW}!${NC} %s\n" "$1"; }
 die()  { printf "\n${RED}✗ %s${NC}\n\n" "$1" >&2; exit 1; }
 
+# Usable controlling terminal? /dev/tty always exists as a device node, and
+# the access()-based [[ -r /dev/tty ]] test passes even when the open itself
+# fails (no controlling terminal — CI, pipes, some service contexts). Actually
+# open it to know whether the prompt loops below can run.
+have_tty() {
+  : </dev/tty 2>/dev/null
+}
+
 # Wipe dep-install noise before the first onboarding questions.
 # Only on a real TTY and interactive installs — never on failure paths
 # (call only after deps succeed) or CI/non-interactive runs.
@@ -983,8 +991,15 @@ prompt_api_key() {
   local existing="${!SELECTED_API_KEY_VAR:-}"
   if [[ -n "$existing" ]]; then
     local save
-    read -r -p "  $SELECTED_API_KEY_VAR is set in this shell. Save it to .bizagent/env for the hub? [Y/n]: " save </dev/tty
-    save="${save:-Y}"
+    if have_tty; then
+      read -r -p "  $SELECTED_API_KEY_VAR is set in this shell. Save it to .bizagent/env for the hub? [Y/n]: " save </dev/tty
+      save="${save:-Y}"
+    else
+      # Headless install with an exported provider key: default to saving it
+      # (the documented non-interactive path) instead of dying on /dev/tty.
+      save="Y"
+      note "No terminal attached — saving $SELECTED_API_KEY_VAR from the environment to .bizagent/env."
+    fi
     if [[ "$save" =~ ^[Yy] ]]; then
       SELECTED_API_KEY="$existing"
       ok "Will write $SELECTED_API_KEY_VAR to .bizagent/env"
@@ -992,6 +1007,19 @@ prompt_api_key() {
       note "Leaving .bizagent/env without $SELECTED_API_KEY_VAR (hub must inherit the key another way)."
     fi
     return
+  fi
+
+  # No terminal and no key handed to us: the prompt loop below cannot run.
+  # Fail with instructions instead of cryptic "/dev/tty" errors.
+  if ! have_tty; then
+    die "No API key provided and no terminal is available to prompt for one.
+Hand the key to the installer through its environment, e.g.:
+
+  curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | BIZAGENT_API_KEY=yourkey bash
+
+or export BIZAGENT_API_KEY (or the provider key, e.g. XAI_API_KEY) before
+running the installer. Note: 'BIZAGENT_API_KEY=... curl ... | bash' does NOT
+work — the variable prefix applies to curl, not to the installer."
   fi
 
   printf "\n${BOLD}API key for provider %s${NC}\n" "${SELECTED_PROVIDER:-grok}"
@@ -1618,6 +1646,9 @@ except Exception:
 PY
 )
   port="${port:-8787}"
+  # BIZAGENT_PORT overrides the registry port for the control plane itself
+  # (control-plane/lib/config.js) — the wait + printed URL must follow it.
+  port="${BIZAGENT_PORT:-$port}"
 
   # First-run inbox + Welcome conversation seed BEFORE control-plane start so
   # the first UI load can show the short PTL bubble (and TTS can speak it).

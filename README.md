@@ -78,7 +78,10 @@ Three steps — one command does the work.
 > [console.x.ai](https://console.x.ai/). For other providers see the
 > [provider table](#llm-providers) below. You can also hand the key off
 > non-interactively so the installer never pauses:
-> `BIZAGENT_API_KEY=... curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | bash`
+> `curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | BIZAGENT_API_KEY=... bash`
+>
+> (Put the variable on the `bash` side of the pipe — `BIZAGENT_API_KEY=... curl … | bash`
+> applies it to `curl` only, and the installer never sees it.)
 
 **Step 1 (optional).** Create a dedicated OS user (strongly recommended):
 
@@ -101,7 +104,7 @@ above (or granting passwordless `sudo` for the package manager) is still the
 smoothest path.
 
 > **Headless server (VPS, SSH-only)?** Prefer non-interactive key handoff:
-> `BIZAGENT_API_KEY=... curl -fsSL ... | bash` (writes `.bizagent/env` for the
+> `curl -fsSL ... | BIZAGENT_API_KEY=... bash` (writes `.bizagent/env` for the
 > default LLM provider, Grok / `XAI_API_KEY` unless `BIZAGENT_PROVIDER` is set).
 > Or export the provider key (`XAI_API_KEY` / `OPENAI_API_KEY` /
 > `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `VENICE_API_KEY`) before install.

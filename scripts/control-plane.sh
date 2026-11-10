@@ -225,7 +225,9 @@ start_server() {
 
   start_hub_daemon_best_effort() {
     if [ -x "$ROOT/scripts/hub-daemon.sh" ]; then
-      "$ROOT/scripts/hub-daemon.sh" start 2>/dev/null \
+      # Scope the daemon to THIS hub: hub-daemon.sh falls back to BIZAGENT_HUB
+      # (which may point at another hub on this machine) or its own repo root.
+      BIZAGENT_HUB="$HUB" "$ROOT/scripts/hub-daemon.sh" start 2>/dev/null \
         || echo "hub-daemon start skipped (cold launch still works)"
     fi
   }
@@ -278,7 +280,7 @@ stop_server() {
     fi
     rm -f "$PID_FILE"
     if [ -x "$ROOT/scripts/hub-daemon.sh" ]; then
-      "$ROOT/scripts/hub-daemon.sh" stop 2>/dev/null || true
+      BIZAGENT_HUB="$HUB" "$ROOT/scripts/hub-daemon.sh" stop 2>/dev/null || true
     fi
     stop_llmapi_best_effort
     echo "bizagent-control-plane stopped via systemd ($unit)"
@@ -303,7 +305,7 @@ stop_server() {
   echo "bizagent-control-plane stopped: pid(s) $(printf '%s' "$stopped" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
 
   if [ -x "$ROOT/scripts/hub-daemon.sh" ]; then
-    "$ROOT/scripts/hub-daemon.sh" stop 2>/dev/null || true
+    BIZAGENT_HUB="$HUB" "$ROOT/scripts/hub-daemon.sh" stop 2>/dev/null || true
   fi
   stop_llmapi_best_effort
   return 0
