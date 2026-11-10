@@ -273,6 +273,39 @@ ensure_node() {
   _require_node_version
 }
 
+# npm is a hard dependency: the control-plane and agent-runtime npm installs
+# (and any npm-installed CLI) fail later with confusing exit-1/auth-style
+# errors when npm is missing. A machine can have node without npm (tarball
+# installs, partial removals), so check it explicitly in preflight.
+ensure_npm_hard() {
+  if have npm; then
+    ok "npm present ($(npm -v 2>/dev/null))"
+    return
+  fi
+  note "npm not found (node is present) — installing npm..."
+  case "$PKG" in
+    brew)   pkg_install node || true ;;   # npm ships inside the node formula
+    apt)    pkg_install npm || true ;;
+    dnf)    pkg_install npm || true ;;
+    pacman) pkg_install npm || true ;;
+    zypper) pkg_install npm || true ;;
+  esac
+  hash -r 2>/dev/null || true
+  if have npm; then
+    ok "npm installed"
+    return
+  fi
+  die "npm is required but was not found and could not be installed automatically.
+npm ships with Node.js — install it, then re-run this installer:
+
+  Official installer: https://nodejs.org
+  Debian/Ubuntu:  sudo apt-get install -y nodejs npm
+  Fedora/RHEL:    sudo dnf install -y nodejs npm
+  macOS (brew):   brew install node
+
+Then confirm:  node -v && npm -v"
+}
+
 ensure_curl() {
   if have curl; then
     ok "curl present"
@@ -1733,6 +1766,7 @@ main() {
   ensure python3
   ensure_curl
   ensure_node
+  ensure_npm_hard
   ensure_cron
   # PlantUML UI preview stack (must be present before software setup / handoff)
   ensure_java
