@@ -82,6 +82,7 @@ try {
     provider: s.provider,
     model: model || null,
     keyEnv: entry.keyEnv || s.keyEnv || "",
+    optionalKey: entry.optionalKey === true,
     extraArgs: s.extraArgs || "",
   }));
 } catch (err) {
@@ -99,6 +100,7 @@ NODE
     bad "launch resolve failed: $ERR"
   else
     KEY_ENV="$(node -e 'const j=JSON.parse(process.argv[1]);process.stdout.write(j.keyEnv||"")' "$EVAL")"
+    OPTIONAL_KEY="$(node -e 'const j=JSON.parse(process.argv[1]);process.stdout.write(j.optionalKey?"1":"0")' "$EVAL" 2>/dev/null || echo 0)"
     EXTRA="$(node -e 'const j=JSON.parse(process.argv[1]);process.stdout.write(j.extraArgs||"")' "$EVAL")"
     ok "launch resolves (${EXTRA})"
 
@@ -114,13 +116,18 @@ NODE
       note "Create it with the key for your provider (see .bizagent/env.example)"
     fi
 
-    if [[ -n "$KEY_ENV" ]]; then
+    if [[ -n "$KEY_ENV" && "$OPTIONAL_KEY" != "1" ]]; then
       if [[ -n "${!KEY_ENV:-}" ]]; then
         ok "$KEY_ENV is set (value hidden)"
       else
         bad "$KEY_ENV is empty — hub turns will fail at API auth"
         note "Add $KEY_ENV=... to .bizagent/env then: scripts/control-plane.sh restart"
       fi
+    elif [[ -n "$KEY_ENV" && "$OPTIONAL_KEY" == "1" ]]; then
+      # Keyless provider (e.g. local Ollama, cli.json optionalKey: true) — a
+      # missing key must not block first-run (mirrors providerKeyOptional()
+      # in control-plane/lib/health.js).
+      ok "$KEY_ENV not set — optional for $PROVIDER (keyless OK)"
     fi
   fi
 fi

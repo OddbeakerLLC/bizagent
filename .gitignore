@@ -23,7 +23,13 @@ logs/
 # Schema lives in registry.example.json only.
 registry.json
 
-# Legacy per-hub CLI name file only (migration). Engine catalog is tracked cli.json.
+# Operator LLM provider catalog (fresh installs seed it from cli.json.example).
+# The tracked copy drifted into this hub's operator config (custom ollama
+# entries) and shipped to every fresh clone — fresh installs must get the
+# example catalog, never a live hub's.
+cli.json
+
+# Legacy per-hub CLI name file only (migration).
 .cli
 
 # Dispatcher runtime artifacts

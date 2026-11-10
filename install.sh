@@ -40,6 +40,7 @@ step() { printf "\n${BOLD}${BLUE}==>${NC} ${BOLD}%s${NC}\n" "$1"; }
 ok()   { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
 note() { printf "  ${DIM}%s${NC}\n" "$1"; }
 warn() { printf "  ${YELLOW}!${NC} %s\n" "$1"; }
+fail() { printf "  ${RED}✗${NC} %s\n" "$1"; }
 die()  { printf "\n${RED}✗ %s${NC}\n\n" "$1" >&2; exit 1; }
 
 # Usable controlling terminal? /dev/tty always exists as a device node, and
@@ -144,11 +145,17 @@ ensure_cron() {
   if have crontab; then
     ok "cron present"
   else
+    local install_exit=0
     case "$PKG" in
-      brew)              ok "cron present" ;;   # macOS ships cron
-      apt)               $INSTALL cron ;;
-      dnf|pacman|zypper) $INSTALL cronie ;;
+      brew)              : ;;   # macOS ships cron — nothing to install
+      apt)               $INSTALL cron || install_exit=$? ;;
+      dnf|pacman|zypper) $INSTALL cronie || install_exit=$? ;;
+      *)                 install_exit=1 ;;
     esac
+    if [[ $install_exit -ne 0 ]] || ! have crontab; then
+      die "cron is required for scheduled jobs and could not be installed automatically — install it manually (Debian/Ubuntu: sudo apt-get install cron) and re-run this installer."
+    fi
+    ok "cron installed"
   fi
   if [[ "$PLATFORM" == "wsl" ]]; then
     warn "WSL doesn't auto-start cron. After install, start it with:  sudo service cron start"
@@ -902,8 +909,7 @@ select_default_provider() {
       openrouter) SELECTED_PROVIDER="claude" ;;
       agy) SELECTED_PROVIDER="gemini" ;;
       *)
-        warn "Unknown BIZAGENT_PROVIDER=$SELECTED_PROVIDER — using grok"
-        SELECTED_PROVIDER="grok"
+        die "Unknown BIZAGENT_PROVIDER=$SELECTED_PROVIDER — valid values: grok, chatgpt, claude, gemini, venice, ollama (aliases: xai, openai, codex, openrouter, agy)."
         ;;
     esac
   else
@@ -1010,7 +1016,7 @@ prompt_api_key() {
     SELECTED_API_KEY="$BIZAGENT_API_KEY"
     ok "Using BIZAGENT_API_KEY for $SELECTED_API_KEY_VAR (will write .bizagent/env)"
     if ! validate_api_key "$SELECTED_PROVIDER" "$SELECTED_API_KEY"; then
-      warn "BIZAGENT_API_KEY was rejected by the provider — installation may fail until it is corrected."
+      die "BIZAGENT_API_KEY was rejected by $SELECTED_PROVIDER (provider hello-check failed). Nothing was written to .bizagent/env — fix the key and re-run the installer."
     fi
     return
   fi
@@ -1140,9 +1146,12 @@ if "_runtime" not in d or not isinstance(d.get("_runtime"), dict):
 # Ensure selected provider exists as a minimal entry
 if provider not in d or not isinstance(d.get(provider), dict):
     defaults = {
-        "grok": {"label": "Grok (xAI)", "baseURL": "https://api.x.ai/v1", "keyEnv": "XAI_API_KEY", "models": ["grok-4.5"]},
-        "openai": {"label": "OpenAI", "baseURL": "https://api.openai.com/v1", "keyEnv": "OPENAI_API_KEY", "models": ["gpt-4o"]},
-        "venice": {"label": "Venice", "baseURL": "https://api.venice.ai/api/v1", "keyEnv": "VENICE_API_KEY", "models": ["llama-3.3-70b"]},
+        "grok": {"label": "Grok", "baseURL": "https://api.x.ai/v1", "keyEnv": "XAI_API_KEY", "models": ["grok-4.5"]},
+        "chatgpt": {"label": "ChatGPT", "baseURL": "https://api.openai.com/v1", "keyEnv": "OPENAI_API_KEY", "models": ["gpt-5.4", "gpt-5.4-mini", "gpt-4o"]},
+        "claude": {"label": "Claude", "baseURL": "https://api.anthropic.com/v1/", "keyEnv": "ANTHROPIC_API_KEY", "models": ["claude-sonnet-4-6", "claude-opus-5", "claude-sonnet-4"]},
+        "gemini": {"label": "Gemini", "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai/", "keyEnv": "GEMINI_API_KEY", "models": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]},
+        "venice": {"label": "Venice", "baseURL": "https://api.venice.ai/api/v1", "keyEnv": "VENICE_API_KEY", "models": ["llama-3.3-70b", "kimi-k2-7-code"]},
+        "ollama": {"label": "Ollama (local)", "baseURL": "http://127.0.0.1:11434/v1", "keyEnv": "OLLAMA_API_KEY", "optionalKey": True, "models": ["llama3.2"]},
         "openrouter": {"label": "OpenRouter", "baseURL": "https://openrouter.ai/api/v1", "keyEnv": "OPENROUTER_API_KEY", "models": ["anthropic/claude-sonnet-4"]},
     }
     d[provider] = defaults.get(provider, {"label": provider, "baseURL": "https://api.x.ai/v1", "keyEnv": "XAI_API_KEY", "models": []})
@@ -1151,7 +1160,7 @@ open(path, "a").write("\n")
 print("ok")
 PY
   then
-    warn "could not ensure cli.json provider catalog — runtime may fail until fixed"
+    die "Could not ensure cli.json provider catalog (python seed failed) — the runtime may fail until cli.json has a '$provider' entry. Fix cli.json and re-run the installer."
   else
     ok "cli.json has provider '$provider' (runtime: bizagent-agent)"
   fi
@@ -1161,7 +1170,7 @@ PY
     if command -v npm >/dev/null 2>&1; then
       (cd "$INSTALL_DIR" && npm install --silent) \
         && ok "control-plane npm dependencies installed" \
-        || warn "root npm install failed — run: cd $INSTALL_DIR && npm install"
+        || die "control-plane npm install failed (hard dependency). Re-run it manually, then re-run the installer: cd $INSTALL_DIR && npm install"
     fi
   fi
 
@@ -1170,7 +1179,7 @@ PY
     if command -v npm >/dev/null 2>&1; then
       (cd "$INSTALL_DIR/agent-runtime" && npm install --silent) \
         && ok "agent-runtime npm dependencies installed" \
-        || warn "agent-runtime npm install failed — run: cd agent-runtime && npm install"
+        || die "agent-runtime npm install failed (hard dependency). Re-run it manually, then re-run the installer: cd $INSTALL_DIR/agent-runtime && npm install"
     fi
     chmod +x "$INSTALL_DIR/scripts/bizagent-agent" "$INSTALL_DIR/agent-runtime/bin/bizagent-agent" 2>/dev/null || true
   fi
@@ -1248,8 +1257,7 @@ write_registry_seed() {
 
   if [[ ! -f "$dest" ]]; then
     if [[ ! -f "$src" ]]; then
-      warn "registry.example.json missing — control plane needs a registry.json"
-      return
+      die "registry.example.json missing from the source checkout — the control plane needs a registry.json. Re-clone the repo (BIZAGENT_SOURCE) and re-run the installer."
     fi
     if ! python3 - "$src" "$dest" "$provider" "$auto_update" <<'PY'
 import json, sys
@@ -1274,7 +1282,7 @@ hub_agent["cliName"] = provider  # legacy alias
 # Provider first-model defaults (must match cli.json.example / PROVIDER_CATALOG).
 PROVIDER_DEFAULT_MODEL = {
     "grok": "grok-4.5",
-    "chatgpt": "gpt-4o",
+    "chatgpt": "gpt-5.4",
     "openai": "gpt-4o",
     "claude": "claude-sonnet-4-6",
     "gemini": "gemini-2.5-flash",
@@ -1299,8 +1307,11 @@ json.dump(d, open(dest, "w"), indent=2)
 open(dest, "a").write("\n")
 PY
     then
-      cp "$src" "$dest"
-      warn "seeded registry.json as a full example copy (python seed failed)"
+      if cp "$src" "$dest" 2>/dev/null; then
+        fail "REGISTRY SEED DEGRADED: python seed failed — registry.json is a full example copy (example products/settings included). Inspect $dest and remove the example entries before adding real products."
+      else
+        die "Could not seed registry.json (python seed failed and $src could not be copied). Place a writable registry.json at $dest and re-run the installer."
+      fi
     else
       ok "registry.json seeded (empty products, hub_agent.provider=$provider, auto_update=$auto_update)"
     fi
@@ -1328,7 +1339,7 @@ else:
 final_provider = hub_agent.get("provider") or provider
 PROVIDER_DEFAULT_MODEL = {
     "grok": "grok-4.5",
-    "chatgpt": "gpt-4o",
+    "chatgpt": "gpt-5.4",
     "openai": "gpt-4o",
     "claude": "claude-sonnet-4-6",
     "gemini": "gemini-2.5-flash",
@@ -1648,9 +1659,11 @@ clone_repo() {
     ok "bundle extracted to $repo_dir"
   fi
   note "cloning bizagent into $INSTALL_DIR..."
-  if ! git clone --quiet -- "$BIZAGENT_SOURCE" "$INSTALL_DIR" 2>/dev/null; then
+  local clone_err=""
+  if ! clone_err="$(git clone --quiet -- "$BIZAGENT_SOURCE" "$INSTALL_DIR" 2>&1)"; then
     rm -rf "$INSTALL_DIR" 2>/dev/null || true
-    die "Failed to clone bizagent. Check that BIZAGENT_SOURCE is reachable and that you have write permission to $INSTALL_DIR."
+    clone_err="$(printf '%s' "$clone_err" | tr '\n' ' ' | cut -c1-300)"
+    die "Failed to clone bizagent into $INSTALL_DIR. Check that BIZAGENT_SOURCE is reachable and that you have write permission to the directory.${clone_err:+ git said: $clone_err}"
   fi
   ok "cloned"
 }
@@ -1663,7 +1676,13 @@ detach_framework_remote() {
     return
   fi
   step "Detach public framework remote"
-  bash "$INSTALL_DIR/scripts/detach-framework-remote.sh" "$INSTALL_DIR" || true
+  local detach_err=""
+  if ! detach_err="$(bash "$INSTALL_DIR/scripts/detach-framework-remote.sh" "$INSTALL_DIR" 2>&1)"; then
+    warn "could not detach the public framework remote automatically — do it manually before the first commit:"
+    note "  git -C \"$INSTALL_DIR\" remote remove origin"
+    [[ -n "$detach_err" ]] && printf '%s\n' "$detach_err" | sed 's/^/    /'
+    return
+  fi
   ok "framework remote detached (or none found); private hub remote recommended — see message above"
 }
 
@@ -1693,7 +1712,8 @@ PY
   fi
 
   step "Starting BizAgent"
-  bash "$INSTALL_DIR/scripts/control-plane.sh" start "$INSTALL_DIR"
+  local cp_start_rc=0
+  bash "$INSTALL_DIR/scripts/control-plane.sh" start "$INSTALL_DIR" || cp_start_rc=$?
 
   note "Waiting for port $port..."
   local i=0
@@ -1706,8 +1726,37 @@ PY
   done
 
   if ! (echo >/dev/tcp/localhost/"$port") 2>/dev/null; then
-    warn "Control plane did not respond on port $port within 10s."
-    note "Check the log: $INSTALL_DIR/logs/control-plane-server.log"
+    warn "Control plane did not respond on port $port within 10s — install did not finish cleanly."
+    if [[ -f "$INSTALL_DIR/logs/control-plane-server.log" ]]; then
+      note "Last log lines ($INSTALL_DIR/logs/control-plane-server.log):"
+      tail -n 15 "$INSTALL_DIR/logs/control-plane-server.log" 2>/dev/null | sed 's/^/    | /' || true
+    fi
+    note "Fix the issue above and re-run the installer, or start manually:"
+    note "  bash $INSTALL_DIR/scripts/control-plane.sh start $INSTALL_DIR"
+    exit 1
+  fi
+  ok "control plane answering on port $port"
+
+  # llmapi probe: with BIZAGENT_LLMAPI_URL configured (fresh installs write it
+  # into .bizagent/env) every agent LLM call routes through llmapi — a dead
+  # llmapi must not pass as a healthy install.
+  local llmapi_url=""
+  if [[ -f "$INSTALL_DIR/.bizagent/env" ]]; then
+    llmapi_url="$(grep -E '^BIZAGENT_LLMAPI_URL=' "$INSTALL_DIR/.bizagent/env" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"\t\r\n ' || true)"
+  fi
+  if [[ -n "$llmapi_url" ]] && have curl; then
+    local llmapi_code
+    llmapi_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "${llmapi_url%/}/health" 2>/dev/null || echo 0)"
+    if [[ "$llmapi_code" != "200" ]]; then
+      warn "llmapi not reachable at ${llmapi_url%/}/health (HTTP ${llmapi_code:-no answer}) — agent LLM calls will fail (502 llmapi unreachable)."
+      if [[ -f "$INSTALL_DIR/logs/llmapi.log" ]]; then
+        note "Last log lines ($INSTALL_DIR/logs/llmapi.log):"
+        tail -n 10 "$INSTALL_DIR/logs/llmapi.log" 2>/dev/null | sed 's/^/    | /' || true
+      fi
+      note "Start it: bash $INSTALL_DIR/scripts/llmapi.sh start $INSTALL_DIR · log: $INSTALL_DIR/logs/llmapi.log"
+      exit 1
+    fi
+    ok "llmapi answering at ${llmapi_url%/}/health"
   fi
 
   printf "\n${BOLD}Open this URL in your browser to set up BizAgent:${NC}\n\n"

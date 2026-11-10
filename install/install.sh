@@ -9,6 +9,8 @@ step() { printf "\n${BOLD}${BLUE}==>${NC} ${BOLD}%s${NC}\n" "$1"; }
 ok()   { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
 note() { printf "  %s\n" "$1"; }
 warn() { printf "  ! %s\n" "$1"; }
+fail() { printf "  ✗ %s\n" "$1"; }
+die()  { printf "\n✗ %s\n\n" "$1" >&2; exit 1; }
 
 HUB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CP_DIR="$HUB/control-plane"
@@ -38,7 +40,7 @@ if [[ -n "${BIZAGENT_PROVIDER:-}" ]]; then
     xai) PROVIDER="grok" ;;
     openai|codex) PROVIDER="chatgpt" ;;
     agy) PROVIDER="gemini" ;;
-    *) note "Unknown BIZAGENT_PROVIDER=$PROVIDER — using grok"; PROVIDER="grok" ;;
+    *) die "Unknown BIZAGENT_PROVIDER=$PROVIDER — valid values: grok, chatgpt, claude, gemini, venice, ollama (aliases: xai, openai, codex, agy)." ;;
   esac
 else
   # Interactive: let the user pick a provider (default grok).
@@ -75,7 +77,7 @@ if [[ ! -f "$HUB/cli.json" && -f "$HUB/cli.json.example" ]]; then
 fi
 
 if [[ ! -f "$HUB/registry.json" && -f "$HUB/registry.example.json" ]]; then
-  python3 - "$HUB/registry.example.json" "$HUB/registry.json" "$PROVIDER" "$MODEL" <<'PY' 2>/dev/null || cp "$HUB/registry.example.json" "$HUB/registry.json"
+  if ! python3 - "$HUB/registry.example.json" "$HUB/registry.json" "$PROVIDER" "$MODEL" <<'PY'
 import json, sys
 src, dest, provider, model = sys.argv[1:5]
 d = json.load(open(src))
@@ -92,9 +94,17 @@ if model:
 json.dump(d, open(dest, "w"), indent=2)
 open(dest, "a").write("\n")
 PY
-  ok "registry.json seeded (provider=$PROVIDER model=$MODEL)"
+  then
+    if cp "$HUB/registry.example.json" "$HUB/registry.json" 2>/dev/null; then
+      fail "REGISTRY SEED DEGRADED: python seed failed — registry.json is a full example copy (example products/settings included). Inspect $HUB/registry.json and remove the example entries before adding real products."
+    else
+      die "Could not seed registry.json (python seed failed and registry.example.json could not be copied). Place a writable registry.json at $HUB/registry.json and re-run."
+    fi
+  else
+    ok "registry.json seeded (provider=$PROVIDER model=$MODEL)"
+  fi
 else
-  python3 - "$HUB/registry.json" "$PROVIDER" "$MODEL" <<'PY' 2>/dev/null || true
+  if ! python3 - "$HUB/registry.json" "$PROVIDER" "$MODEL" <<'PY'
 import json, sys
 path, provider, model = sys.argv[1:4]
 d = json.load(open(path))
@@ -107,7 +117,11 @@ if not (ha.get("model") or "").strip() and model:
 json.dump(d, open(path, "w"), indent=2)
 open(path, "a").write("\n")
 PY
-  ok "registry.json hub_agent provider/model ensured"
+  then
+    warn "could not set hub_agent provider/model on existing registry.json — check it manually (install continues)"
+  else
+    ok "registry.json hub_agent provider/model ensured"
+  fi
 fi
 
 # --- 1b. API key → .bizagent/env (required for hub turns) ---
@@ -167,6 +181,9 @@ if [[ "$PROVIDER" == "ollama" ]]; then
   # Keyless provider (local Ollama) — no API key required; the runtime falls back.
   ok "Ollama is local and needs no API key — skipping key setup"
 elif [[ -n "${BIZAGENT_API_KEY:-}" && -n "$API_KEY_VAR" ]]; then
+  if ! validate_api_key "$PROVIDER" "$BIZAGENT_API_KEY"; then
+    die "BIZAGENT_API_KEY was rejected by $PROVIDER (provider hello-check failed). Nothing was written to .bizagent/env — fix the key and re-run."
+  fi
   # Merge or create
   if [[ -f "$HUB/.bizagent/env" ]] && grep -q "^${API_KEY_VAR}=" "$HUB/.bizagent/env" 2>/dev/null; then
     grep -v "^${API_KEY_VAR}=" "$HUB/.bizagent/env" > "$HUB/.bizagent/env.tmp" || true
@@ -176,10 +193,7 @@ elif [[ -n "${BIZAGENT_API_KEY:-}" && -n "$API_KEY_VAR" ]]; then
     printf '%s=%s\n' "$API_KEY_VAR" "$BIZAGENT_API_KEY" >> "$HUB/.bizagent/env"
   fi
   chmod 600 "$HUB/.bizagent/env"
-  ok ".bizagent/env updated ($API_KEY_VAR from BIZAGENT_API_KEY)"
-  if ! validate_api_key "$PROVIDER" "$BIZAGENT_API_KEY"; then
-    warn "BIZAGENT_API_KEY was rejected by the provider — installation may fail until it is corrected."
-  fi
+  ok ".bizagent/env updated ($API_KEY_VAR from BIZAGENT_API_KEY, validated)"
 elif [[ -n "$API_KEY_VAR" ]]; then
   existing_val="${!API_KEY_VAR:-}"
   if [[ -z "$existing_val" && -f "$HUB/.bizagent/env" ]]; then
@@ -242,12 +256,15 @@ fi
 step "Dependencies"
 command -v node >/dev/null 2>&1 || { echo "ERROR: Node.js is required." >&2; exit 1; }
 if [[ -f "$CP_DIR/package.json" ]]; then
-  (cd "$CP_DIR" && npm install --silent) && ok "control-plane npm install complete"
+  (cd "$CP_DIR" && npm install --silent) && ok "control-plane npm install complete" \
+    || die "control-plane npm install failed (hard dependency). Re-run it manually, then re-run: cd $CP_DIR && npm install"
 elif [[ -f "$HUB/package.json" ]]; then
-  (cd "$HUB" && npm install --silent) && ok "hub npm install complete"
+  (cd "$HUB" && npm install --silent) && ok "hub npm install complete" \
+    || die "hub npm install failed (hard dependency). Re-run it manually, then re-run: cd $HUB && npm install"
 fi
 if [[ -f "$HUB/agent-runtime/package.json" ]]; then
-  (cd "$HUB/agent-runtime" && npm install --silent) && ok "agent-runtime npm install complete"
+  (cd "$HUB/agent-runtime" && npm install --silent) && ok "agent-runtime npm install complete" \
+    || die "agent-runtime npm install failed (hard dependency). Re-run it manually, then re-run: cd $HUB/agent-runtime && npm install"
   chmod +x "$HUB/scripts/bizagent-agent" "$HUB/agent-runtime/bin/bizagent-agent" 2>/dev/null || true
 fi
 
@@ -301,22 +318,67 @@ if [[ "$(uname -s)" == "Linux" ]]; then
 fi
 
 if [[ "$_is_headless" -eq 1 ]]; then
-  python3 - "$HUB/registry.json" <<'PY' 2>/dev/null || true
+  if ! python3 - "$HUB/registry.json" <<'PY'
 import json, sys
 path = sys.argv[1]
-try:
-    d = json.load(open(path))
-    d.setdefault('settings', {}).setdefault('control_plane', {})['host'] = '0.0.0.0'
-    json.dump(d, open(path, 'w'), indent=2)
-except Exception:
-    pass
+d = json.load(open(path))
+d.setdefault('settings', {}).setdefault('control_plane', {})['host'] = '0.0.0.0'
+json.dump(d, open(path, 'w'), indent=2)
+open(path, 'a').write('\n')
 PY
-  ok "registry: host set to 0.0.0.0 for headless install"
+  then
+    warn "could not set control_plane.host=0.0.0.0 on registry.json — the console may only be reachable from localhost on this headless host"
+  else
+    ok "registry: host set to 0.0.0.0 for headless install"
+  fi
 fi
 
 # --- 5. Start the control plane ---
 step "Starting"
-bash "$HUB/scripts/control-plane.sh" start "$HUB"
+cp_start_rc=0
+bash "$HUB/scripts/control-plane.sh" start "$HUB" || cp_start_rc=$?
+PORT="${BIZAGENT_PORT:-$PORT}"
+
+note "Waiting for port $PORT..."
+_i=0
+while (( _i < 10 )); do
+  if (echo >/dev/tcp/localhost/"$PORT") 2>/dev/null; then
+    break
+  fi
+  sleep 1
+  _i=$(( _i + 1 ))
+done
+
+if ! (echo >/dev/tcp/localhost/"$PORT") 2>/dev/null; then
+  warn "Control plane did not respond on port $PORT within 10s — install did not finish cleanly."
+  if [[ -f "$HUB/logs/control-plane-server.log" ]]; then
+    note "Last log lines ($HUB/logs/control-plane-server.log):"
+    tail -n 15 "$HUB/logs/control-plane-server.log" 2>/dev/null | sed 's/^/    | /' || true
+  fi
+  note "Fix the issue above and re-run, or start manually: bash $HUB/scripts/control-plane.sh start $HUB"
+  exit 1
+fi
+ok "control plane answering on port $PORT"
+
+# llmapi probe: with BIZAGENT_LLMAPI_URL configured every agent LLM call
+# routes through llmapi — a dead llmapi must not pass as a healthy install.
+LLMAPI_URL_CFG=""
+if [[ -f "$HUB/.bizagent/env" ]]; then
+  LLMAPI_URL_CFG="$(grep -E '^BIZAGENT_LLMAPI_URL=' "$HUB/.bizagent/env" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"\t\r\n ' || true)"
+fi
+if [[ -n "$LLMAPI_URL_CFG" ]] && command -v curl >/dev/null 2>&1; then
+  LLMAPI_CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "${LLMAPI_URL_CFG%/}/health" 2>/dev/null || echo 0)"
+  if [[ "$LLMAPI_CODE" != "200" ]]; then
+    warn "llmapi not reachable at ${LLMAPI_URL_CFG%/}/health (HTTP ${LLMAPI_CODE:-no answer}) — agent LLM calls will fail (502 llmapi unreachable)."
+    if [[ -f "$HUB/logs/llmapi.log" ]]; then
+      note "Last log lines ($HUB/logs/llmapi.log):"
+      tail -n 10 "$HUB/logs/llmapi.log" 2>/dev/null | sed 's/^/    | /' || true
+    fi
+    note "Start it: bash $HUB/scripts/llmapi.sh start $HUB · log: $HUB/logs/llmapi.log"
+    exit 1
+  fi
+  ok "llmapi answering at ${LLMAPI_URL_CFG%/}/health"
+fi
 
 # --- 6. Pre-flight + first-run inbox seed (shared with root install.sh) ---
 step "First-run readiness"

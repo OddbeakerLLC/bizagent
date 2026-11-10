@@ -22,7 +22,9 @@
 #
 # Exit codes:
 #   0  ok (installed, already running, or intentionally skipped)
-#   1  hard failure only when --require is set; otherwise soft-fail → 0 with warn
+#   3  soft failure — warned and skipped; callers must NOT print an
+#      "installed/finished" ok line (best-effort callers: warn and continue)
+#   1  hard failure only when --require is set
 set -euo pipefail
 
 HUB=""
@@ -73,7 +75,10 @@ soft_fail() {
     die "$*"
   fi
   warn "Console TTS stays optional (browser speechSynthesis fallback). Re-run: scripts/install-oddbeaker-tts.sh"
-  exit 0
+  # Exit 3 (not 0): callers can tell a soft-failed TTS step from a real
+  # success and must not print an "installed/finished" ok line for it.
+  # Best-effort callers treat any nonzero as "warn and continue".
+  exit 3
 }
 
 while [[ $# -gt 0 ]]; do
@@ -401,7 +406,7 @@ clone_or_link_source() {
   fi
   note "cloning oddbeaker-tts → $TTS_DIR ..."
   local clone_err=""
-  if ! git clone --quiet --branch "$TTS_REF" -- "$src" "$TTS_DIR" 2>/dev/null; then
+  if ! clone_err="$(git clone --quiet --branch "$TTS_REF" -- "$src" "$TTS_DIR" 2>&1)"; then
     rm -rf "$TTS_DIR" 2>/dev/null || true
     if ! clone_err="$(git clone --quiet -- "$src" "$TTS_DIR" 2>&1)"; then
       rm -rf "$TTS_DIR" 2>/dev/null || true

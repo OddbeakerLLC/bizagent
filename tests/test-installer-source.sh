@@ -94,14 +94,14 @@ grep -q 'validate_api_key' "$ROOT/install.sh" \
   || fail "install.sh missing API key validation helper"
 grep -q 'chat/completions' "$ROOT/install.sh" \
   || fail "install.sh validation does not send a hello prompt to the LLM"
-grep -q 'rejected by the provider' "$ROOT/install.sh" \
-  || fail "install.sh does not re-prompt after a failed API key validation"
+grep -q 'rejected by' "$ROOT/install.sh" \
+  || fail "install.sh does not act on a failed API key validation"
 grep -q 'validate_api_key' "$ROOT/install/install.sh" \
   || fail "install/install.sh missing API key validation helper"
 grep -q 'chat/completions' "$ROOT/install/install.sh" \
   || fail "install/install.sh validation does not send a hello prompt to the LLM"
-grep -q 'rejected by the provider' "$ROOT/install/install.sh" \
-  || fail "install/install.sh does not re-prompt after a failed API key validation"
+grep -q 'rejected by' "$ROOT/install/install.sh" \
+  || fail "install/install.sh does not act on a failed API key validation"
 grep -qE 'api_key_var_for_provider|api_key_var_for_cli' "$ROOT/install/install.sh" \
   || fail "install/install.sh missing API key → .bizagent/env step"
 grep -q 'seed-first-run\|check-hub-ready' "$ROOT/install/install.sh" \

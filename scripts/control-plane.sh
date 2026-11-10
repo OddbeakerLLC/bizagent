@@ -329,14 +329,17 @@ start_server() {
     fi
     sleep 0.2
   done
+  local start_rc=0
   if [ "$ready" -eq 1 ]; then
     echo "bizagent-control-plane started: pid $pid, port $port, log $LOG_FILE"
   elif [ "$port_was_up" -eq 1 ]; then
     echo "bizagent-control-plane started: pid $pid (port $port was already in use before start — if this pid exits later, check $LOG_FILE)"
   else
-    echo "bizagent-control-plane started: pid $pid, but port $port not accepting after ~6s — check $LOG_FILE" >&2
+    echo "bizagent-control-plane FAILED to start: pid $pid alive but port $port not accepting after ~6s — check $LOG_FILE" >&2
+    start_rc=1
   fi
   start_hub_daemon_best_effort
+  return "$start_rc"
 }
 
 stop_server() {
