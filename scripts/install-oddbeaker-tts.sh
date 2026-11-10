@@ -17,6 +17,8 @@
 #   BIZAGENT_SKIP_TTS=1     Exit 0 immediately (installer/upgrade honor this)
 #   BIZAGENT_NONINTERACTIVE Non-empty → no prompts (use env/default voice)
 #   BIZAGENT_TTS_REF        Git ref when cloning (default: master)
+#   BIZAGENT_TTS_PYTHON     Python interpreter for the venv (default: python3;
+#                           use e.g. python3.12 where kokoro pins <3.13)
 #
 # Exit codes:
 #   0  ok (installed, already running, or intentionally skipped)
@@ -34,9 +36,11 @@ QUIET=0
 REQUIRE=0
 DEFAULT_TTS_URL="http://127.0.0.1:9201"
 DEFAULT_VOICE="af_heart"
+DEFAULT_GIT_HTTPS="https://github.com/OddbeakerLLC/oddbeaker-tts.git"
 DEFAULT_GIT_SSH="ssh://git@github.com/OddbeakerLLC/oddbeaker-tts.git"
 DEFAULT_GIT_SCP="git@github.com:OddbeakerLLC/oddbeaker-tts.git"
 TTS_REF="${BIZAGENT_TTS_REF:-master}"
+TTS_PYTHON="${BIZAGENT_TTS_PYTHON:-python3}"
 
 # Built-in catalog (matches oddbeaker-tts packaged defaults) for offline prompt.
 BUILTIN_VOICES=(
@@ -342,24 +346,26 @@ discover_source() {
       return 0
     fi
   done
-  # Prefer SSH (public HTTPS currently 404 / private)
+  # HTTPS first (repo is public — works on fresh hosts with no SSH key),
+  # then SSH variants for private/enterprise deployments. On total failure,
+  # warn() with the real git error (stderr passes through the $(…) subshell).
   if have git; then
-    if git ls-remote --heads "$DEFAULT_GIT_SSH" >/dev/null 2>&1; then
-      printf '%s\n' "$DEFAULT_GIT_SSH"
-      return 0
-    fi
-    if git ls-remote --heads "$DEFAULT_GIT_SCP" >/dev/null 2>&1; then
-      printf '%s\n' "$DEFAULT_GIT_SCP"
-      return 0
-    fi
+    local probe_err=""
+    for c in "$DEFAULT_GIT_HTTPS" "$DEFAULT_GIT_SSH" "$DEFAULT_GIT_SCP"; do
+      if probe_err="$(git ls-remote --heads "$c" 2>&1)"; then
+        printf '%s\n' "$c"
+        return 0
+      fi
+    done
+    warn "no default oddbeaker-tts source reachable — last git error: $(printf '%s' "$probe_err" | tr '\n' ' ' | cut -c1-300)"
   fi
   return 1
 }
 
 ensure_python() {
-  have python3 || soft_fail "python3 required to install oddbeaker-tts"
-  if ! python3 -m venv --help >/dev/null 2>&1; then
-    soft_fail "python3 venv module missing (install python3-venv) — cannot install oddbeaker-tts"
+  have "$TTS_PYTHON" || soft_fail "$TTS_PYTHON required to install oddbeaker-tts (set BIZAGENT_TTS_PYTHON to override)"
+  if ! "$TTS_PYTHON" -m venv --help >/dev/null 2>&1; then
+    soft_fail "$TTS_PYTHON venv module missing (install python3-venv) — cannot install oddbeaker-tts"
   fi
 }
 
@@ -394,11 +400,13 @@ clone_or_link_source() {
     soft_fail "TTS install path exists but is not a git checkout: $TTS_DIR (set BIZAGENT_TTS_DIR or BIZAGENT_TTS_SOURCE)"
   fi
   note "cloning oddbeaker-tts → $TTS_DIR ..."
+  local clone_err=""
   if ! git clone --quiet --branch "$TTS_REF" -- "$src" "$TTS_DIR" 2>/dev/null; then
     rm -rf "$TTS_DIR" 2>/dev/null || true
-    if ! git clone --quiet -- "$src" "$TTS_DIR" 2>/dev/null; then
+    if ! clone_err="$(git clone --quiet -- "$src" "$TTS_DIR" 2>&1)"; then
       rm -rf "$TTS_DIR" 2>/dev/null || true
-      soft_fail "failed to clone oddbeaker-tts from $src (need SSH access to OddbeakerLLC/oddbeaker-tts or a local BIZAGENT_TTS_SOURCE)"
+      clone_err="$(printf '%s' "$clone_err" | tr '\n' ' ' | cut -c1-300)"
+      soft_fail "failed to clone oddbeaker-tts from $src (need access to OddbeakerLLC/oddbeaker-tts or a local BIZAGENT_TTS_SOURCE)${clone_err:+ — git said: $clone_err}"
     fi
   fi
   ok "cloned oddbeaker-tts"
@@ -408,7 +416,7 @@ pip_install_runtime() {
   local venv="$TTS_DIR/.venv"
   note "creating venv + installing oddbeaker-tts [runtime] (may take several minutes for torch)..."
   if [[ ! -x "$venv/bin/python" ]]; then
-    python3 -m venv "$venv" || soft_fail "python3 -m venv failed in $TTS_DIR"
+    "$TTS_PYTHON" -m venv "$venv" || soft_fail "$TTS_PYTHON -m venv failed in $TTS_DIR"
   fi
   # shellcheck disable=SC1091
   # Upgrade pip quietly; tolerate failure
@@ -428,6 +436,12 @@ pip_install_runtime() {
   if ! "$venv/bin/pip" install --quiet -e "$TTS_DIR[runtime]"; then
     # Fallback: deps without heavy runtime so API can still boot with --no-preload (engine may fail synthesize)
     warn "pip install -e '.[runtime]' failed — trying base package only"
+    local pyver
+    pyver="$("$TTS_PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+    case "$pyver" in
+      3.13|3.14|3.15)
+        note "host python is $pyver; the kokoro engine pins Python <3.13 — install python3.12 and re-run with BIZAGENT_TTS_PYTHON=python3.12 (kokoro wheels do not exist for 3.13+ yet)" ;;
+    esac
     "$venv/bin/pip" install --quiet -e "$TTS_DIR" \
       || soft_fail "pip install oddbeaker-tts failed (network or build tools missing)"
   fi
