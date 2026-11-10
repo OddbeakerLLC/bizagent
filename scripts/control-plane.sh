@@ -250,16 +250,84 @@ start_server() {
     fi
   fi
 
+  # Port the child will bind: BIZAGENT_PORT (env / .bizagent/env) wins, then
+  # registry.json settings.control_plane.port, then the 8787 default — same
+  # resolution order as control-plane/lib/config.js.
+  cp_port() {
+    if [ -n "${BIZAGENT_PORT:-}" ]; then
+      printf '%s\n' "$BIZAGENT_PORT"
+      return
+    fi
+    if [ -f "$HUB/registry.json" ] && command -v node >/dev/null 2>&1; then
+      node -e "try{const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));const p=r&&r.settings&&r.settings.control_plane&&r.settings.control_plane.port;if(p)console.log(p)}catch(_e){}" "$HUB/registry.json" 2>/dev/null || true
+    fi
+  }
+
+  # Snapshot the log length so the failure report below only shows lines the
+  # dying child actually wrote — a stale tail from an earlier run read as
+  # "nothing new appended" and sent operators hunting in the wrong place.
+  local log_start=0
+  if [ -f "$LOG_FILE" ]; then
+    log_start="$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)"
+    log_start="$(printf '%s' "$log_start" | tr -d '[:space:]')"
+    case "$log_start" in ''|*[!0-9]*) log_start=0 ;; esac
+  fi
+
   nohup node "$ROOT/scripts/bizagent-control-plane.js" serve --hub "$HUB" >>"$LOG_FILE" 2>&1 &
   pid=$!
   write_pid_file "$pid"
-  sleep 0.2
-  if ! kill -0 "$pid" 2>/dev/null; then
+
+  # Readiness wait — replaces the old 0.2s kill -0 probe, which reported
+  # "started" for children that died a beat later and "failed to start; see
+  # log" for children that died before the log got anything. Poll up to ~6s:
+  # done = child alive AND its port accepting TCP; child death = print the
+  # log lines it wrote so the real error is visible immediately.
+  report_start_failure() {
     rm -f "$PID_FILE"
-    echo "bizagent-control-plane failed to start; see $LOG_FILE" >&2
-    return 1
+    echo "bizagent-control-plane failed to start (pid $1 exited during startup); new log lines in $LOG_FILE:" >&2
+    if [ -f "$LOG_FILE" ] && [ "$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$log_start" ]; then
+      tail -n "+$((log_start + 1))" "$LOG_FILE" | sed 's/^/  | /' >&2
+    else
+      echo "  | (nothing was appended — run this in the foreground to see the error:" >&2
+      echo "  |   node $ROOT/scripts/bizagent-control-plane.js serve --hub $HUB )" >&2
+    fi
+  }
+
+  local i port ready=0 port_was_up=0
+  port="$(cp_port | tail -n 1)"
+  port="${port:-8787}"
+  # If the port already accepts connections we cannot use it as a readiness
+  # signal (a foreign listener would answer for our dying child) — fall back
+  # to pure child-liveness polling for the window.
+  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    port_was_up=1
   fi
-  echo "bizagent-control-plane started: pid $pid, log $LOG_FILE"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      report_start_failure "$pid"
+      return 1
+    fi
+    if [ "$port_was_up" -eq 0 ] && (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      # Port just came up while our child is alive — likely our listener.
+      # Give a late crash (e.g. EADDRINUSE racing another starter) one beat
+      # to surface before declaring success.
+      sleep 0.5
+      if ! kill -0 "$pid" 2>/dev/null; then
+        report_start_failure "$pid"
+        return 1
+      fi
+      ready=1
+      break
+    fi
+    sleep 0.2
+  done
+  if [ "$ready" -eq 1 ]; then
+    echo "bizagent-control-plane started: pid $pid, port $port, log $LOG_FILE"
+  elif [ "$port_was_up" -eq 1 ]; then
+    echo "bizagent-control-plane started: pid $pid (port $port was already in use before start — if this pid exits later, check $LOG_FILE)"
+  else
+    echo "bizagent-control-plane started: pid $pid, but port $port not accepting after ~6s — check $LOG_FILE" >&2
+  fi
   start_hub_daemon_best_effort
 }
 
