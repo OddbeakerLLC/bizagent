@@ -125,6 +125,41 @@ NODE
   fi
 fi
 
+# --- llmapi readiness -------------------------------------------------------
+# When BIZAGENT_LLMAPI_URL is configured (fresh installs write it into
+# .bizagent/env), every agent LLM call routes through llmapi — a dead llmapi
+# makes every turn fail with "502 llmapi unreachable", so an unreachable port
+# is a first-class failure, not a footnote.
+LLMAPI_URL_CFG=""
+LLMAPI_PORT_CFG=""
+if [[ -f "$HUB/.bizagent/env" ]]; then
+  LLMAPI_URL_CFG="$(grep -E '^BIZAGENT_LLMAPI_URL=' "$HUB/.bizagent/env" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"\t\r\n ' || true)"
+  LLMAPI_PORT_CFG="$(grep -E '^LLMAPI_PORT=' "$HUB/.bizagent/env" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '"\t\r\n ' || true)"
+fi
+if [[ -z "$LLMAPI_URL_CFG" && -n "$LLMAPI_PORT_CFG" ]]; then
+  LLMAPI_URL_CFG="http://127.0.0.1:$LLMAPI_PORT_CFG"
+fi
+llmapi_probe() {
+  node -e "fetch(process.argv[1]+'/health',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" "$1" 2>/dev/null
+}
+if [[ -n "$LLMAPI_URL_CFG" ]]; then
+  if llmapi_probe "${LLMAPI_URL_CFG%/}"; then
+    ok "llmapi reachable at $LLMAPI_URL_CFG"
+  else
+    bad "llmapi not reachable at $LLMAPI_URL_CFG — agent LLM calls will fail (502 llmapi unreachable)"
+    note "Start it: scripts/llmapi.sh start · log: $HUB/logs/llmapi.log"
+  fi
+else
+  # Not configured: agents call providers directly, so llmapi being down is
+  # not a readiness failure — report status only.
+  LLMAPI_DEFAULT="http://127.0.0.1:${LLMAPI_PORT_CFG:-8788}"
+  if llmapi_probe "$LLMAPI_DEFAULT"; then
+    ok "llmapi reachable at $LLMAPI_DEFAULT (not configured in .bizagent/env — agents call providers directly)"
+  else
+    note "llmapi not configured and nothing on ${LLMAPI_DEFAULT} — agents call providers directly (set BIZAGENT_LLMAPI_URL to route through llmapi)"
+  fi
+fi
+
 echo
 if [[ "$FAIL" -ne 0 ]]; then
   printf "NOT READY — fix the items above before expecting first-run / hub turns.\n"

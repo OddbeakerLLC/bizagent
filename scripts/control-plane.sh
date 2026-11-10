@@ -54,11 +54,19 @@ UNITDIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
 # llmapi (LLM provider REST API) is managed alongside the control plane:
 # start starts it, stop stops it, restart restarts both. Best-effort: a
-# llmapi start failure never prevents the control plane from running.
+# llmapi start failure never prevents the control plane from running — but
+# it is printed loudly, because with BIZAGENT_LLMAPI_URL configured every
+# agent LLM call 502s until llmapi is up.
 start_llmapi_best_effort() {
   if [ -x "$ROOT/scripts/llmapi.sh" ] && [ -f "$ROOT/llmapi.js" ]; then
-    "$ROOT/scripts/llmapi.sh" start "$HUB" 2>/dev/null \
-      || echo "llmapi start skipped (control plane still starts)"
+    local out
+    if out="$("$ROOT/scripts/llmapi.sh" start "$HUB" 2>&1)"; then
+      [ -n "$out" ] && echo "$out"
+    else
+      echo "llmapi start FAILED — agent LLM calls will fail (502 llmapi unreachable) until it is up:" >&2
+      [ -n "$out" ] && echo "$out" >&2
+      echo "  log: $HUB/logs/llmapi.log · retry: scripts/llmapi.sh start \"$HUB\"" >&2
+    fi
   fi
 }
 

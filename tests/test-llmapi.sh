@@ -5,7 +5,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 TMP="$(mktemp -d)"
-trap 'kill $LLMAPI_PID $MOCK_PID 2>/dev/null; rm -rf "$TMP"' EXIT
+SVC_PID=""
+trap 'kill $LLMAPI_PID $MOCK_PID ${SVC_PID:-} 2>/dev/null; rm -rf "$TMP"' EXIT
 
 PORT=18791        # scratch port; 8787 may be occupied by a live service
 MOCKPORT=18792
@@ -301,5 +302,54 @@ grep -q '"event":"queue_saturation"' "$log" || fail "no queue_saturation event (
 grep -q '"event":"service_stop".*"signal":"SIGTERM"' "$log" || fail "no service_stop on SIGTERM"
 grep -q 'test-key' "$log" && fail "API key leaked into log" || true
 grep -q '"content"' "$log" && fail "message body leaked into log" || true
+
+# 22. scripts/llmapi.sh start — "started" means the port actually accepts
+# connections (fresh-install regression: a dead llmapi looked healthy).
+HUB2="$TMP/svc-hub"
+mkdir -p "$HUB2/.bizagent" "$HUB2/logs"
+printf 'LLMAPI_PORT=%s\nLLMAPI_HOST=127.0.0.1\n' "$PORT" > "$HUB2/.bizagent/env"
+out="$(BIZAGENT_HUB="$HUB2" bash "$ROOT/scripts/llmapi.sh" start "$HUB2" 2>&1)" \
+  || fail "llmapi.sh start failed: $out"
+echo "$out" | grep -q "accepting connections" || fail "start output does not verify the port: $out"
+SVC_PID="$(cat "$HUB2/.bizagent/llmapi.pid" 2>/dev/null || true)"
+[ -n "$SVC_PID" ] || fail "no pidfile after llmapi.sh start"
+curl -sf "$BASE/health" >/dev/null || fail "llmapi.sh-started service not healthy on $BASE"
+
+# 23. start is idempotent when the port is already served
+out="$(BIZAGENT_HUB="$HUB2" bash "$ROOT/scripts/llmapi.sh" start "$HUB2" 2>&1)" \
+  || fail "second start failed: $out"
+echo "$out" | grep -q "already running" || fail "second start not idempotent: $out"
+
+# 24. control-plane.sh start_llmapi_best_effort surfaces the real error loudly
+# (port occupied -> llmapi exits immediately; the wrapper must print FAILED +
+# the actual reason, never the old silent "llmapi start skipped" line).
+BIZAGENT_HUB="$HUB2" bash "$ROOT/scripts/llmapi.sh" stop "$HUB2" >/dev/null 2>&1 || true
+SVC_PID=""
+printf 'LLMAPI_PORT=%s\nLLMAPI_HOST=127.0.0.1\n' "$MOCKPORT" > "$HUB2/.bizagent/env"
+eval "$(sed -n '/^start_llmapi_best_effort()/,/^}/p' "$ROOT/scripts/control-plane.sh")"
+HUB="$HUB2"
+out="$(start_llmapi_best_effort 2>&1 || true)"
+echo "$out" | grep -q "llmapi start FAILED" || fail "wrapper did not flag failure loudly: $out"
+echo "$out" | grep -q "agent LLM calls will fail" || fail "wrapper missing consequence line: $out"
+echo "$out" | grep -Eq "already in use|failed to start" || fail "real llmapi error not surfaced: $out"
+echo "$out" | grep -q "llmapi start skipped" && fail "silent 'skipped' line is back: $out" || true
+
+# 25. wrapper passes through the success output (healthy env -> port verified)
+printf 'LLMAPI_PORT=%s\nLLMAPI_HOST=127.0.0.1\n' "$PORT" > "$HUB2/.bizagent/env"
+export BIZAGENT_HUB="$HUB2"
+out="$(start_llmapi_best_effort 2>&1 || true)"
+echo "$out" | grep -q "accepting connections" || fail "wrapper lost success output: $out"
+SVC_PID="$(cat "$HUB2/.bizagent/llmapi.pid" 2>/dev/null || true)"
+# Cleanup must be proven, not assumed: kill by pidfile pid, then verify.
+if [ -n "$SVC_PID" ]; then
+  kill "$SVC_PID" 2>/dev/null || true
+  for i in $(seq 1 20); do kill -0 "$SVC_PID" 2>/dev/null || break; sleep 0.1; done
+  if kill -0 "$SVC_PID" 2>/dev/null; then
+    kill -9 "$SVC_PID" 2>/dev/null || true
+  fi
+fi
+SVC_PID=""
+bash "$ROOT/scripts/llmapi.sh" stop "$HUB2" >/dev/null 2>&1 || true
+curl -sf "$BASE/health" >/dev/null 2>&1 && fail "llmapi still serving $BASE after stop"
 
 echo "PASS: test-llmapi.sh"

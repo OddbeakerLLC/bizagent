@@ -36,6 +36,10 @@ normalize_path() {
 hub_arg="${2:-}"
 [ -z "$hub_arg" ] || HUB="$(cd "$hub_arg" && pwd)"
 HUB="$(normalize_path "$HUB")"
+# Exported so a nohup-started child carries BIZAGENT_HUB in its environ —
+# find_pids matches children by cwd OR this env var, so stop/status/restart
+# find the process even when run from a different working directory.
+export BIZAGENT_HUB="$HUB"
 
 PID_FILE="$HUB/.bizagent/llmapi.pid"
 LOG_FILE="$HUB/logs/llmapi.log"
@@ -158,15 +162,40 @@ describe_running() {
 
 # --- actions ---------------------------------------------------------------
 
+# Real port/host come from the environment loaded via load_env (LLMAPI_PORT /
+# LLMAPI_HOST in .bizagent/env), matching llmapi.js defaults.
+llmapi_port() { printf '%s\n' "${LLMAPI_PORT:-8788}"; }
+llmapi_host() { printf '%s\n' "${LLMAPI_HOST:-127.0.0.1}"; }
+
+# port_ready — true only when /health answers on the configured host:port.
+port_ready() {
+  command -v node >/dev/null 2>&1 || return 1
+  node -e "fetch('http://'+process.argv[1]+':'+process.argv[2]+'/health',{signal:AbortSignal.timeout(1500)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
+    "$(llmapi_host)" "$(llmapi_port)" 2>/dev/null
+}
+
+wait_for_port() {
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if port_ready; then return 0; fi
+    sleep 0.3
+  done
+  return 1
+}
+
 start_server() {
-  local pid unit
+  local pid unit systemctl_err
+  load_env
+
   if pid="$(primary_pid 2>/dev/null)"; then
     write_pid_file "$pid"
-    echo "llmapi already running: pid $pid"
-    return 0
+    if port_ready; then
+      echo "llmapi already running: pid $pid"
+      return 0
+    fi
+    echo "llmapi process $pid exists but port $(llmapi_port) is not accepting connections — see $LOG_FILE" >&2
+    return 1
   fi
-
-  load_env
 
   REQUIRE_NODE="$ROOT/scripts/lib/require-node.sh"
   if [[ -f "$REQUIRE_NODE" ]]; then
@@ -190,19 +219,29 @@ start_server() {
 
   unit="$(find_systemd_unit 2>/dev/null || true)"
   if [ -n "$unit" ] && command -v systemctl >/dev/null 2>&1; then
-    if systemctl --user start "$unit" 2>/dev/null; then
+    if systemctl_err="$(systemctl --user start "$unit" 2>&1)"; then
       local i
-      for i in 1 2 3 4 5 6 7 8 9 10; do
+      for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
         if pid="$(primary_pid 2>/dev/null)"; then
           write_pid_file "$pid"
-          echo "llmapi started via systemd ($unit): pid $pid, log $LOG_FILE"
-          return 0
+          if wait_for_port; then
+            echo "llmapi started via systemd ($unit): pid $pid, port $(llmapi_port) accepting connections, log $LOG_FILE"
+            return 0
+          fi
+          echo "llmapi: systemd unit $unit is running (pid $pid) but port $(llmapi_port) is not accepting connections" >&2
+          echo "  check: systemctl --user status $unit · journalctl --user -u $unit · log: $LOG_FILE" >&2
+          return 1
         fi
-        sleep 0.2
+        sleep 0.3
       done
-      echo "llmapi: systemctl start $unit returned but process not found yet" >&2
-      echo "  check: systemctl --user status $unit" >&2
+      echo "llmapi: systemctl start $unit returned but no llmapi process appeared" >&2
+      echo "  check: systemctl --user status $unit · journalctl --user -u $unit" >&2
       return 1
+    else
+      # No usable systemd user session (fresh host without lingering, WSL,
+      # containers): say why, then fall through to the nohup fallback instead
+      # of dying with the unit path.
+      echo "llmapi: systemctl --user start $unit failed ($(printf '%s' "$systemctl_err" | head -n 1)) — falling back to nohup" >&2
     fi
   fi
 
@@ -212,10 +251,17 @@ start_server() {
   sleep 0.2
   if ! kill -0 "$pid" 2>/dev/null; then
     rm -f "$PID_FILE"
-    echo "llmapi failed to start; see $LOG_FILE" >&2
+    echo "llmapi failed to start (process exited immediately) — recent log output:" >&2
+    tail -n 5 "$LOG_FILE" 2>/dev/null | sed 's/^/  /' >&2 || true
+    echo "  full log: $LOG_FILE" >&2
     return 1
   fi
-  echo "llmapi started: pid $pid, log $LOG_FILE"
+  if wait_for_port; then
+    echo "llmapi started: pid $pid, port $(llmapi_port) accepting connections, log $LOG_FILE"
+  else
+    echo "llmapi process $pid is running but port $(llmapi_port) is not accepting connections — see $LOG_FILE" >&2
+    return 1
+  fi
 }
 
 stop_server() {
