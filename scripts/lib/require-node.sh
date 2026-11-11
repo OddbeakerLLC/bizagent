@@ -9,15 +9,18 @@
 # Or execute directly (exits non-zero on failure):
 #   bash scripts/lib/require-node.sh
 #
-# Why 18: agent-runtime package.json engines.node is ">=18.0.0" (Active LTS floor).
-# Distro Node on older Ubuntu/WSL is often 12/16 and can pass "node is present"
-# then break at runtime — especially WSL on older Windows 10.
+# Why 22: the installer auto-installs the latest Node LTS when Node is missing
+# or below the minimum (NodeSource on apt/dnf — system-wide, so systemd/cron
+# see it). 22 is the oldest supported LTS line (Node 20 went EOL 2026-04);
+# agent-runtime package.json engines.node matches. This check is the backstop
+# that fails with a clear message instead of a cryptic ERR_REQUIRE_ESM when a
+# script runs on an older Node outside the installer.
 #
 # Env:
-#   BIZAGENT_MIN_NODE_MAJOR  override minimum major version (default 18)
+#   BIZAGENT_MIN_NODE_MAJOR  override minimum major version (default 22)
 
 # shellcheck disable=SC2034
-BIZAGENT_MIN_NODE_MAJOR="${BIZAGENT_MIN_NODE_MAJOR:-18}"
+BIZAGENT_MIN_NODE_MAJOR="${BIZAGENT_MIN_NODE_MAJOR:-22}"
 
 bizagent_node_version_line() {
   # Prints e.g. v18.20.4 or empty if node missing/unusable.

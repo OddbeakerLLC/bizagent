@@ -81,7 +81,7 @@ start_daemon() {
   if [[ -f "$REQUIRE_NODE" ]]; then
     # shellcheck disable=SC1090
     source "$REQUIRE_NODE"
-    bizagent_require_node || { echo "hub-daemon: Node.js v${BIZAGENT_MIN_NODE_MAJOR:-18}+ required" >&2; exit 1; }
+    bizagent_require_node || { echo "hub-daemon: Node.js v${BIZAGENT_MIN_NODE_MAJOR:-22}+ required" >&2; exit 1; }
   else
     command -v node >/dev/null 2>&1 || { echo "node required" >&2; exit 1; }
   fi

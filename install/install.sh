@@ -254,7 +254,41 @@ fi
 
 # --- 2. npm install (control-plane + agent-runtime) ---
 step "Dependencies"
-command -v node >/dev/null 2>&1 || { echo "ERROR: Node.js is required." >&2; exit 1; }
+# Node must be v22+ (oldest active LTS). The root installer auto-installs the
+# latest Node LTS; this backstop does the same when install/install.sh runs
+# standalone, and dies with clear instructions if it cannot.
+node_major() {
+  local v; v="$(node -v 2>/dev/null || true)"; v="${v#v}"
+  echo "${v%%.*}"
+}
+node_ok() {
+  command -v node >/dev/null 2>&1 || return 1
+  local major; major="$(node_major)"
+  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 22 ))
+}
+if ! node_ok; then
+  note "installing the latest Node.js LTS (need v22+)..."
+  if command -v apt-get >/dev/null 2>&1; then
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - \
+      && sudo apt-get install -y nodejs \
+      || sudo apt-get install -y nodejs npm || true
+  elif command -v dnf >/dev/null 2>&1; then
+    curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash - \
+      && sudo dnf install -y nodejs \
+      || sudo dnf install -y nodejs npm || true
+  elif command -v pacman >/dev/null 2>&1; then
+    sudo pacman -S --noconfirm nodejs npm || true
+  elif command -v zypper >/dev/null 2>&1; then
+    sudo zypper install -y nodejs npm || true
+  elif command -v brew >/dev/null 2>&1; then
+    brew install node || true
+  fi
+  hash -r 2>/dev/null || true
+fi
+command -v node >/dev/null 2>&1 \
+  || { echo "ERROR: Node.js is required (v22+). Install the latest Node LTS — https://nodejs.org, or on WSL/Ubuntu: curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs — then re-run." >&2; exit 1; }
+node_ok \
+  || { echo "ERROR: Node.js $(node -v 2>/dev/null) is too old (need v22+). Install the latest Node LTS (https://nodejs.org, NodeSource, or nvm) and re-run." >&2; exit 1; }
 if [[ -f "$CP_DIR/package.json" ]]; then
   (cd "$CP_DIR" && npm install --silent) && ok "control-plane npm install complete" \
     || die "control-plane npm install failed (hard dependency). Re-run it manually, then re-run: cd $CP_DIR && npm install"

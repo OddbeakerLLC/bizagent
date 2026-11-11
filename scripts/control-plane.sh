@@ -220,7 +220,7 @@ start_server() {
     # shellcheck disable=SC1090
     source "$REQUIRE_NODE"
     bizagent_require_node || {
-      echo "bizagent-control-plane: Node.js v${BIZAGENT_MIN_NODE_MAJOR:-18}+ required" >&2
+      echo "bizagent-control-plane: Node.js v${BIZAGENT_MIN_NODE_MAJOR:-22}+ required" >&2
       exit 1
     }
   else

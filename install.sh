@@ -201,8 +201,11 @@ ensure_npm() {
   ok "npm ready"
 }
 
-# Minimum Node major — keep in sync with agent-runtime engines and scripts/lib/require-node.sh
-BIZAGENT_MIN_NODE_MAJOR="${BIZAGENT_MIN_NODE_MAJOR:-18}"
+# Minimum Node major — keep in sync with agent-runtime engines, install/install.sh,
+# scripts/lib/require-node.sh, and the README requirements table.
+# 22 = oldest active LTS line (Node 20 went EOL 2026-04). When Node is missing
+# or older than this, ensure_node() auto-installs the latest Node LTS.
+BIZAGENT_MIN_NODE_MAJOR="${BIZAGENT_MIN_NODE_MAJOR:-22}"
 
 _node_major() {
   local ver major
@@ -221,6 +224,9 @@ ${RED}✗ Node.js ${detected} is too old (need v${BIZAGENT_MIN_NODE_MAJOR}+).${N
 
 Detected: ${detected}
 Required: v${BIZAGENT_MIN_NODE_MAJOR}.0.0 or newer
+
+The installer tried to install/upgrade to the latest Node LTS automatically
+and could not (no sudo, unsupported distro, or no network). Fix it manually:
 
 This machine/setup may not run BizAgent until Node is upgraded.
 Older distro packages (common on WSL / Ubuntu 20.04) often ship Node 12 or 16,
@@ -260,19 +266,64 @@ _require_node_version() {
   ok "node ${detected} (>= v${BIZAGENT_MIN_NODE_MAJOR})"
 }
 
+# Install/upgrade to the latest Node.js LTS. NodeSource (system-wide) is the
+# most robust path on WSL/Debian/Ubuntu: it puts node on PATH for every future
+# shell AND for systemd/cron, which a user-local nvm install does not. If the
+# NodeSource setup script fails, fall back to the distro package. The caller
+# re-checks the version afterwards and dies with manual instructions (incl.
+# the no-sudo nvm route) if Node is still missing or too old.
+_install_node_lts() {
+  local ns_rc=0
+  case "$PKG" in
+    apt)
+      note "adding the NodeSource LTS repository (needs sudo)..."
+      if curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -; then
+        $INSTALL nodejs || ns_rc=$?
+      else
+        ns_rc=$?
+      fi
+      if [[ $ns_rc -ne 0 ]] || ! have node; then
+        note "NodeSource install failed — trying the distro package instead..."
+        $INSTALL nodejs npm || true
+      fi
+      ;;
+    dnf)
+      note "adding the NodeSource LTS repository (needs sudo)..."
+      if curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash -; then
+        $INSTALL nodejs || ns_rc=$?
+      else
+        ns_rc=$?
+      fi
+      if [[ $ns_rc -ne 0 ]] || ! have node; then
+        note "NodeSource install failed — trying the distro package instead..."
+        $INSTALL nodejs npm || true
+      fi
+      ;;
+    pacman) $INSTALL nodejs npm ;;   # Arch ships current Node
+    zypper) $INSTALL nodejs npm ;;
+    brew)   brew install node ;;
+  esac
+  hash -r 2>/dev/null || true
+}
+
 ensure_node() {
   if have node; then
+    local detected major
+    detected="$(node -v 2>/dev/null || node --version 2>/dev/null || echo unknown)"
+    if major="$(_node_major)" && [[ "$major" -ge "$BIZAGENT_MIN_NODE_MAJOR" ]]; then
+      ok "node ${detected} (>= v${BIZAGENT_MIN_NODE_MAJOR})"
+      return
+    fi
+    note "node ${detected} is below the required v${BIZAGENT_MIN_NODE_MAJOR} — upgrading to the latest Node LTS..."
+    _install_node_lts
+    if ! have node; then
+      die "Node.js was installed but 'node' still is not on PATH. Open a new terminal and re-run this installer."
+    fi
     _require_node_version
     return
   fi
-  note "node not found — installing Node.js..."
-  case "$PKG" in
-    brew)   brew install node ;;
-    apt)    $INSTALL nodejs npm ;;
-    dnf)    $INSTALL nodejs npm ;;
-    pacman) $INSTALL nodejs npm ;;
-    zypper) $INSTALL nodejs npm ;;
-  esac
+  note "node not found — installing the latest Node.js LTS..."
+  _install_node_lts
   if ! have node; then
     die "Node.js was installed but 'node' still is not on PATH. Open a new terminal and re-run this installer."
   fi

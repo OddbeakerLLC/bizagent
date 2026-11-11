@@ -131,7 +131,7 @@ the control plane; queues first-run setup mail when ready; and prints your URL.
 | git | clone hub + product repos | `git` | — (required via pkg) |
 | python3 | installer seeding + small scripts | `python3` | — (required via pkg) |
 | curl | downloads + API-key hello check | `curl` | — (required via pkg) |
-| Node.js **18+** + npm | control plane + agent-runtime | `nodejs npm` / `node` (must be **v18+**; distro Node 12/16 is too old) | — (required via pkg; use NodeSource or nvm on WSL if apt is stale) |
+| Node.js **22+** + npm | control plane + agent-runtime | `nodejs npm` / `node` (must be **v22+**; distro Node 12/16/18 is too old) | auto-installed: the installer adds the NodeSource LTS repo and installs the latest Node LTS for you |
 | cron | nightly / scheduled hub jobs | `cron` / `cronie` (macOS ships cron) | — |
 | Java 17+ | PlantUML renderer | `openjdk-17-jre-headless` / `java-17-openjdk-headless` / `openjdk@17` | Temurin JDK → `~/.bizagent/tools/jdk` |
 | Graphviz (`dot`) | PlantUML non-sequence diagrams | `graphviz` | deb-extract or wrapper → `~/.bizagent/tools/` |
@@ -183,18 +183,20 @@ bizagent schedules its maintenance passes with `cron`, so on Windows you'll need
 In PowerShell, run `wsl --install`, reboot, then run the one-liner above
 inside your new WSL shell.
 
-**Node 18+ required.** Older Ubuntu images on WSL (especially Windows 10) often
-ship Node 12 or 16 via `apt`. The installer checks the version and **exits
-non-zero** if Node is below v18 — it will not silently continue. If that
-happens, install a current LTS before re-running:
+**Node 22+ required — installed automatically.** Older Ubuntu images on WSL
+(especially Windows 10) often ship Node 12, 16, or 18 via `apt`. If Node is
+missing or below v22, the installer adds the NodeSource LTS repository and
+installs the latest Node LTS itself (needs sudo; on WSL your default user has
+it). You only need to do it by hand if that automatic step fails (no sudo,
+unsupported distro, no network):
 
 ```sh
 # NodeSource LTS (recommended on WSL)
 curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
 sudo apt-get install -y nodejs
-node -v   # expect v18+ / v20+ / v22+
+node -v   # expect v22+ / v24+
 
-# or nvm (user-local)
+# or nvm (user-local, no sudo)
 curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
 # restart shell, then:
 nvm install --lts && nvm use --lts
