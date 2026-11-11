@@ -6,7 +6,7 @@
   "dependencies": {
     "express": "^4.21.2",
     "openai": "^4.104.0",
-    "p-queue": "^8.1.1",
+    "p-queue": "^6.6.2",
     "ws": "^8.18.0"
   },
   "engines": {
