@@ -93,6 +93,18 @@ else
   echo "nightly: journal-index.sh missing — skip"
 fi
 
+# --- 0d. rotate + cap hub logs (size caps, gzip archives, 1-2 generations) --
+# Every logs/*.log / *.stderr / *.jsonl over the cap (default 512K) is rotated:
+# oversized file -> <name>.1.gz (older generations dropped), fresh active file
+# keeps the last 64K so recent structured.log events stay readable.
+if [ -f "$HUB/scripts/log-rotate.js" ]; then
+  echo "nightly: rotating hub logs..."
+  node "$HUB/scripts/log-rotate.js" --hub "$HUB" \
+    || echo "nightly: log rotation failed (continuing)"
+else
+  echo "nightly: log-rotate.js missing — skip"
+fi
+
 # --- 1. route -------------------------------------------------------------
 "$HUB/scripts/router.sh"
 

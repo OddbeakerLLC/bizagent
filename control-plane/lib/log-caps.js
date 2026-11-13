@@ -10,6 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 const MB = 1024 * 1024;
 const GB = 1024 * MB;
@@ -111,6 +112,127 @@ function capLogs(hub, { keepBytes = 512 * 1024 } = {}) {
   return { files, bytesRemoved };
 }
 
+/**
+ * Nightly log rotation with size caps.
+ *
+ * Every top-level logs/*.log / *.stderr / *.jsonl over `maxBytes` is rotated:
+ * the oversized file becomes generation 1 (`<name>.1`, gzip-compressed by
+ * default), older generations shift down and the excess is dropped, and the
+ * fresh active file keeps only the last `keepTailBytes` (line-aligned) so
+ * recent context (e.g. structured.log events read by observability and
+ * startup recovery) survives the rotation. Small files are untouched.
+ *
+ * Env overrides: BIZAGENT_LOG_MAX_BYTES, BIZAGENT_LOG_KEEP_GENERATIONS,
+ * BIZAGENT_LOG_COMPRESS=0 (disable gzip).
+ *
+ * @returns {{ rotated: number, files: string[], bytesRemoved: number }}
+ */
+function rotateLogs(hub, {
+  maxBytes = 512 * 1024,
+  keepGenerations = 1,
+  keepTailBytes = 64 * 1024,
+  compress = true,
+} = {}) {
+  const envMax = Number(process.env.BIZAGENT_LOG_MAX_BYTES || 0);
+  if (Number.isFinite(envMax) && envMax > 0) maxBytes = envMax;
+  if (process.env.BIZAGENT_LOG_KEEP_GENERATIONS != null && process.env.BIZAGENT_LOG_KEEP_GENERATIONS !== '') {
+    const envGens = Number(process.env.BIZAGENT_LOG_KEEP_GENERATIONS);
+    if (Number.isFinite(envGens) && envGens >= 0) keepGenerations = Math.floor(envGens);
+  }
+  if (String(process.env.BIZAGENT_LOG_COMPRESS || '') === '0') compress = false;
+
+  const dir = path.join(hub, 'logs');
+  const result = { rotated: 0, files: [], bytesRemoved: 0 };
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch (_err) {
+    return result;
+  }
+
+  const isArchive = (name) => /\.gz$/.test(name) || /\.\d+(\.gz)?$/.test(name);
+  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  for (const name of entries) {
+    if (!/\.(log|stderr|jsonl)$/.test(name)) continue;
+    if (isArchive(name)) continue;
+    const active = path.join(dir, name);
+    let st;
+    try {
+      st = fs.statSync(active);
+    } catch (_err) { continue; }
+    if (!st.isFile() || st.size <= maxBytes) continue;
+
+    const size = st.size;
+
+    // Shift existing archives down: (keepGenerations-1) -> keepGenerations,
+    // ... 1 -> 2. The oldest slot is dropped.
+    for (let gen = keepGenerations; gen >= 1; gen--) {
+      for (const suffix of ['.gz', '']) {
+        const from = path.join(dir, `${name}.${gen}${suffix}`);
+        if (gen >= keepGenerations) {
+          try { fs.unlinkSync(from); } catch (_err) { /* not present */ }
+          continue;
+        }
+        const to = path.join(dir, `${name}.${gen + 1}${suffix}`);
+        try { fs.renameSync(from, to); } catch (_err) { /* not present */ }
+      }
+    }
+
+    // Drop any archive generations beyond the retention window.
+    for (const entry of entries) {
+      const m = entry.match(new RegExp(`^${escapeRe(name)}\\.(\\d+)(\\.gz)?$`));
+      if (!m) continue;
+      if (Number(m[1]) > keepGenerations) {
+        try { fs.unlinkSync(path.join(dir, entry)); } catch (_err) { /* ignore */ }
+      }
+    }
+
+    // Read the tail (line-aligned) BEFORE archiving, so the fresh active
+    // file keeps recent context readable without unpacking the archive.
+    let tail = Buffer.alloc(0);
+    try {
+      const keep = Math.min(keepTailBytes, size);
+      const fd = fs.openSync(active, 'r');
+      try {
+        tail = Buffer.alloc(keep);
+        fs.readSync(fd, tail, 0, keep, size - keep);
+      } finally {
+        fs.closeSync(fd);
+      }
+      if (keep < size) {
+        const nl = tail.indexOf('\n');
+        if (nl >= 0 && nl + 1 < tail.length) tail = tail.slice(nl + 1);
+        else tail = Buffer.alloc(0); // tail is one partial line — drop it
+      }
+    } catch (_err) { tail = Buffer.alloc(0); }
+
+    // Active file -> generation 1 (compressed when enabled).
+    let archiveBytes = 0;
+    if (compress) {
+      try {
+        const content = fs.readFileSync(active);
+        const gz = zlib.gzipSync(content);
+        fs.writeFileSync(path.join(dir, `${name}.1.gz`), gz);
+        archiveBytes = gz.length;
+        fs.unlinkSync(active);
+      } catch (_err) {
+        // Fall back to an uncompressed rename if gzipping failed.
+        try { fs.renameSync(active, path.join(dir, `${name}.1`)); archiveBytes = size; } catch (_e2) { /* keep going */ }
+      }
+    } else {
+      try { fs.renameSync(active, path.join(dir, `${name}.1`)); archiveBytes = size; } catch (_err) { /* keep going */ }
+    }
+
+    try { fs.writeFileSync(active, tail); } catch (_err) { /* best effort */ }
+
+    result.rotated += 1;
+    result.files.push(name);
+    result.bytesRemoved += Math.max(0, size - archiveBytes - tail.length);
+  }
+  return result;
+}
+
 /** Total bytes under hub/logs/ (bounded walk, one level deep). */
 function logsDirBytes(hub) {
   const dir = path.join(hub, 'logs');
@@ -141,6 +263,7 @@ module.exports = {
   capLogs,
   logsDirBytes,
   reservedFreeBytes,
+  rotateLogs,
   statfsSafe,
   truncateToTail,
   volumeSpace,
