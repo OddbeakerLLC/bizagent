@@ -145,6 +145,38 @@ grep -q 'BIZAGENT_TTS_VOICE' "$ROOT/.bizagent/env.example" \
 grep -q 'install-oddbeaker-tts' "$ROOT/README.md" \
   || fail "README missing install-oddbeaker-tts docs"
 
+# TTS URL must default to the host's LAN IP, not localhost (operator report
+# 2026-11-13: localhost URLs are useless to phones/other hosts).
+grep -q 'detect_lan_ip' "$ROOT/scripts/install-oddbeaker-tts.sh" \
+  || fail "install-oddbeaker-tts.sh has no LAN IP detection"
+grep -q 'BIZAGENT_TTS_BIND' "$ROOT/scripts/install-oddbeaker-tts.sh" \
+  || fail "install-oddbeaker-tts.sh has no bind override (BIZAGENT_TTS_BIND)"
+grep -q 'BIZAGENT_TTS_HOST' "$ROOT/scripts/install-oddbeaker-tts.sh" \
+  || fail "install-oddbeaker-tts.sh has no advertised-host override (BIZAGENT_TTS_HOST)"
+grep -Eq 'DEFAULT_TTS_URL="http://(127\.0\.0\.1|localhost)' "$ROOT/scripts/install-oddbeaker-tts.sh" \
+  && fail "install-oddbeaker-tts.sh still defaults the TTS URL to localhost"
+grep -q 'BIZAGENT_TTS_URL' "$ROOT/.bizagent/env.example" \
+  || fail "env.example missing BIZAGENT_TTS_URL"
+
+# Live config-write check (only when a TTS daemon is already on :9201 — the
+# "already running" path writes env and exits without touching the daemon).
+if curl -fsS --max-time 2 http://127.0.0.1:9201/health 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
+  TTS_TMP_HUB="$(mktemp -d)"
+  # Unset ambient overrides (a running hub exports BIZAGENT_TTS_URL to agents);
+  # we are testing the installer's DEFAULT, which must be the LAN IP.
+  if env -u BIZAGENT_TTS_URL -u BIZAGENT_TTS_HOST -u BIZAGENT_TTS_BIND \
+      BIZAGENT_NONINTERACTIVE=1 bash "$ROOT/scripts/install-oddbeaker-tts.sh" \
+      --hub "$TTS_TMP_HUB" --yes >/dev/null 2>&1; then
+    grep -E '^BIZAGENT_TTS_URL=http://' "$TTS_TMP_HUB/.bizagent/env" >/dev/null \
+      || fail "installer did not write BIZAGENT_TTS_URL to hub env"
+    grep -E '^BIZAGENT_TTS_URL=http://(127\.0\.0\.1|localhost)(:|/|$)' "$TTS_TMP_HUB/.bizagent/env" >/dev/null \
+      && fail "installer wrote a localhost BIZAGENT_TTS_URL"
+  else
+    fail "install-oddbeaker-tts.sh failed on the already-running path (temp hub)"
+  fi
+  rm -rf "$TTS_TMP_HUB"
+fi
+
 # Nesting guard: refuse to install inside an existing hub (nested clone bug —
 # running install.sh from inside a hub with a relative BIZAGENT_DIR created
 # <hub>/bizagent/, a full nested clone).

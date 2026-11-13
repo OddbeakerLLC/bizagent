@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # install-oddbeaker-tts.sh — install/start shared oddbeaker-tts (Kokoro) for BizAgent.
 #
-# One daemon per host on 127.0.0.1:9201. Safe to re-run. Does not clobber an
+# One daemon per host on port 9201 (binds 0.0.0.0 by default so other devices
+# on the LAN can reach it; BIZAGENT_TTS_BIND=127.0.0.1 keeps it loopback-only).
+# Safe to re-run. Does not clobber an
 # existing BIZAGENT_TTS_VOICE in hub .bizagent/env unless --force-voice.
 #
 # Usage:
@@ -12,7 +14,12 @@
 # Env:
 #   BIZAGENT_TTS_SOURCE     Clone path or git URL (default: discover / SSH origin)
 #   BIZAGENT_TTS_VOICE      Preferred voice id (default af_heart when prompting skipped)
-#   BIZAGENT_TTS_URL        Service base URL (default http://127.0.0.1:9201)
+#   BIZAGENT_TTS_URL        Service base URL (default http://<LAN-IP>:9201 — the
+#                           host's LAN address, so other devices/hosts can reach
+#                           it; falls back to 127.0.0.1 when no LAN IP is found)
+#   BIZAGENT_TTS_HOST       Advertised host for the URL (default: detected LAN IPv4)
+#   BIZAGENT_TTS_BIND       Address the daemon binds (default 0.0.0.0; set
+#                           127.0.0.1 to keep it loopback-only)
 #   BIZAGENT_TTS_DIR        Install root (default ~/.bizagent/oddbeaker-tts)
 #   BIZAGENT_SKIP_TTS=1     Exit 0 immediately (installer/upgrade honor this)
 #   BIZAGENT_NONINTERACTIVE Non-empty → no prompts (use env/default voice)
@@ -36,7 +43,7 @@ NO_START=0
 YES=0
 QUIET=0
 REQUIRE=0
-DEFAULT_TTS_URL="http://127.0.0.1:9201"
+DEFAULT_TTS_PORT="9201"
 DEFAULT_VOICE="af_heart"
 DEFAULT_GIT_HTTPS="https://github.com/OddbeakerLLC/oddbeaker-tts.git"
 DEFAULT_GIT_SSH="ssh://git@github.com/OddbeakerLLC/oddbeaker-tts.git"
@@ -109,7 +116,45 @@ else
   HUB="$(cd "$HUB" && pwd)"
 fi
 
-TTS_URL="$(printf '%s' "${BIZAGENT_TTS_URL:-$DEFAULT_TTS_URL}" | sed 's:/*$::')"
+# Best LAN-reachable IPv4 for this host (private ranges first). Falls back to
+# 127.0.0.1 when nothing usable is found (single-host loopback setups). A
+# localhost URL is useless to phones/other hosts, so the advertised default is
+# the machine's actual address — override with BIZAGENT_TTS_HOST.
+detect_lan_ip() {
+  local ip=""
+  if command -v hostname >/dev/null 2>&1; then
+    for ip in $(hostname -I 2>/dev/null || true); do
+      case "$ip" in
+        10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) printf '%s\n' "$ip"; return 0 ;;
+      esac
+    done
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    for ip in $(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1); do
+      case "$ip" in
+        10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) printf '%s\n' "$ip"; return 0 ;;
+      esac
+    done
+  fi
+  if command -v ifconfig >/dev/null 2>&1; then
+    for ip in $(ifconfig 2>/dev/null | awk '/inet / && $2 !~ /^127\./ {print $2}'); do
+      case "$ip" in
+        10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) printf '%s\n' "$ip"; return 0 ;;
+      esac
+    done
+  fi
+  # Last resort: any non-loopback address hostname knows about.
+  if command -v hostname >/dev/null 2>&1; then
+    for ip in $(hostname -I 2>/dev/null || true); do
+      [[ "$ip" != 127.* ]] && { printf '%s\n' "$ip"; return 0; }
+    done
+  fi
+  printf '%s\n' "127.0.0.1"
+}
+
+TTS_BIND="${BIZAGENT_TTS_BIND:-0.0.0.0}"
+TTS_HOST="${BIZAGENT_TTS_HOST:-$(detect_lan_ip)}"
+TTS_URL="$(printf '%s' "${BIZAGENT_TTS_URL:-http://$TTS_HOST:$DEFAULT_TTS_PORT}" | sed 's:/*$::')"
 TTS_DIR="${BIZAGENT_TTS_DIR:-$HOME/.bizagent/oddbeaker-tts}"
 ENV_FILE="$HUB/.bizagent/env"
 PORT="9201"
@@ -119,11 +164,20 @@ fi
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-tts_health_ok() {
-  local body
-  body="$(curl -fsS --max-time 2 "$TTS_URL/health" 2>/dev/null)" || return 1
+tts_health_ok_at() {
+  local url="$1" body
+  body="$(curl -fsS --max-time 2 "$url/health" 2>/dev/null)" || return 1
   printf '%s' "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"' 2>/dev/null
 }
+
+# Advertised URL health (what remote consumers use).
+tts_health_ok() { tts_health_ok_at "$TTS_URL"; }
+
+# Loopback health — the daemon runs on THIS host, so 127.0.0.1 answers even
+# when the advertised LAN URL is unreachable from the hub itself (firewall,
+# IP changed since install). Used for "already running" detection so a stale
+# advertised URL never triggers a second-daemon attempt.
+tts_local_ok() { tts_health_ok_at "http://127.0.0.1:$PORT"; }
 
 # --- env helpers (plain KEY=val for loadHubEnv + systemd EnvironmentFile) ---
 
@@ -480,7 +534,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$TTS_DIR
-ExecStart=$venv/bin/oddbeaker-tts --host 127.0.0.1 --port $PORT${cfg:+ --config $cfg} --cache-dir $cache
+ExecStart=$venv/bin/oddbeaker-tts --host $TTS_BIND --port $PORT${cfg:+ --config $cfg} --cache-dir $cache
 Restart=on-failure
 RestartSec=5
 Environment=HOME=$HOME
@@ -530,9 +584,9 @@ start_daemon_nohup() {
       return 0
     fi
   fi
-  note "starting oddbeaker-tts on 127.0.0.1:$PORT (nohup)..."
+  note "starting oddbeaker-tts on $TTS_BIND:$PORT (nohup)..."
   nohup "$venv/bin/oddbeaker-tts" \
-    --host 127.0.0.1 --port "$PORT" \
+    --host "$TTS_BIND" --port "$PORT" \
     "${cfg_args[@]}" \
     --cache-dir "$cache" \
     >>"$logfile" 2>&1 &
@@ -545,6 +599,13 @@ wait_health() {
   while (( i < 30 )); do
     if tts_health_ok; then
       ok "oddbeaker-tts healthy at $TTS_URL/health"
+      return 0
+    fi
+    if tts_local_ok; then
+      ok "oddbeaker-tts healthy on loopback (127.0.0.1:$PORT)"
+      if [[ "$TTS_HOST" != 127.* ]]; then
+        warn "advertised URL $TTS_URL/health not reachable from this host — check the host firewall or set BIZAGENT_TTS_HOST"
+      fi
       return 0
     fi
     sleep 1
@@ -568,8 +629,8 @@ port_in_use() {
 start_service() {
   [[ "$NO_START" -eq 1 ]] && { note "--no-start: not launching daemon"; return 0; }
 
-  if tts_health_ok; then
-    ok "oddbeaker-tts already healthy at $TTS_URL"
+  if tts_health_ok || tts_local_ok; then
+    ok "oddbeaker-tts already running"
     return 0
   fi
 
@@ -592,7 +653,7 @@ main() {
   log "install-oddbeaker-tts: url=$TTS_URL dir=$TTS_DIR"
 
   # Voice first when service already up (upgrade / re-run path)
-  if tts_health_ok; then
+  if tts_health_ok || tts_local_ok; then
     ok "oddbeaker-tts already running"
     prompt_voice_choice
     persist_voice "${VOICE:-$DEFAULT_VOICE}"
@@ -625,7 +686,7 @@ main() {
     note "verify: curl -sS $TTS_URL/health && curl -sS $TTS_URL/voices"
   else
     warn "install finished but service not healthy yet — console TTS will use browser fallback until it is"
-    note "manual start: $TTS_DIR/.venv/bin/oddbeaker-tts --host 127.0.0.1 --port $PORT"
+    note "manual start: $TTS_DIR/.venv/bin/oddbeaker-tts --host $TTS_BIND --port $PORT"
   fi
 }
 

@@ -14,7 +14,7 @@ Optional text-to-speech for hub→operator console replies.
 Preferred path (when the local service is up):
 
 1. Browser → control plane `POST /api/tts/synthesize` (auth cookie).
-2. Control plane → **oddbeaker-tts** HTTP service (`POST http://127.0.0.1:9201/synthesize`).
+2. Control plane → **oddbeaker-tts** HTTP service (`POST <BIZAGENT_TTS_URL>/synthesize`; the installer writes the host's LAN IP, e.g. `http://192.168.1.10:9201`).
 3. Browser plays the returned WAV via `GET /api/tts/audio/<file>.wav` (proxied from oddbeaker-tts cache).
 
 Fallback (service down / synthesize error):
@@ -27,9 +27,12 @@ Package: **oddbeaker-tts** (Oddbeaker Framework, Kokoro). Import `oddbeaker_tts`
 
 **Preferred:** the BizAgent installer and `scripts/upgrade.sh` call
 `scripts/install-oddbeaker-tts.sh`, which clones/installs the package (venv +
-`[runtime]` extras), starts a user systemd unit or nohup daemon on
-`127.0.0.1:9201`, prompts for a voice, and writes `BIZAGENT_TTS_VOICE` into
-hub `.bizagent/env` (never clobbers an existing voice unless `--force-voice`).
+`[runtime]` extras), starts a user systemd unit or nohup daemon on port 9201
+(binds `0.0.0.0` by default so other devices on the LAN can reach it;
+`BIZAGENT_TTS_BIND=127.0.0.1` keeps it loopback-only), prompts for a voice, and
+writes `BIZAGENT_TTS_VOICE` + `BIZAGENT_TTS_URL` (default
+`http://<LAN-IP>:9201`) into hub `.bizagent/env` (never clobbers an existing
+voice unless `--force-voice`).
 
 ```bash
 # Fresh install (automatic during install.sh after clone)
@@ -49,12 +52,12 @@ Source resolution order: `BIZAGENT_TTS_SOURCE` → existing
 `OddbeakerLLC/oddbeaker-tts` (HTTPS may 404 while the repo is private).
 
 **One daemon per host on port 9201.** If Jobe (or another product) already owns
-`127.0.0.1:9201`, the helper detects `/health` and does **not** start a second
+port 9201, the helper detects `/health` and does **not** start a second
 process — BizAgent shares it.
 
 ```bash
 # Manual start only if nothing is listening on 9201:
-~/.bizagent/oddbeaker-tts/.venv/bin/oddbeaker-tts --host 127.0.0.1 --port 9201
+~/.bizagent/oddbeaker-tts/.venv/bin/oddbeaker-tts --host 0.0.0.0 --port 9201
 # or: systemctl --user enable --now oddbeaker-tts.service
 ```
 
@@ -69,7 +72,9 @@ process — BizAgent shares it.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `BIZAGENT_TTS_URL` | `http://127.0.0.1:9201` | oddbeaker-tts base URL |
+| `BIZAGENT_TTS_URL` | `http://<LAN-IP>:9201` (installer-detected; `127.0.0.1` fallback) | oddbeaker-tts base URL |
+| `BIZAGENT_TTS_HOST` | detected LAN IPv4 | Advertised host for the URL |
+| `BIZAGENT_TTS_BIND` | `0.0.0.0` | Address the daemon binds (`127.0.0.1` = loopback-only) |
 | `BIZAGENT_TTS_VOICE` | _(service default, usually `af_heart`)_ | Optional voice id override |
 | `BIZAGENT_TTS_TIMEOUT_MS` | `20000` | Upstream synthesize timeout |
 

@@ -1531,7 +1531,7 @@ ensure_oddbeaker_tts() {
     return 0
   fi
   step "Console TTS (oddbeaker-tts / Kokoro)"
-  note "Optional local service on 127.0.0.1:9201. UI TTS toggle stays off until you enable it."
+  note "Optional local service on port 9201 (binds 0.0.0.0; advertised at the host's LAN IP so other devices can reach it). UI TTS toggle stays off until you enable it."
   note "One daemon per host — shared with other Oddbeaker products if already running."
   local args=(--hub "$INSTALL_DIR" --yes)
   # Interactive install: prompt for voice when a TTY exists
