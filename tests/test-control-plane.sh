@@ -565,10 +565,12 @@ function request(port, { method, pathname, cookie, body }) {
 NODE
 
 
-# .gitignore runs in local-instance mode (adb52c9): operational data is
-# tracked, but control-plane runtime artifacts must still be excluded.
-grep -qE '^\.bizagent/(\*\.pid|hub\.lock/)$' "$ROOT/.gitignore" \
-  || fail ".gitignore does not exclude control-plane runtime state"
+# .gitignore is the strict public ruleset (0c81514): runtime state and operator
+# data are excluded wholesale; the env template stays trackable.
+grep -qE '^\.bizagent/\*$' "$ROOT/.gitignore" \
+  || fail ".gitignore does not exclude .bizagent runtime state"
+grep -qE '^!\.bizagent/env\.example$' "$ROOT/.gitignore" \
+  || fail ".gitignore must keep the .bizagent/env.example template trackable"
 grep -q "^agents/\\*/.dispatch.md" "$ROOT/.gitignore" \
   || fail ".gitignore does not exclude generated agent prompts"
 grep -q "AGENT.md §§ 3-4" "$ROOT/docs/ARCHITECTURE.md" \
