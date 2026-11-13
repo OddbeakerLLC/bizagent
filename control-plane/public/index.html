@@ -10,7 +10,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="BizAgent">
-  <link rel="stylesheet" href="/styles.css?v=20261109-conv-sort-persist">
+  <link rel="stylesheet" href="/styles.css?v=20261113-connect-phone">
 </head>
 <body>
   <div id="healthBanner" class="health-banner" hidden></div>
@@ -51,6 +51,7 @@
           <a id="companyFilesBtn" href="#company" class="nav-drawer-link" hidden title="Upload files to company/ for the Knowledge Stack">Company</a>
           <a id="ttsToggle" href="#tts" class="nav-drawer-link tts-toggle" hidden title="Text-to-speech for hub replies (on by default)" role="switch" aria-checked="true" aria-pressed="true"><span class="nav-drawer-link-label">TTS ✓</span></a>
           <a id="concurrencyToggle" href="#concurrency" class="nav-drawer-link concurrency-toggle" hidden title="Allow concurrent agent turns (on)" role="switch" aria-checked="true" aria-pressed="true"><span class="nav-drawer-link-label">Allow concurrency</span></a>
+          <a id="connectPhoneBtn" href="#connect" class="nav-drawer-link" hidden title="Show a QR code to open BizAgent on your phone">Connect phone</a>
           <a id="editDisplayName" href="#name" class="nav-drawer-link" hidden title="Change your display name">Name</a>
           <a id="logout" href="#logout" class="nav-drawer-link" hidden>Logout</a>
         </div>
@@ -187,9 +188,34 @@
     </div>
   </div>
 
+  <div id="connectPhoneModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="connectPhoneModalTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="connectPhoneModalTitle">Connect your phone</h3>
+        <button id="connectPhoneModalClose" type="button" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="form-modal-desc">Scan this with your phone's camera to open BizAgent there. Your phone must be on the same network as this machine.</p>
+        <div class="connect-phone-qr-wrap">
+          <canvas id="connectPhoneQr" class="connect-phone-qr" width="1" height="1" aria-label="QR code with this BizAgent address"></canvas>
+        </div>
+        <p id="connectPhoneUrl" class="connect-phone-url" title="If scanning fails, type this address into your phone browser"></p>
+        <div class="connect-phone-steps">
+          <p class="connect-phone-platform"><strong>iPhone (Safari):</strong> open the address, tap <em>Share</em>, then <em>Add to Home Screen</em>.</p>
+          <p class="connect-phone-platform"><strong>Android (Chrome):</strong> open the address, tap the <em>⋮</em> menu, then <em>Add to Home screen</em> (or <em>Install app</em>).</p>
+        </div>
+        <p id="connectPhoneStatus" class="modal-status auth-status" hidden></p>
+      </div>
+      <div class="modal-footer">
+        <button id="connectPhoneModalDone" type="button">Got it</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/enterprise/enterprise-panel.js" onerror="/* enterprise optional */"></script>
-  <script src="/markdown.js?v=20261109-conv-sort-persist"></script>
-  <script src="/app.js?v=20261109-conv-sort-persist"></script>
+  <script src="/qr.js?v=20261113-connect-phone"></script>
+  <script src="/markdown.js?v=20261113-connect-phone"></script>
+  <script src="/app.js?v=20261113-connect-phone"></script>
   <script>
     // PWA: register the app-shell service worker (secure contexts only; silent no-op otherwise).
     if ('serviceWorker' in navigator && window.isSecureContext) {

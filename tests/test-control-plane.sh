@@ -452,6 +452,119 @@ grep -q "sha256" "$ROOT/scripts/install-control-plane.sh" \
   || fail "control-plane installer service name is not path-stable"
 grep -q "bizagent-control-plane" "$ROOT/README.md" \
   || fail "README does not document the control plane"
+# Connect phone (QR): /api/connect-info serves a LAN-reachable URL (never
+# localhost), honors BIZAGENT_PUBLIC_URL, and the static UI wires the drawer
+# item + dialog + QR encoder. Live-server check runs in a temp hub.
+if ! grep -q "connectPhoneModal" "$ROOT/control-plane/public/index.html"; then
+  fail "connect-phone dialog missing from index.html"
+fi
+grep -q 'connectPhoneBtn' "$ROOT/control-plane/public/index.html" \
+  || fail "connect-phone drawer item missing from index.html"
+grep -q 'qr.js' "$ROOT/control-plane/public/index.html" \
+  || fail "qr.js script tag missing from index.html"
+grep -q '/api/connect-info' "$ROOT/control-plane/public/app.js" \
+  || fail "app.js does not call /api/connect-info"
+node - "$ROOT" <<'NODE' || fail "qr encoder self-check"
+const qr = require(process.argv[2] + '/control-plane/public/qr.js');
+const text = 'http://192.168.1.23:8787';
+const m = qr.encode(text);
+if (!Array.isArray(m) || m.length < 21 || m.length !== m[0].length) {
+  console.error('bad matrix shape'); process.exit(1);
+}
+// Finder patterns: 7x7 dark ring with light ring at the three corners.
+function finderAt(y0, x0) {
+  for (let dy = 0; dy < 7; dy++) for (let dx = 0; dx < 7; dx++) {
+    const ring = Math.max(Math.abs(dx - 3), Math.abs(dy - 3));
+    // center 3x3 dark, middle ring light, outer ring dark
+    const expect = ring !== 2;
+    if (m[y0 + dy][x0 + dx] !== expect) return false;
+  }
+  return true;
+}
+if (!finderAt(0, 0) || !finderAt(0, m.length - 7) || !finderAt(m.length - 7, 0)) {
+  console.error('finder patterns missing'); process.exit(1);
+}
+try { qr.encode('x'.repeat(300)); console.error('oversize input did not throw'); process.exit(1); }
+catch (_e) { /* expected */ }
+NODE
+node - "$ROOT" <<'NODE' || fail "connect-info live server check"
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const root = process.argv[2];
+const { createServer } = require(path.join(root, 'control-plane/server'));
+const { loadRuntimeConfig } = require(path.join(root, 'control-plane/lib/config'));
+const { initAuth } = require(path.join(root, 'control-plane/lib/auth'));
+
+function assert(cond, msg) {
+  if (!cond) { console.error('  FAIL: ' + msg); process.exit(1); }
+}
+function request(port, { method, pathname, cookie, body }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1', port, path: pathname, method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cookie ? { Cookie: cookie } : {}),
+        ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
+      },
+    }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => resolve({ status: res.statusCode, json: data ? JSON.parse(data) : null, headers: res.headers }));
+    });
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+(async () => {
+  const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-connect-'));
+  fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+  fs.mkdirSync(path.join(hub, '.bizagent'), { recursive: true });
+  fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({ products: [] }));
+  initAuth(hub, 'operator', 's3cret-pass');
+  const config = loadRuntimeConfig(hub);
+  const server = createServer(config);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    const pre = await request(port, { method: 'GET', pathname: '/api/connect-info' });
+    assert(pre.status === 401, `unauthenticated connect-info should 401, got ${pre.status}`);
+
+    const login = await request(port, {
+      method: 'POST', pathname: '/api/login',
+      body: JSON.stringify({ username: 'operator', password: 's3cret-pass' }),
+    });
+    const cookie = (login.headers['set-cookie'] || [])[0].split(';')[0];
+
+    const info = await request(port, { method: 'GET', pathname: '/api/connect-info', cookie });
+    assert(info.status === 200, `connect-info should 200, got ${info.status}`);
+    assert(info.json && info.json.url, 'connect-info should return a url');
+    assert(!/\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(info.json.url),
+      `url must not be localhost, got ${info.json.url}`);
+    assert(Array.isArray(info.json.addresses) && info.json.addresses.length >= 1,
+      'connect-info should list LAN addresses');
+
+    // Explicit override wins verbatim (proxy/TLS setups).
+    process.env.BIZAGENT_PUBLIC_URL = 'https://biz.example.com';
+    const overridden = await request(port, { method: 'GET', pathname: '/api/connect-info', cookie });
+    assert(overridden.json.url === 'https://biz.example.com',
+      `override should win, got ${overridden.json.url}`);
+    assert(overridden.json.override === true, 'override flag should be true');
+    delete process.env.BIZAGENT_PUBLIC_URL;
+  } finally {
+    server.close();
+    fs.rmSync(hub, { recursive: true, force: true });
+  }
+  process.exit(0);
+})().catch((e) => { console.error(e); process.exit(1); });
+NODE
+
+
 # .gitignore runs in local-instance mode (adb52c9): operational data is
 # tracked, but control-plane runtime artifacts must still be excluded.
 grep -qE '^\.bizagent/(\*\.pid|hub\.lock/)$' "$ROOT/.gitignore" \

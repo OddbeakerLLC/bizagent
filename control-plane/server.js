@@ -722,6 +722,11 @@ async function handleApi(config, req, res) {
     return send(res, 200, currentState(config, req.session));
   }
 
+  if (url.pathname === "/api/connect-info" && req.method === "GET") {
+    // LAN-reachable base URL for the "Connect phone" QR code.
+    return send(res, 200, connectInfo(config));
+  }
+
   if (url.pathname === "/api/state/stream" && req.method === "GET") {
     // SSE push for agent state / lights. Replaces 2s poll.
     res.writeHead(200, {
@@ -2000,6 +2005,55 @@ function resolveTlsOptions(config) {
   return {
     key: fs.readFileSync(generated.keyPath),
     cert: fs.readFileSync(generated.certPath),
+  };
+}
+
+// --- Connect-phone info (QR onboarding) -------------------------------------
+// Best LAN-reachable base URL for this control plane, for the "Connect phone"
+// QR code (end-of-onboarding + drawer nav). Never localhost: the phone needs
+// an address reachable on the same network. Override with BIZAGENT_PUBLIC_URL
+// or registry settings.control_plane.public_url (proxy/TLS terminator setups).
+function lanIPv4Addresses() {
+  const out = [];
+  const ifs = os.networkInterfaces();
+  for (const name of Object.keys(ifs)) {
+    for (const addr of ifs[name] || []) {
+      if (addr.internal || addr.family !== "IPv4" || !addr.address) continue;
+      out.push(addr.address);
+    }
+  }
+  // Private ranges first (that is what a phone on the same LAN can reach).
+  const isPrivate = (ip) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip);
+  out.sort((a, b) => (isPrivate(b) ? 1 : 0) - (isPrivate(a) ? 1 : 0));
+  return out;
+}
+
+function connectInfo(config) {
+  const scheme = tlsEnabled(config) ? "https" : "http";
+  const port = config.port;
+  const override =
+    process.env.BIZAGENT_PUBLIC_URL ||
+    (config.registry &&
+      config.registry.settings &&
+      config.registry.settings.control_plane &&
+      config.registry.settings.control_plane.public_url) ||
+    "";
+  const addresses = lanIPv4Addresses();
+  let url;
+  if (override) {
+    url = String(override).replace(/\/+$/, "");
+  } else {
+    const host = addresses[0] || os.hostname();
+    const explicitPort = scheme === "https" ? port !== 443 : port !== 80;
+    url = `${scheme}://${host}${explicitPort ? `:${port}` : ""}`;
+  }
+  return {
+    url,
+    scheme,
+    port,
+    hostname: os.hostname(),
+    addresses,
+    override: Boolean(override),
   };
 }
 

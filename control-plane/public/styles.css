@@ -1751,3 +1751,34 @@ button {
 .form-field--check { flex-direction: row; align-items: center; gap: 8px; }
 .form-field--check label { margin-bottom: 0; }
 .form-modal-desc { font-size: 13px; color: #374151; margin: 0 0 10px; }
+
+/* Connect phone (QR) dialog */
+.connect-phone-qr-wrap {
+  display: flex;
+  justify-content: center;
+  margin: 4px 0 10px;
+}
+.connect-phone-qr {
+  width: 220px;
+  height: 220px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+.connect-phone-url {
+  margin: 0 0 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  text-align: center;
+  word-break: break-all;
+  color: #172033;
+}
+.connect-phone-steps {
+  border-top: 1px solid #e5e7eb;
+  padding-top: 10px;
+}
+.connect-phone-platform {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #374151;
+}

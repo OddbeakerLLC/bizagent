@@ -113,6 +113,8 @@ function setAuthenticated(isAuthenticated, message) {
   if (ttsBtn) ttsBtn.hidden = !isAuthenticated;
   const concurrencyBtn = document.getElementById('concurrencyToggle');
   if (concurrencyBtn) concurrencyBtn.hidden = !isAuthenticated;
+  const connectPhoneBtn = document.getElementById('connectPhoneBtn');
+  if (connectPhoneBtn) connectPhoneBtn.hidden = !isAuthenticated;
   if (isAuthenticated) refreshConcurrencyToggle();
   if (!isAuthenticated) {
     document.getElementById('namePanel').hidden = true;
@@ -2984,6 +2986,8 @@ async function setup() {
     await api('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) });
     setAuthenticated(true, `Signed in as ${username}`);
     await boot();
+    // End-of-onboarding moment: offer the phone QR once (skippable).
+    maybeShowConnectPhoneOnce();
   } catch (err) {
     const msg = err.message || 'Setup failed';
     // If credentials were already created (e.g. prior attempt), switch to login.
@@ -3508,6 +3512,77 @@ const chatProductsModalCancel = document.getElementById('chatProductsModalCancel
 if (chatProductsModalCancel) chatProductsModalCancel.addEventListener('click', closeChatProductsModal);
 const chatProductsModalClose = document.getElementById('chatProductsModalClose');
 if (chatProductsModalClose) chatProductsModalClose.addEventListener('click', closeChatProductsModal);
+
+// --- Connect phone (QR to open BizAgent on a phone) -------------------------
+const CONNECT_PHONE_SEEN_KEY = 'BIZAGENT_CONNECT_PHONE_SEEN';
+
+function setConnectPhoneStatus(text, kind = 'neutral') {
+  const el = document.getElementById('connectPhoneStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.hidden = !text;
+  if (text) el.dataset.kind = kind;
+}
+
+async function openConnectPhoneModal() {
+  const modal = document.getElementById('connectPhoneModal');
+  const canvas = document.getElementById('connectPhoneQr');
+  const urlEl = document.getElementById('connectPhoneUrl');
+  if (!modal || !canvas || !urlEl) return;
+  modal.hidden = false;
+  setConnectPhoneStatus('Loading connection info...', 'pending');
+  urlEl.textContent = '';
+  try {
+    const info = await api('/api/connect-info');
+    urlEl.textContent = info && info.url ? info.url : '';
+    if (!info || !info.url) {
+      setConnectPhoneStatus('No connection info available', 'warn');
+    } else if (typeof QrCode !== 'undefined' && QrCode.render) {
+      QrCode.render(canvas, info.url, { scale: 6, quietZone: 4 });
+      setConnectPhoneStatus('');
+    } else {
+      // QR renderer missing — the URL text below still works.
+      setConnectPhoneStatus('QR rendering unavailable — type the address below into your phone', 'warn');
+    }
+  } catch (err) {
+    setConnectPhoneStatus(err.message || 'Could not load connection info', 'warn');
+  }
+}
+
+function closeConnectPhoneModal() {
+  const modal = document.getElementById('connectPhoneModal');
+  if (modal) modal.hidden = true;
+}
+
+// End-of-onboarding: show the QR once after the first-run login is created
+// (skippable — closing counts as done; the drawer item is the re-entry point).
+function maybeShowConnectPhoneOnce() {
+  let seen = false;
+  try {
+    seen = localStorage.getItem(CONNECT_PHONE_SEEN_KEY) === '1';
+    if (!seen) localStorage.setItem(CONNECT_PHONE_SEEN_KEY, '1');
+  } catch (_err) {
+    return; // no storage (private mode) — the drawer item still works
+  }
+  if (!seen) openConnectPhoneModal();
+}
+
+const connectPhoneBtn = document.getElementById('connectPhoneBtn');
+if (connectPhoneBtn) {
+  connectPhoneBtn.addEventListener('click', (event) => {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+    openConnectPhoneModal();
+  });
+}
+const connectPhoneModalDone = document.getElementById('connectPhoneModalDone');
+if (connectPhoneModalDone) connectPhoneModalDone.addEventListener('click', closeConnectPhoneModal);
+const connectPhoneModalClose = document.getElementById('connectPhoneModalClose');
+if (connectPhoneModalClose) connectPhoneModalClose.addEventListener('click', closeConnectPhoneModal);
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  const modal = document.getElementById('connectPhoneModal');
+  if (modal && !modal.hidden) closeConnectPhoneModal();
+});
 document.getElementById('deleteConversation').addEventListener('click', async () => {
   if (!currentConversation) return;
   const select = document.getElementById('conversationSelect');
