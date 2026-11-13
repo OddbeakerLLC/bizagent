@@ -556,6 +556,38 @@ function request(port, { method, pathname, cookie, body }) {
       `override should win, got ${overridden.json.url}`);
     assert(overridden.json.override === true, 'override flag should be true');
     delete process.env.BIZAGENT_PUBLIC_URL;
+
+    // WSL2: connect-info must never hand the phone a WSL-internal NAT
+    // address. Simulate by faking the interface list (no PowerShell interop
+    // on this box, so windowsHostIPv4s() returns nothing).
+    const realIfs = os.networkInterfaces;
+    const fakeIf = (ip) => [{ address: ip, family: 'IPv4', internal: false }];
+    process.env.WSL_DISTRO_NAME = 'TestDistro';
+    try {
+      // Mirrored mode: WSL reuses the Windows (LAN-subnet) addresses — QR
+      // works as-is, no hint.
+      os.networkInterfaces = () => ({ eth0: fakeIf('192.168.1.50') });
+      const mirrored = await request(port, { method: 'GET', pathname: '/api/connect-info', cookie });
+      assert(mirrored.json.wsl === true, 'WSL env should set wsl=true');
+      assert(mirrored.json.wslMode === 'mirrored', `expected mirrored, got ${mirrored.json.wslMode}`);
+      assert(mirrored.json.url === 'http://192.168.1.50:8787', `mirrored url wrong: ${mirrored.json.url}`);
+      assert(mirrored.json.reachable === true && !mirrored.json.hint, 'mirrored mode needs no hint');
+
+      // NAT mode: 172.16/12 address is unreachable from a phone — no QR
+      // address that silently fails; the hint must explain the portproxy.
+      os.networkInterfaces = () => ({ eth0: fakeIf('172.28.55.40') });
+      const nat = await request(port, { method: 'GET', pathname: '/api/connect-info', cookie });
+      assert(nat.json.wslMode === 'nat', `expected nat, got ${nat.json.wslMode}`);
+      assert(nat.json.reachable === false, 'NAT mode must not claim reachability');
+      assert(/portproxy/.test(nat.json.hint), 'NAT hint should explain netsh portproxy');
+      assert(nat.json.hint.includes('172.28.55.40'), 'NAT hint should include the WSL IP for portproxy');
+      assert(!/^172\.(1[6-9]|2\d|3[01])\./.test(nat.json.url || ''),
+        `NAT url must not be a WSL-internal address, got ${nat.json.url}`);
+    } finally {
+      os.networkInterfaces = realIfs;
+      delete process.env.WSL_DISTRO_NAME;
+      delete process.env.WSL_INTEROP;
+    }
   } finally {
     server.close();
     fs.rmSync(hub, { recursive: true, force: true });

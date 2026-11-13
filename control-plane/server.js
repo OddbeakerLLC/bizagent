@@ -2028,6 +2028,87 @@ function lanIPv4Addresses() {
   return out;
 }
 
+// --- WSL awareness -----------------------------------------------------------
+// Inside WSL2 the addresses Node sees belong to the WSL-internal NAT network
+// (usually 172.16/12), which a phone on the LAN cannot reach. Detect WSL,
+// find the Windows host's LAN IP, and tell mirrored networking (WSL shares
+// the Windows adapters — the address works as-is) apart from NAT mode (the
+// phone needs a Windows-side netsh portproxy forward).
+function isWsl() {
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
+  try {
+    return /microsoft/i.test(fs.readFileSync("/proc/version", "utf8"));
+  } catch (_err) {
+    return false;
+  }
+}
+
+function windowsHostIPv4s() {
+  // PowerShell interop is the only reliable way to see the Windows LAN IP
+  // from inside WSL. Try PATH first, then the standard /mnt/c location.
+  const script =
+    "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | " +
+    "Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notlike '169.254.*' } | " +
+    "Select-Object -ExpandProperty IPAddress";
+  const candidates = [
+    "powershell.exe",
+    "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+  ];
+  for (const exe of candidates) {
+    try {
+      const out = execFileSync(
+        exe,
+        ["-NoProfile", "-NonInteractive", "-Command", script],
+        { timeout: 8000, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const ips = String(out)
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter((s) => /^\d{1,3}(\.\d{1,3}){3}$/.test(s));
+      if (ips.length) return ips;
+    } catch (_err) {
+      /* try the next candidate */
+    }
+  }
+  return [];
+}
+
+function defaultGatewayIPv4() {
+  // /proc/net/route: destination 00000000 = default route; gateway is
+  // little-endian hex. On NAT-mode WSL2 this is the Windows host address.
+  try {
+    const lines = fs.readFileSync("/proc/net/route", "utf8").split("\n");
+    for (const line of lines.slice(1)) {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length < 3 || cols[1] !== "00000000") continue;
+      const hex = cols[2];
+      if (!/^[0-9a-f]{8}$/i.test(hex)) continue;
+      const bytes = [0, 2, 4, 6].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      return bytes.reverse().join(".");
+    }
+  } catch (_err) {
+    /* not Linux, or no default route */
+  }
+  return "";
+}
+
+const isWslNatRange = (ip) => /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
+
+function isPrivateIPv4(ip) {
+  return /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip);
+}
+
+function resolvConfNameserver() {
+  try {
+    const m = fs
+      .readFileSync("/etc/resolv.conf", "utf8")
+      .match(/^\s*nameserver\s+(\d{1,3}(?:\.\d{1,3}){3})/m);
+    return m ? m[1] : "";
+  } catch (_err) {
+    return "";
+  }
+}
+
 function connectInfo(config) {
   const scheme = tlsEnabled(config) ? "https" : "http";
   const port = config.port;
@@ -2040,8 +2121,61 @@ function connectInfo(config) {
     "";
   const addresses = lanIPv4Addresses();
   let url;
+  let wsl = false;
+  let wslMode = null; // 'mirrored' | 'nat'
+  let reachable = true; // can a phone on the LAN open url as-is?
+  let hint = "";
   if (override) {
     url = String(override).replace(/\/+$/, "");
+  } else if (isWsl()) {
+    wsl = true;
+    const winIPs = windowsHostIPv4s();
+    const localSet = new Set(addresses);
+    let mirrored;
+    if (winIPs.length) {
+      // Mirrored mode: WSL interfaces carry the Windows adapter addresses.
+      mirrored = winIPs.some((ip) => localSet.has(ip));
+    } else {
+      // No PowerShell interop: NAT-mode WSL2 lives in 172.16/12, mirrored
+      // mode reuses the (LAN-subnet) Windows addresses.
+      mirrored = !addresses.some(isWslNatRange);
+    }
+    wslMode = mirrored ? "mirrored" : "nat";
+    if (mirrored) {
+      // The WSL address is the Windows address — same LAN reachability as
+      // native Linux; no port forwarding needed.
+      const host = addresses[0] || os.hostname();
+      const explicitPort = scheme === "https" ? port !== 443 : port !== 80;
+      url = `${scheme}://${host}${explicitPort ? `:${port}` : ""}`;
+    } else {
+      // NAT mode: the phone must hit the Windows host's LAN IP, and Windows
+      // must forward the port into WSL. Prefer a private Windows IP outside
+      // the WSL NAT range (the vEthernet (WSL) adapter also sits in 172.16/12
+      // but is only reachable from WSL itself).
+      const hostIP =
+        winIPs.find((ip) => isPrivateIPv4(ip) && !isWslNatRange(ip)) ||
+        winIPs.find((ip) => isPrivateIPv4(ip)) ||
+        defaultGatewayIPv4() ||
+        resolvConfNameserver() ||
+        "";
+      const wslIP = addresses[0] || "";
+      if (hostIP && !isWslNatRange(hostIP)) {
+        const explicitPort = scheme === "https" ? port !== 443 : port !== 80;
+        url = `${scheme}://${hostIP}${explicitPort ? `:${port}` : ""}`;
+      } else {
+        url = ""; // no trustworthy Windows LAN IP — don't guess one
+      }
+      reachable = false;
+      hint =
+        "BizAgent is running inside WSL2 (NAT networking), so a phone on your " +
+        "LAN cannot reach this address until Windows forwards the port. " +
+        "Run in an Administrator PowerShell on Windows:\n" +
+        `netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=${port} connectaddress=${wslIP || "<WSL-IP>"} connectport=${port}\n` +
+        `New-NetFirewallRule -DisplayName 'BizAgent' -Direction Inbound -LocalPort ${port} -Protocol TCP -Action Allow\n` +
+        "Or switch WSL to mirrored networking (.wslconfig: [wsl2] networkingMode=mirrored), " +
+        "or set BIZAGENT_PUBLIC_URL to an address that is already reachable." +
+        (url ? "" : " The Windows LAN IP could not be detected (PowerShell interop unavailable) — replace the host part with your Windows machine's LAN IP.");
+    }
   } else {
     const host = addresses[0] || os.hostname();
     const explicitPort = scheme === "https" ? port !== 443 : port !== 80;
@@ -2054,6 +2188,10 @@ function connectInfo(config) {
     hostname: os.hostname(),
     addresses,
     override: Boolean(override),
+    wsl,
+    wslMode,
+    reachable,
+    hint,
   };
 }
 

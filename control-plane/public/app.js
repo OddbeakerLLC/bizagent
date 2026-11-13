@@ -3535,9 +3535,17 @@ async function openConnectPhoneModal() {
   try {
     const info = await api('/api/connect-info');
     urlEl.textContent = info && info.url ? info.url : '';
-    if (!info || !info.url) {
+    if (!info || (!info.url && !info.hint)) {
       setConnectPhoneStatus('No connection info available', 'warn');
+    } else if (info.hint) {
+      // Not LAN-reachable yet (e.g. WSL2 NAT mode): the QR would encode an
+      // address the phone cannot open — show the fix instead.
+      const wrap = canvas.parentElement;
+      if (wrap) wrap.hidden = true;
+      setConnectPhoneStatus(info.hint, 'warn');
     } else if (typeof QrCode !== 'undefined' && QrCode.render) {
+      const wrap = canvas.parentElement;
+      if (wrap) wrap.hidden = false;
       QrCode.render(canvas, info.url, { scale: 6, quietZone: 4 });
       setConnectPhoneStatus('');
     } else {
