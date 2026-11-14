@@ -302,8 +302,34 @@ if [[ -f "$HUB/agent-runtime/package.json" ]]; then
   chmod +x "$HUB/scripts/bizagent-agent" "$HUB/agent-runtime/bin/bizagent-agent" 2>/dev/null || true
 fi
 
-# --- 3. Cron or systemd ---
+# --- 3. Cron or systemd (WSL: shell-open hook is primary, cron stays as safety net) ---
 step "Service"
+_is_wsl=0
+if [[ "$(uname -s)" == "Linux" ]] && grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null; then
+  _is_wsl=1
+fi
+if [[ "$_is_wsl" -eq 1 ]]; then
+  if [[ -f "$HUB/scripts/wsl-cp-autostart.sh" ]]; then
+    chmod +x "$HUB/scripts/wsl-cp-autostart.sh" 2>/dev/null || true
+    _MARKER="# bizagent-cp-autostart"
+    _HOOK="bash \"$HUB/scripts/wsl-cp-autostart.sh\" >/dev/null 2>&1"
+    _hooked=0
+    for _rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+      [[ -f "$_rc" ]] || continue
+      if ! grep -qF "$_MARKER" "$_rc" 2>/dev/null; then
+        { echo ""; echo "$_MARKER (idempotent - do not duplicate)"; echo "$_HOOK"; } >> "$_rc"
+      fi
+      _hooked=1
+    done
+    if [[ "$_hooked" -eq 1 ]]; then
+      ok "WSL shell-open autostart hook installed (control plane starts on shell open; cron below stays as safety net)"
+    else
+      warn "no shell profile found (~/.bashrc, ~/.zshrc, ~/.profile) - WSL autostart hook not installed"
+    fi
+  else
+    warn "scripts/wsl-cp-autostart.sh missing - WSL shell-open autostart hook not installed"
+  fi
+fi
 if command -v systemctl >/dev/null 2>&1 && systemctl --user is-system-running 2>/dev/null | grep -qE '^(running|degraded)$'; then
   bash "$HUB/scripts/install-control-plane.sh"
   ok "systemd service installed"
