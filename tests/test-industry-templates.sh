@@ -110,6 +110,11 @@ assert "Routines (industry template)" in md, "routines section missing"
 assert "checkin-sweep" in md
 assert "{{" not in md and "{{" not in json.dumps(r), "unsubstituted placeholder"
 assert os.path.isfile(os.path.join(hub, "agents", "assistant-coach", ".dispatch.md"))
+# H6 (2026-11-15 review): the dispatch fill must substitute {{PRODUCT_SLUG}} too.
+with open(os.path.join(hub, "agents", "assistant-coach", ".dispatch.md")) as f:
+    dispatch_md = f.read()
+assert "{{PRODUCT_SLUG}}" not in dispatch_md, "dispatch.md ships literal {{PRODUCT_SLUG}}"
+assert "--from assistant-coach" in dispatch_md, "dispatch.md form-request example not bound to slug"
 for d in ("agents/assistant-coach/inbox/archive", "agents/assistant-coach/outbox",
           "data/assistant-coach"):
     assert os.path.isdir(os.path.join(hub, d)), d

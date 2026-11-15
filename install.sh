@@ -1626,6 +1626,22 @@ choose_dir() {
   done
 
   if [[ -d "$INSTALL_DIR" ]] && [[ ! -d "$INSTALL_DIR/.git" ]]; then
+    # H1 guard (2026-11-15 review): never wipe a non-empty directory that does
+    # not look like a prior bizagent install/partial clone without an explicit
+    # opt-in. A typo'd BIZAGENT_DIR (e.g. $HOME) must not be destroyed.
+    local wipe_dir_nonempty=0 wipe_dir_marker=0 wipe_reply=""
+    [[ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]] && wipe_dir_nonempty=1
+    [[ -f "$INSTALL_DIR/install.sh" || -f "$INSTALL_DIR/AGENT.md" ]] && wipe_dir_marker=1
+    if [[ "$wipe_dir_nonempty" == "1" && "$wipe_dir_marker" == "0" ]]; then
+      if [[ "${BIZAGENT_REINSTALL:-}" == "1" ]]; then
+        warn "BIZAGENT_REINSTALL=1: wiping non-bizagent directory $INSTALL_DIR"
+      elif [[ -t 0 ]]; then
+        read -r -p "$INSTALL_DIR exists, is not empty, and is not a bizagent install. DELETE it and install here? [y/N] " wipe_reply
+        [[ "$wipe_reply" =~ ^[Yy]$ ]] || die "Refusing to delete $INSTALL_DIR. Set BIZAGENT_DIR to a fresh path, or BIZAGENT_REINSTALL=1 to force."
+      else
+        die "$INSTALL_DIR exists, is not empty, and is not a bizagent install — refusing to delete it. Set BIZAGENT_DIR to a fresh path, or BIZAGENT_REINSTALL=1 to force."
+      fi
+    fi
     if pgrep -f "bizagent-control-plane" >/dev/null 2>&1; then
       note "Stopping running control plane..."
       pkill -f "bizagent-control-plane" 2>/dev/null || true

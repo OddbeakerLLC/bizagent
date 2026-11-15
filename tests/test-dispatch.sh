@@ -68,6 +68,14 @@ MSG
 BIZAGENT_DRY_RUN=1 node "$ROOT/scripts/bizagent-control-plane.js" dispatch-once --hub "$TMP" >/dev/null
 [ -f "$TMP/agents/alpha/.dispatch.md" ] || fail "dispatch prompt not generated"
 [ ! -d "$TMP/agents/alpha/.lock" ] || fail "dry-run dispatch left a lock"
+# H6 (2026-11-15 review): the rendered dispatch prompt must never ship a
+# literal {{PRODUCT_SLUG}} — agents copying the form-request example would
+# mail the hub from a bogus sender.
+if grep -q "{{PRODUCT_SLUG}}" "$TMP/agents/alpha/.dispatch.md"; then
+  fail "dispatch prompt contains unsubstituted {{PRODUCT_SLUG}}"
+fi
+grep -q -- "--from alpha" "$TMP/agents/alpha/.dispatch.md" \
+  || fail "dispatch prompt form-request example not bound to the agent slug"
 
 # --- 30-min lock-lease double-dispatch fix (2026-09-07) ---
 # (a) live pid + age>lease must NOT steal; (b) dead pid may reclaim;

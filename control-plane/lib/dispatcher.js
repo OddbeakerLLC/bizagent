@@ -1060,6 +1060,7 @@ function ensureDispatchPrompt(hub, slug) {
   if (!fs.existsSync(template)) throw new Error(`missing dispatch prompt template: ${template}`);
   const text = fs.readFileSync(template, 'utf8')
     .replace(/\{\{slug\}\}/g, slug)
+    .replace(/\{\{PRODUCT_SLUG\}\}/g, slug)
     .replace(/\{\{agent_md\}\}/g, `agents/${slug}/agent.md`)
     .replace(/\{\{inbox\}\}/g, `agents/${slug}/inbox`)
     .replace(/\{\{outbox\}\}/g, `agents/${slug}/outbox`);

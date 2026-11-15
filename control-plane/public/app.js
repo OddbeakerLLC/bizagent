@@ -3968,7 +3968,7 @@ function renderHealthBanner(h) {
             : cooldown
               ? 'Dispatches paused — rate-limit cooldown'
               : `Hub health: ${level}`;
-  const details = bad.slice(0, 4).map((c) => `${c.name}: ${c.detail}`).join(' · ');
+  const details = bannerEscape(bad.slice(0, 4).map((c) => `${c.name}: ${c.detail}`).join(' · '));
   const cooldownHtml = cooldown > 0
     ? `<span class="health-banner-detail">Dispatches paused for ${cooldown}s (rate-limit cooldown) — auto-resumes.</span>`
     : '';
@@ -4003,7 +4003,7 @@ function renderHealthBanner(h) {
     cooldownHtml +
     holdsHtml +
     errorsHtml +
-    (safeMode ? `<span class="health-banner-detail">Current health: ${level}. The hub will exit safe mode automatically once health is back to ok.</span>` : '') +
+    (safeMode ? `<span class="health-banner-detail">Current health: ${bannerEscape(level)}. The hub will exit safe mode automatically once health is back to ok.</span>` : '') +
     (fallback && !safeMode ? '<span class="health-banner-detail">Fix the paid provider (top up / new key) to restore normal turns.</span>' : '');
   syncChatBannerDedupe();
 }
@@ -4128,9 +4128,9 @@ function renderCrossChatAlerts() {
   const first = waiting[0];
   const extra = waiting.length > 1 ? ` (+${waiting.length - 1} more)` : '';
   const isPointer = first.kind === 'pointer';
-  const target = crossChatAlertTargetId(first);
-  const name = first.conversation_name || 'another conversation';
-  const destination = first.destination_name || name;
+  const target = bannerEscape(crossChatAlertTargetId(first));
+  const name = bannerEscape(first.conversation_name || 'another conversation');
+  const destination = bannerEscape(first.destination_name || first.conversation_name || 'another conversation');
   el.hidden = false;
   el.className = `cross-chat-alert${isPointer ? ' pointer' : ''}`;
   el.innerHTML =

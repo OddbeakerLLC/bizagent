@@ -637,21 +637,34 @@ async function handleApi(config, req, res) {
   const didChangeActiveConv = () => { try { pushActiveConv(config); } catch (_) {} };
 
   // --- Health (public, no auth): drives the console banner + external monitors. ---
+  // H2 (2026-11-15 review): unauthenticated callers get a minimal payload
+  // ({ok, level, safe_mode, ts}) and never trigger an inline re-check;
+  // operational detail (recent_errors, holds, per-check output) requires auth.
+  // The console banner fetch is authenticated (session cookie), so it still
+  // gets the full payload.
   if (url.pathname === "/api/health" && req.method === "GET") {
+    const authedSession = hasAuth(config.hub)
+      ? getSession(config.hub, parseCookies(req.headers.cookie).bizagent_session)
+      : null;
     const file = path.join(config.hub, "logs", "health.json");
     let report = null;
     try {
       const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-      // Fresh enough (2 min) → serve as-is; else re-check inline (cheap).
+      // Fresh enough (2 min) → serve as-is; else re-check inline (cheap, authed only).
       if (raw && raw.ts && Date.now() - Date.parse(raw.ts) < 2 * 60 * 1000) report = raw;
     } catch (_err) { /* absent/corrupt */ }
-    if (!report) {
+    if (!report && authedSession) {
       try { report = health.runHealthCheck(config.hub, { mitigate: false }); } catch (_err) { report = null; }
     }
-    return send(res, 200, {
+    const base = {
       ok: report ? report.level === "ok" : false,
       level: report ? report.level : "unknown",
       safe_mode: safeMode.isSafeMode(config.hub),
+      ts: report ? report.ts : new Date().toISOString(),
+    };
+    if (!authedSession) return send(res, 200, base);
+    return send(res, 200, {
+      ...base,
       provider_fallback_active: ollamaFallback.isFallbackActive(config.hub),
       checks: report ? report.checks : [],
       // Operator request (2026-10-21): the banner also shows recent
@@ -666,7 +679,6 @@ async function handleApi(config, req, res) {
       // holds (cooldown elapsed) are auto-resumed inside this call so the
       // banner clears itself.
       provider_queue_holds: listHeldProviderQueues(config.hub, config.registry),
-      ts: report ? report.ts : new Date().toISOString(),
     });
   }
 

@@ -457,6 +457,7 @@ for p in products:
     dispatch_md_path = os.path.join(adir, ".dispatch.md")
     dispatch = (dispatch_tpl
                 .replace("{{slug}}", pslug)
+                .replace("{{PRODUCT_SLUG}}", pslug)
                 .replace("{{agent_md}}", "agents/%s/agent.md" % pslug)
                 .replace("{{inbox}}", "agents/%s/inbox" % pslug)
                 .replace("{{outbox}}", "agents/%s/outbox" % pslug))

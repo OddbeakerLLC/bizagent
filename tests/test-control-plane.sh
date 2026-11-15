@@ -127,11 +127,15 @@ grep -q "pbkdf2Sync" "$ROOT/control-plane/lib/auth.js" \
   || fail "auth does not use PBKDF2 password hashing"
 grep -q "timingSafeEqual" "$ROOT/control-plane/lib/auth.js" \
   || fail "auth does not use constant-time password comparison"
-# Regression: createSession must log the local `id` (not an undefined sessionId).
-# A prior makeover used session_id: sessionId while the local var was `id`, which
-# threw on every successful login and left setup stuck after first account create.
-grep -A8 "function createSession" "$ROOT/control-plane/lib/auth.js" | grep -q "session_id: id" \
-  || fail "createSession does not log session_id: id (login would throw)"
+# Regression (reworked 2026-11-15, review H3): createSession must log a hashed
+# session reference (session_hash), never the raw session ID — the ID is a live
+# credential and logs are readable by agents/nightly pushes. The original bug
+# this block guarded (logging an undefined variable, breaking login) is still
+# covered: a thrown createSession fails the auth unit check below.
+grep -A14 "function createSession" "$ROOT/control-plane/lib/auth.js" | grep -q "session_hash: sessionHash(id)" \
+  || fail "createSession does not log a hashed session reference"
+grep -A14 "function createSession" "$ROOT/control-plane/lib/auth.js" | grep -q "session_id: id" \
+  && fail "createSession logs the plaintext session_id (H3)"
 grep -q "\.dispatch\.md" "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "dispatcher does not ensure agents/<slug>/.dispatch.md"
 grep -q "buildAgentTurnPrompt" "$ROOT/control-plane/lib/dispatcher.js" \
@@ -596,6 +600,91 @@ function request(port, { method, pathname, cookie, body }) {
 })().catch((e) => { console.error(e); process.exit(1); });
 NODE
 
+# H2 (2026-11-15 review): /api/health split — unauthenticated callers get a
+# minimal payload ({ok, level, safe_mode, ts}) and never trigger an inline
+# re-check; operational detail (recent_errors, checks, holds) requires a session.
+node - "$ROOT" <<'NODE' || fail "health payload split check"
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const root = process.argv[2];
+const { createServer } = require(path.join(root, 'control-plane/server'));
+const { loadRuntimeConfig } = require(path.join(root, 'control-plane/lib/config'));
+const { initAuth } = require(path.join(root, 'control-plane/lib/auth'));
+
+function assert(cond, msg) {
+  if (!cond) { console.error('  FAIL: ' + msg); process.exit(1); }
+}
+function request(port, { method, pathname, cookie, body }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1', port, path: pathname, method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cookie ? { Cookie: cookie } : {}),
+        ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {}),
+      },
+    }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => resolve({ status: res.statusCode, json: data ? JSON.parse(data) : null, headers: res.headers }));
+    });
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+(async () => {
+  const hub = fs.mkdtempSync(path.join(os.tmpdir(), 'bizagent-health-split-'));
+  fs.mkdirSync(path.join(hub, 'logs'), { recursive: true });
+  fs.mkdirSync(path.join(hub, '.bizagent'), { recursive: true });
+  fs.writeFileSync(path.join(hub, 'registry.json'), JSON.stringify({ products: [] }));
+  initAuth(hub, 'operator', 's3cret-pass');
+  // Stale health report + a seeded recent error the public payload must not leak.
+  const healthFile = path.join(hub, 'logs', 'health.json');
+  const stale = { ts: new Date(Date.now() - 10 * 60 * 1000).toISOString(), level: 'ok', checks: [{ name: 'disk', ok: true, detail: 'secret-ish detail' }] };
+  fs.writeFileSync(healthFile, JSON.stringify(stale));
+  fs.writeFileSync(path.join(hub, '.bizagent', 'recent-errors.json'), JSON.stringify([
+    { ts: Date.now(), slug: 'alpha', title: 'Agent error', message: 'internal detail', fix: 'fix text' },
+  ]));
+  const config = loadRuntimeConfig(hub);
+  const server = createServer(config);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  try {
+    const pub = await request(port, { method: 'GET', pathname: '/api/health' });
+    assert(pub.status === 200, `public health should 200, got ${pub.status}`);
+    assert(pub.json && pub.json.level === 'unknown', `stale report + unauth must not run inline checks, level=${pub.json && pub.json.level}`);
+    assert(pub.json.safe_mode === false, 'public payload should carry safe_mode');
+    for (const key of ['recent_errors', 'checks', 'provider_queue_holds', 'rate_limit_cooldown_secs', 'provider_fallback_active']) {
+      assert(!(key in pub.json), `public payload must not include ${key}`);
+    }
+    assert(fs.readFileSync(healthFile, 'utf8') === JSON.stringify(stale),
+      'unauthenticated request must not rewrite health.json (no inline re-check)');
+
+    const login = await request(port, {
+      method: 'POST', pathname: '/api/login',
+      body: JSON.stringify({ username: 'operator', password: 's3cret-pass' }),
+    });
+    const cookie = (login.headers['set-cookie'] || [])[0].split(';')[0];
+    const authed = await request(port, { method: 'GET', pathname: '/api/health', cookie });
+    assert(authed.status === 200, `authed health should 200, got ${authed.status}`);
+    assert(Array.isArray(authed.json.checks), 'authed payload should include checks');
+    assert(Array.isArray(authed.json.recent_errors) && authed.json.recent_errors.length === 1,
+      'authed payload should include recent_errors');
+    assert(Array.isArray(authed.json.provider_queue_holds), 'authed payload should include provider_queue_holds');
+    assert(typeof authed.json.rate_limit_cooldown_secs === 'number', 'authed payload should include cooldown');
+  } finally {
+    server.close();
+    fs.rmSync(hub, { recursive: true, force: true });
+  }
+  process.exit(0);
+})().catch((e) => { console.error(e); process.exit(1); });
+NODE
+
 
 # .gitignore is the strict public ruleset (0c81514): runtime state and operator
 # data are excluded wholesale; the env template stays trackable.
@@ -674,6 +763,27 @@ try {
 if (!id || !getSession(hub, id)) { console.error('session missing after create'); process.exit(5); }
 destroySession(hub, id);
 if (getSession(hub, id)) { console.error('session still present after destroy'); process.exit(6); }
+// H3 (2026-11-15 review): sessions expire (30d sliding) and the raw session ID
+// never reaches the logs — only a truncated hash.
+const crypto = require('crypto');
+const logs = fs.readdirSync(path.join(hub, 'logs'));
+let logText = '';
+for (const f of logs) logText += fs.readFileSync(path.join(hub, 'logs', f), 'utf8');
+if (logText.includes(id)) { console.error('plaintext session id leaked to logs'); process.exit(7); }
+const expectedHash = crypto.createHash('sha256').update(id).digest('hex').slice(0, 12);
+if (!logText.includes(expectedHash)) { console.error('session_hash missing from login log'); process.exit(8); }
+// Expired session: created_at 31 days ago → getSession returns null and prunes it.
+const sessionsFile = path.join(hub, '.bizagent', 'sessions.json');
+const staleId = crypto.randomBytes(32).toString('hex');
+const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+fs.writeFileSync(sessionsFile, JSON.stringify({ [staleId]: { username: 'operator', created_at: old } }));
+if (getSession(hub, staleId) !== null) { console.error('expired session still valid'); process.exit(9); }
+if (JSON.parse(fs.readFileSync(sessionsFile, 'utf8'))[staleId]) { console.error('expired session not pruned'); process.exit(10); }
+// Sliding window: a fresh session stays valid and gains last_seen_at on touch.
+const freshId = createSession(hub, 'operator');
+const before = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'))[freshId];
+if (!before || !before.last_seen_at) { console.error('session missing last_seen_at'); process.exit(11); }
+if (!getSession(hub, freshId)) { console.error('fresh session rejected'); process.exit(12); }
 NODE
   then
     fail "auth createSession/login unit checks failed"

@@ -8,6 +8,31 @@ let libraryExpandedProduct = ''; // expanded product slug ('' when only hub open
 let librarySelected = null; // { repoId, path, id }
 let libraryFilterTimer = null;
 
+// H5 (2026-11-15 review): SVG/document content is untrusted — repo files and
+// agent-written docs can carry <script>, event handlers, or foreignObject.
+// Sanitize before any innerHTML injection; unparseable/non-SVG input is dropped.
+function sanitizeSvg(svg) {
+  try {
+    const doc = new DOMParser().parseFromString(String(svg || ''), 'image/svg+xml');
+    if (doc.getElementsByTagName('parsererror').length) return '';
+    const root = doc.documentElement;
+    if (!root || root.nodeName.toLowerCase() !== 'svg') return '';
+    doc.querySelectorAll('script, foreignObject, iframe, embed, object, use').forEach((n) => n.remove());
+    doc.querySelectorAll('*').forEach((el) => {
+      for (const attr of Array.from(el.attributes)) {
+        const name = attr.name.toLowerCase();
+        if (/^on/.test(name)) el.removeAttribute(attr.name);
+        else if ((name === 'href' || name === 'xlink:href' || name === 'src') && /^\s*javascript:/i.test(attr.value)) {
+          el.removeAttribute(attr.name);
+        }
+      }
+    });
+    return new XMLSerializer().serializeToString(root);
+  } catch (_err) {
+    return '';
+  }
+}
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -454,13 +479,13 @@ async function openLibraryFile(repoId, filePath) {
       : (doc.path || filePath);
     const sourceHtml = librarySourceBlock(doc);
     if (kind === 'plantuml' && doc.svg) {
-      bodyEl.innerHTML = `<div class="library-diagram">${doc.svg}</div>`
+      bodyEl.innerHTML = `<div class="library-diagram">${sanitizeSvg(doc.svg)}</div>`
         + `<p class="library-diagram-meta"><code>${escapeHtml(metaPath)}</code> · rendered SVG</p>`
         + sourceHtml;
     } else if (kind === 'diagram' || kind === 'plantuml') {
       const ext = String(doc.ext || doc.path || '').toLowerCase();
       if (ext.endsWith('.svg') && doc.content && /<svg/i.test(doc.content)) {
-        bodyEl.innerHTML = `<div class="library-diagram">${doc.content}</div>`
+        bodyEl.innerHTML = `<div class="library-diagram">${sanitizeSvg(doc.content)}</div>`
           + `<p class="library-diagram-meta"><code>${escapeHtml(metaPath)}</code></p>`
           + sourceHtml;
       } else {
