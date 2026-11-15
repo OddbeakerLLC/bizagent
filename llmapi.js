@@ -28,7 +28,14 @@ const path = require('path');
 const PQueueMod = require('p-queue');
 const PQueue = PQueueMod.default || PQueueMod;
 const OpenAI = require('openai');
-const { sanitizeMessages } = require('./agent-runtime/src/client');
+const {
+  sanitizeMessages,
+  ensureUserMessage,
+  thinkingLevelToThink,
+  isOllamaProvider,
+  ollamaOrigin,
+  ollamaNativeChatCompletion,
+} = require('./agent-runtime/src/client');
 // Models-list helpers shared with the console picker (same normalization:
 // chat-model filtering, display names, pricing; anthropic pagination).
 const {
@@ -146,7 +153,7 @@ function getProviderConfig(provider) {
   if (!apiKey && !entry.optionalKey) {
     throw httpError(400, `API key for provider "${provider}" not found in environment variable "${entry.keyEnv}"`, 'invalid_request_error');
   }
-  return { apiKey: apiKey || '', baseURL: entry.baseURL };
+  return { apiKey: apiKey || '', baseURL: entry.baseURL, entry };
 }
 
 /**
@@ -158,7 +165,7 @@ function getProviderConfig(provider) {
  */
 function createClient(provider) {
   if (!clients[provider]) {
-    const { apiKey, baseURL } = getProviderConfig(provider);
+    const { apiKey, baseURL, entry } = getProviderConfig(provider);
     const queueOpts = { concurrency: CONCURRENCY };
     if (MIN_INTERVAL_MS > 0) {
       // At most CONCURRENCY starts per interval => min spacing between
@@ -169,6 +176,9 @@ function createClient(provider) {
     clients[provider] = {
       provider,
       openai: new OpenAI({ apiKey, baseURL, timeout: TIMEOUT_MS, maxRetries: 0 }),
+      // cli.json provider entry (thinking level config etc.), captured at
+      // client creation — an llmapi restart applies catalog edits.
+      entry: entry || {},
       queue: new PQueue(queueOpts),
     };
   }
@@ -198,12 +208,29 @@ function backoffDelay(attempt, err) {
  * One provider call with retry on transient failures.
  * @param {object} client  client from createClient()
  * @param {object} body    OpenAI-shaped request body
+ * @param {boolean|null} [think]  Ollama native thinking flag (null = default
+ *   OpenAI-compatible endpoint; true/false = native /api/chat with think)
  */
-async function callWithRetry(client, body) {
+async function callWithRetry(client, body, think = null) {
+  const native = think !== null && isOllamaProvider(client.provider, client.openai.baseURL);
+  const send = () =>
+    native
+      ? ollamaNativeChatCompletion({
+          origin: ollamaOrigin(client.openai.baseURL),
+          apiKey: client.openai.apiKey || '',
+          model: body.model,
+          messages: body.messages,
+          tools: body.tools,
+          temperature: body.temperature,
+          maxTokens: body.max_tokens || 0,
+          think,
+          timeoutMs: TIMEOUT_MS,
+        })
+      : client.openai.chat.completions.create(body);
   let lastErr;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      return await client.openai.chat.completions.create(body);
+      return await send();
     } catch (err) {
       lastErr = err;
       if (!isTransient(err) || attempt === MAX_RETRIES) throw err;
@@ -240,7 +267,7 @@ async function chatCompletion(client, model, messages, tools, opts = {}) {
 
   const body = {
     model,
-    messages: sanitizeMessages(messages),
+    messages: ensureUserMessage(sanitizeMessages(messages)),
     tools,
     tool_choice: opts.tool_choice || 'auto',
     temperature,
@@ -249,6 +276,23 @@ async function chatCompletion(client, model, messages, tools, opts = {}) {
   // Some providers honor max_tokens; harmless if ignored
   const maxTokens = Number(process.env.BIZAGENT_AGENT_MAX_TOKENS || 0);
   if (maxTokens > 0) body.max_tokens = maxTokens;
+
+  // Thinking level (Ollama): the OpenAI-compatible endpoint ignores
+  // think:false, so an explicit level routes the request through the native
+  // /api/chat. Resolution order: request-level opts.thinking (passed by the
+  // agent runtime) -> per-model cli.json entry -> per-provider cli.json entry.
+  const entry = client.entry || {};
+  const level = String(
+    opts.thinking != null && opts.thinking !== ''
+      ? opts.thinking
+      : (entry.thinking_by_model && entry.thinking_by_model[model]) ||
+        entry.thinking ||
+        '',
+  ).trim();
+  const think = thinkingLevelToThink(level);
+  if (think !== null && isOllamaProvider(client.provider, client.openai.baseURL)) {
+    logEvent('info', 'ollama_native', { provider: client.provider, model, think });
+  }
 
   // Queue saturation watch: warn once when depth crosses the threshold, and
   // log recovery when it drains back below (so the log brackets the pileup).
@@ -261,7 +305,7 @@ async function chatCompletion(client, model, messages, tools, opts = {}) {
     logEvent('info', 'queue_recovered', { provider: client.provider, depth });
   }
 
-  return client.queue.add(() => callWithRetry(client, body));
+  return client.queue.add(() => callWithRetry(client, body, think));
 }
 
 // ---------------------------------------------------------------------------

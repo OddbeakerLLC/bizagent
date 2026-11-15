@@ -61,6 +61,9 @@
     "optionalKey": true,
     "models": [
       "llama3.2"
-    ]
+    ],
+    "thinking_by_model": {
+      "qwen3.8:27b-64k": "low"
+    }
   }
 }

@@ -23,6 +23,29 @@ const fs = require('fs');
 let active = 0, lastStart = 0, lastSlowStart = 0, slowSpacings = [];
 const stats = '$TMP/mock-stats.json';
 const srv = http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/api/chat') {
+    // Mock Ollama NATIVE API (thinking control path). Records the request body
+    // and replies in Ollama's native response shape.
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      fs.writeFileSync('$TMP/ollama-native.json', body);
+      const parsed = JSON.parse(body || '{}');
+      const msg = { role: 'assistant', content: 'native says hi' };
+      if (parsed.think === true) msg.reasoning = 'thinking hard';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        model: parsed.model || 'mock-model',
+        created_at: new Date().toISOString(),
+        message: msg,
+        done: true,
+        done_reason: 'stop',
+        prompt_eval_count: 11,
+        eval_count: 7,
+      }));
+    });
+    return;
+  }
   if (req.method === 'POST' && req.url === '/v1/chat/completions') {
     let body = '';
     req.on('data', (c) => (body += c));
@@ -72,11 +95,13 @@ const srv = http.createServer((req, res) => {
 srv.listen($MOCKPORT, '127.0.0.1', () => console.log('mock ready'));
 EOF
 
-# Test provider catalog: "mock" -> mock upstream, "dead" -> closed port.
+# Test provider catalog: "mock" -> mock upstream, "dead" -> closed port,
+# "localhost" -> mock upstream speaking both OpenAI-compat + native /api/chat.
 cat > "$TMP/cli.json" <<EOF
 {
   "mock": { "label": "Mock", "baseURL": "http://127.0.0.1:$MOCKPORT/v1", "keyEnv": "MOCK_API_KEY", "models": ["mock-model"] },
-  "dead": { "label": "Dead", "baseURL": "http://127.0.0.1:1/v1", "keyEnv": "MOCK_API_KEY", "models": ["dead-model"] }
+  "dead": { "label": "Dead", "baseURL": "http://127.0.0.1:1/v1", "keyEnv": "MOCK_API_KEY", "models": ["dead-model"] },
+  "localhost": { "label": "Ollama Mock", "baseURL": "http://127.0.0.1:$MOCKPORT/v1", "keyEnv": "MOCK_API_KEY", "optionalKey": true, "models": ["llama3.2"], "thinking_by_model": { "qwen3.8:27b-64k": "low" } }
 }
 EOF
 
@@ -282,6 +307,34 @@ const { probePaidProvider } = require(process.argv[2] + "/control-plane/lib/olla
 })().catch((e) => { console.error(e.message); process.exit(1); });
 ' "$HUBTMP" "$ROOT")"
 echo "$out" | grep -q '"ok":false' || fail "probe llmapi-mode should fail for a dead provider: $out"
+
+# 20b. Ollama thinking control: a model with a thinking_by_model level routes
+# through the NATIVE /api/chat with think:false (the OpenAI-compatible
+# endpoint ignores think:false), and a no-user-message history gets a neutral
+# user message injected (Ollama 500s on [system, assistant] otherwise).
+out="$(curl -sf -X POST "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
+  -d '{"provider":"localhost","model":"qwen3.8:27b-64k","messages":[{"role":"system","content":"sys"},{"role":"assistant","content":"hi"}]}')"
+echo "$out" | grep -q '"native says hi"' || fail "ollama native path did not answer: $out"
+echo "$out" | grep -q '"chat.completion"' || fail "native response not OpenAI-shaped: $out"
+native="$(cat "$TMP/ollama-native.json")"
+echo "$native" | grep -q '"think":false' || fail "native request missing think:false: $native"
+echo "$native" | grep -q '"role":"user"' || fail "no user message in native request (Ollama 500): $native"
+grep -q '"event":"ollama_native".*"think":false' "$TMP/llmapi.log" \
+  || fail "no ollama_native event logged: $(grep ollama_native "$TMP/llmapi.log" | tail -2)"
+
+# 20c. No thinking level for the model -> default OpenAI-compatible endpoint.
+rm -f "$TMP/ollama-native.json"
+out="$(curl -sf -X POST "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
+  -d '{"provider":"localhost","model":"llama3.2","messages":[{"role":"user","content":"hello"}]}')"
+echo "$out" | grep -q '"mock says hi"' || fail "no-level model should use the OpenAI endpoint: $out"
+[ ! -f "$TMP/ollama-native.json" ] || fail "unexpected native call without a thinking level"
+
+# 20d. Request-level thinking overrides the catalog (medium -> think:true).
+out="$(curl -sf -X POST "$BASE/v1/chat/completions" -H 'Content-Type: application/json' \
+  -d '{"provider":"localhost","model":"qwen3.8:27b-64k","messages":[{"role":"user","content":"hello"}],"thinking":"medium"}')"
+echo "$out" | grep -q '"native says hi"' || fail "request-level thinking failed: $out"
+native="$(cat "$TMP/ollama-native.json")"
+echo "$native" | grep -q '"think":true' || fail "request-level thinking should be think:true: $native"
 
 # 21. Significant-event logging: service_start / request in-out / provider
 # selection / retries / mapped errors / queue saturation / service_stop, with

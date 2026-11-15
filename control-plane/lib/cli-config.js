@@ -218,6 +218,22 @@ function requireCliDef(cliJson, requestedName) {
 }
 
 /**
+ * Thinking level for a model on a provider (Ollama native `think` control).
+ * cli.json provider entry may carry:
+ *   "thinking": "low"                                  — provider-wide default
+ *   "thinking_by_model": { "qwen3.8:27b-64k": "low" }  — per-model override
+ * Returns '' when unset (provider default behavior).
+ */
+function thinkingForModel(def, model) {
+  if (!def || typeof def !== 'object') return '';
+  const byModel = def.thinking_by_model;
+  if (byModel && typeof byModel === 'object' && byModel[model] != null) {
+    return String(byModel[model]).trim();
+  }
+  return def.thinking != null ? String(def.thinking).trim() : '';
+}
+
+/**
  * Resolve launch settings: always bizagent-agent + provider/model flags.
  *
  * @param {string} hub
@@ -307,6 +323,16 @@ function getCliSettings(hub, cliJson, cliFileSettings, providerName = "", modelO
   }
   parts.push(`--model ${model}`);
 
+  // Thinking level (Ollama native think control) — forwarded to the runtime,
+  // which routes the request through the native API for Ollama providers.
+  const thinking = thinkingForModel(providerDef, model);
+  if (thinking) {
+    if (!/^[A-Za-z0-9_-]+$/.test(thinking)) {
+      throw new Error(`Invalid thinking level for ${provider}: ${thinking}`);
+    }
+    parts.push(`--thinking ${thinking}`);
+  }
+
   const extraArgs = parts.join(" ").replace(/\s{2,}/g, " ").trim();
 
   return {
@@ -317,6 +343,7 @@ function getCliSettings(hub, cliJson, cliFileSettings, providerName = "", modelO
     provider,
     baseURL,
     keyEnv: providerDef.keyEnv || "",
+    thinking,
   };
 }
 
@@ -351,4 +378,5 @@ module.exports = {
   providerEntries,
   requireCliDef,
   resolveProviderName,
+  thinkingForModel,
 };

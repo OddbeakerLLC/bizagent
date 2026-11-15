@@ -2,10 +2,15 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const {
   sanitizeMessages,
+  ensureUserMessage,
   chatCompletion,
   isTransientError,
   retryDelayMs,
   agentMaxRetries,
+  isOllamaBaseURL,
+  ollamaOrigin,
+  thinkingLevelToThink,
+  ollamaNativeChatCompletion,
 } = require("../src/client");
 
 describe("sanitizeMessages", () => {
@@ -201,5 +206,204 @@ describe("transient-error retry with real backoff", () => {
     }
     assert.ok(d0 + d1 + d2 >= 30000 && d0 + d1 + d2 <= 60000,
       `default total window ${d0 + d1 + d2}ms outside 30-60s`);
+  });
+});
+
+describe("ensureUserMessage (Ollama 'no user query found in messages' 500)", () => {
+  it("appends a neutral user message when the history has none", () => {
+    const msgs = [
+      { role: "system", content: "sys" },
+      { role: "assistant", content: "hi" },
+    ];
+    const out = ensureUserMessage(msgs);
+    assert.equal(out.length, 3);
+    assert.equal(out[out.length - 1].role, "user");
+    assert.ok(typeof out[out.length - 1].content === "string");
+  });
+
+  it("leaves a history that already has a user message untouched", () => {
+    const msgs = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+    ];
+    const out = ensureUserMessage(msgs);
+    assert.equal(out.length, 3);
+    assert.equal(out[1].content, "hello");
+  });
+
+  it("chatCompletion injects the user message into the request body", async () => {
+    const bodies = [];
+    const client = {
+      chat: {
+        completions: {
+          async create(body) {
+            bodies.push(body);
+            return { choices: [{ message: { content: "ok" } }] };
+          },
+        },
+      },
+    };
+    await chatCompletion(client, "m", [
+      { role: "system", content: "sys" },
+      { role: "assistant", content: "hi" },
+    ], []);
+    assert.equal(bodies[0].messages[bodies[0].messages.length - 1].role, "user");
+  });
+});
+
+describe("ollama thinking control", () => {
+  it("maps levels to the native think flag", () => {
+    assert.equal(thinkingLevelToThink("low"), false);
+    assert.equal(thinkingLevelToThink("off"), false);
+    assert.equal(thinkingLevelToThink("medium"), true);
+    assert.equal(thinkingLevelToThink("on"), true);
+    assert.equal(thinkingLevelToThink("high"), true);
+    assert.equal(thinkingLevelToThink(""), null);
+    assert.equal(thinkingLevelToThink("bogus"), null);
+  });
+
+  it("detects Ollama base URLs and strips /v1 for the native origin", () => {
+    assert.ok(isOllamaBaseURL("http://127.0.0.1:11434/v1"));
+    assert.ok(isOllamaBaseURL("http://localhost:11434/v1"));
+    assert.ok(isOllamaBaseURL("http://jobe.lan:11434/v1"));
+    assert.equal(isOllamaBaseURL("https://api.venice.ai/api/v1"), false);
+    assert.equal(ollamaOrigin("http://127.0.0.1:11434/v1"), "http://127.0.0.1:11434");
+    assert.equal(ollamaOrigin("http://jobe.lan:11434"), "http://jobe.lan:11434");
+  });
+
+  it("routes an explicit thinking level for an Ollama baseURL through the native API", async () => {
+    const savedFetch = global.fetch;
+    const requests = [];
+    global.fetch = async (url, init) => {
+      requests.push({ url, body: JSON.parse(init.body) });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          model: "qwen3.8:27b-64k",
+          created_at: "2026-11-14T00:00:00Z",
+          message: { role: "assistant", content: "native says hi" },
+          done: true,
+          done_reason: "stop",
+          prompt_eval_count: 11,
+          eval_count: 7,
+        }),
+      };
+    };
+    try {
+      const client = { baseURL: "http://127.0.0.1:11434/v1", apiKey: "ollama" };
+      const out = await chatCompletion(
+        client,
+        "qwen3.8:27b-64k",
+        [{ role: "system", content: "sys" }, { role: "assistant", content: "hi" }],
+        [],
+        { thinking: "low" },
+      );
+      // Native endpoint, think:false honored, OpenAI-shaped response back.
+      assert.equal(requests.length, 1);
+      assert.ok(requests[0].url.endsWith("/api/chat"));
+      assert.equal(requests[0].body.think, false);
+      assert.equal(requests[0].body.stream, false);
+      // No-user-message history got the neutral user message injected.
+      const roles = requests[0].body.messages.map((m) => m.role);
+      assert.ok(roles.includes("user"));
+      assert.equal(out.object, "chat.completion");
+      assert.equal(out.choices[0].message.content, "native says hi");
+      assert.equal(out.choices[0].finish_reason, "stop");
+      assert.equal(out.usage.total_tokens, 18);
+    } finally {
+      global.fetch = savedFetch;
+    }
+  });
+
+  it("keeps the OpenAI-compatible endpoint when no thinking level is set", async () => {
+    const client = {
+      baseURL: "http://127.0.0.1:11434/v1",
+      chat: {
+        completions: {
+          async create(body) {
+            return { choices: [{ message: { content: "sdk path" } }] };
+          },
+        },
+      },
+    };
+    const out = await chatCompletion(client, "m", [{ role: "user", content: "hi" }], []);
+    assert.equal(out.choices[0].message.content, "sdk path");
+  });
+
+  it("native path converts OpenAI tool_calls to Ollama shape and back", async () => {
+    const savedFetch = global.fetch;
+    const requests = [];
+    global.fetch = async (url, init) => {
+      requests.push(JSON.parse(init.body));
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          model: "m",
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [{ function: { name: "list_directory", arguments: { path: "." } } }],
+          },
+          done: true,
+          done_reason: "stop",
+        }),
+      };
+    };
+    try {
+      const client = { baseURL: "http://localhost:11434/v1", apiKey: "" };
+      const out = await chatCompletion(
+        client,
+        "m",
+        [{
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"x"}' } }],
+        }],
+        [],
+        { thinking: "medium" },
+      );
+      // Outgoing: assistant tool_calls converted to Ollama native shape.
+      const outMsg = requests[0].messages[0];
+      assert.deepEqual(outMsg.tool_calls[0], { function: { name: "read_file", arguments: { path: "x" } } });
+      assert.equal(requests[0].think, true);
+      // Incoming: Ollama tool_calls converted back to OpenAI shape.
+      const tc = out.choices[0].message.tool_calls[0];
+      assert.equal(tc.type, "function");
+      assert.equal(tc.function.name, "list_directory");
+      assert.equal(tc.function.arguments, '{"path":"."}');
+      assert.equal(out.choices[0].finish_reason, "tool_calls");
+    } finally {
+      global.fetch = savedFetch;
+    }
+  });
+
+  it("llmapi-mode client passes the thinking level through to the API", async () => {
+    const savedEnv = process.env.BIZAGENT_LLMAPI_URL;
+    const savedFetch = global.fetch;
+    process.env.BIZAGENT_LLMAPI_URL = "http://127.0.0.1:18799";
+    const requests = [];
+    global.fetch = async (url, init) => {
+      requests.push({ url, body: JSON.parse(init.body) });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
+      };
+    };
+    try {
+      const { createClient } = require("../src/client");
+      const client = createClient({ apiKey: "", baseURL: "", provider: "localhost" });
+      await chatCompletion(client, "qwen3.8:27b-64k", [{ role: "user", content: "hi" }], [], { thinking: "low" });
+      assert.ok(requests[0].url.endsWith("/v1/chat/completions"));
+      assert.equal(requests[0].body.thinking, "low");
+      assert.equal(requests[0].body.provider, "localhost");
+    } finally {
+      global.fetch = savedFetch;
+      if (savedEnv === undefined) delete process.env.BIZAGENT_LLMAPI_URL;
+      else process.env.BIZAGENT_LLMAPI_URL = savedEnv;
+    }
   });
 });

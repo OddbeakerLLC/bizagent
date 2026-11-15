@@ -110,6 +110,12 @@ program
     `Provider: ${listProviders().join('|')} (or set BIZAGENT_AGENT_PROVIDER)`,
   )
   .option('--base-url <url>', 'OpenAI-compatible base URL override')
+  .option(
+    '--thinking <level>',
+    'Thinking level for Ollama models: low|off (think:false) or medium|on|high (think:true). ' +
+      'Routed through the Ollama native API; other providers ignore it. ' +
+      'Env: BIZAGENT_AGENT_THINKING',
+  )
   .option('-y, --yes', 'Auto-confirm destructive tool actions')
   .option('--helper', 'Read-only in-turn helper (no writes, mail, or nested hire)')
   .option('--list-providers', 'Print built-in providers and exit')
@@ -295,6 +301,11 @@ if (require.main === module) {
             resolved.model,
             messages,
             tools,
+            {
+              thinking: String(
+                opts.thinking || process.env.BIZAGENT_AGENT_THINKING || '',
+              ).trim(),
+            },
           );
         } catch (err) {
           // Soft-fail: provider/model can't take image content → one text-only
