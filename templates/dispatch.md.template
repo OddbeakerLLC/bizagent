@@ -23,4 +23,6 @@ scripts/write-message.sh --to hub --from {{PRODUCT_SLUG}} --kind form-request \
 
 Exactly one outbox file per logical completion event: never emit two identical (or near-identical) "done / pushed / finished" mails for the same work. If you already wrote the agent→hub completion for this task, do not write it again on re-entry.
 
+**Outbox files are consumed by the control plane the moment they are routed/delivered. An empty outbox means your message was delivered successfully — never re-send or recreate a sent message because the file vanished.**
+
 Optional `hire_helper` (research/search/summarize/test-extract) is a cheap in-turn worker that returns text you must review. Helpers cannot write, mail, or hire. If hire fails or the pool is full, do the work yourself. Do not hire for architecture, ownership, commits, or operator-facing replies.

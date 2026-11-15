@@ -3,7 +3,7 @@
 - **Slug:** `{{PRODUCT_SLUG}}`
 - **Agent name:** {{AGENT_NAME}}
 - **Reports to:** `hub` (the Products Team Lead)
-- **Mailbox:** `agents/{{PRODUCT_SLUG}}/inbox` · `agents/{{PRODUCT_SLUG}}/outbox` — messages you place in `outbox/` are automatically moved to the recipient's `inbox/` by the control plane; you don't need to move them manually.
+- **Mailbox:** `agents/{{PRODUCT_SLUG}}/inbox` · `agents/{{PRODUCT_SLUG}}/outbox` — messages you place in `outbox/` are automatically moved to the recipient's `inbox/` by the control plane; you don't need to move them manually. Outbox files are consumed (deleted) by the control plane the moment they are routed — an empty outbox means delivery succeeded; never re-send or recreate a sent message because the file vanished.
 
 ## Cold start (read this every launch)
 

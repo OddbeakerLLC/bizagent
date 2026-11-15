@@ -779,6 +779,7 @@ function buildAgentTurnPrompt(hub, slug) {
       `You are the '${slug}' agent. Read ${agentMd} for your role, scope, and projects.`,
       `Process every message in agents/${slug}/inbox and ignore archive/.`,
       `Write replies to agents/${slug}/outbox; archive each handled message immediately.`,
+      'Outbox files are consumed by the control plane the moment they are routed/delivered; an empty outbox means delivery succeeded — never re-send or recreate a sent message.',
     ].join('\n');
   }
 
