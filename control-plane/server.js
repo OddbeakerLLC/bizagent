@@ -98,6 +98,7 @@ const {
   dispatchPendingAgents,
   drainHubTurnSafety,
   isAgentActive,
+  listHeldProviderQueues,
   maxRateLimitCooldownRemaining,
   readRecentErrors,
   recentErrorTtlSecs,
@@ -660,6 +661,11 @@ async function handleApi(config, req, res) {
       // Max across per-provider cooldown files (2026-10-22) so the banner
       // shows while any provider bucket is paused.
       rate_limit_cooldown_secs: maxRateLimitCooldownRemaining(config.hub),
+      // Held provider queues (2026-11-14): the banner shows "held — N
+      // launches skipped" with a one-click Resume per held provider. Expired
+      // holds (cooldown elapsed) are auto-resumed inside this call so the
+      // banner clears itself.
+      provider_queue_holds: listHeldProviderQueues(config.hub, config.registry),
       ts: report ? report.ts : new Date().toISOString(),
     });
   }

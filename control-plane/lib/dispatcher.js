@@ -526,11 +526,13 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
         '',
         `${queueHold.consecutive} consecutive failed turns (last kind: ${queueHold.lastKind || 'error'}). Pending mail for agents on this provider is held — no more automatic retries until it is resumed.`,
         '',
-        '**Fix:** Resolve the provider issue, then tell the hub to resume the queue — it clears the hold and re-dispatches the held mail.',
+        '**Fix:** Resolve the provider issue, then tell the hub to resume the queue — it clears the hold and re-dispatches the held mail. The hold also auto-resumes on its own after the cooldown (15 min by default) or on the next successful call to this provider.',
       ].join('\n');
-      // `error_key` = the same key the console banner uses, so the chat skips
-      // this bubble while the banner card is showing (chat stays the fallback).
-      appendMessage(hub, cid, 'status', holdMsg, { kind: STATUS_ERROR_KIND, error_key: bannerErrorKey(holdEntry) });
+      // Loud on trip (2026-11-14 operator request): the hold notice must be
+      // a real chat message in the bound conversation, not only a
+      // dismissible banner card — so NO error_key here (an error_key would
+      // let the banner-dedupe suppress this bubble while the card shows).
+      appendMessage(hub, cid, 'status', holdMsg, { kind: STATUS_ERROR_KIND });
       notifyConversationMutated(hub, cid);
     } catch (_err) { /* ignore */ }
     try {
@@ -820,6 +822,21 @@ function maxProviderFailures(registry) {
 }
 
 /**
+ * How long a held provider queue stays held before it auto-resumes
+ * (2026-11-14 operator request: a hold must never latch forever — the
+ * 2026-10-23 hold silently pinned pending mail until a manual resume and the
+ * operator lost hours). settings.dispatch.hold_cooldown_secs, default
+ * 900 (15 min), clamp 60–24h. A successful turn on the provider also clears
+ * the hold immediately (recordProviderSuccess).
+ */
+function holdCooldownSecs(registry) {
+  const dispatch = (registry && registry.settings && registry.settings.dispatch) || {};
+  const n = Number(dispatch.hold_cooldown_secs);
+  if (!Number.isFinite(n)) return 900;
+  return Math.max(60, Math.min(24 * 3600, Math.floor(n)));
+}
+
+/**
  * Minimum spacing between two launches on the same provider — the "API queue"
  * (operator clarification 2026-10-23: a 0.5 second delay between API calls).
  * settings.dispatch.api_min_interval_ms, default 500, clamp 0–60000.
@@ -853,13 +870,100 @@ function writeProviderQueueState(hub, provider, state) {
 
 /** Dispatch gate for a provider: { held, backoffRemaining, consecutive }. */
 function providerQueueGate(hub, provider) {
-  const s = readProviderQueueState(hub, provider);
+  let s = readProviderQueueState(hub, provider);
   const now = Math.floor(Date.now() / 1000);
+  // Self-clearing hold (2026-11-14): a hold older than the cooldown
+  // auto-resumes so it can never latch forever. The next dispatch tick then
+  // retries the provider naturally; another failure ladder re-holds it.
+  if (s.held && s.heldAt && now - Number(s.heldAt) >= holdCooldownSecs(loadRegistry(hub))) {
+    autoResumeProviderQueue(hub, provider, s);
+    s = readProviderQueueState(hub, provider);
+  }
   return {
     held: !!s.held,
     backoffRemaining: Math.max(0, Number(s.backoffUntil || 0) - now),
     consecutive: Number(s.consecutive || 0),
   };
+}
+
+/**
+ * Auto-resume an expired hold (cooldown elapsed). Clears the hold and logs
+ * one `provider_queue_auto_resumed` event; the failed-turn counters reset so
+ * the provider gets a clean retry window.
+ */
+function autoResumeProviderQueue(hub, provider, prevState) {
+  const now = Math.floor(Date.now() / 1000);
+  writeProviderQueueState(hub, provider, {
+    provider: provider || 'fleet',
+    consecutive: 0,
+    backoffUntil: 0,
+    held: false,
+    heldAt: 0,
+    skipped: Number((prevState && prevState.skipped) || 0),
+    auto_resumed: true,
+    resumedAt: now,
+    lastT: nowIso(),
+  });
+  try {
+    logEvent(hub, {
+      event: 'provider_queue_auto_resumed',
+      provider: provider || 'fleet',
+      held_for_secs: prevState && prevState.heldAt ? now - Number(prevState.heldAt) : 0,
+      t: nowIso(),
+    });
+  } catch (_err) { /* ignore */ }
+}
+
+/**
+ * Count a launch skipped because the provider queue is HELD (not just
+ * backing off) — feeds the UI banner's "N launches skipped" figure.
+ */
+function noteQueueHoldSkip(hub, provider) {
+  try {
+    const s = readProviderQueueState(hub, provider);
+    if (!s.held) return;
+    writeProviderQueueState(hub, provider, { ...s, skipped: Number(s.skipped || 0) + 1 });
+  } catch (_err) { /* best-effort */ }
+}
+
+/**
+ * Held provider queues for the UI banner / /api/health. Expired holds
+ * (cooldown elapsed) are auto-resumed here too, so the banner clears even
+ * when no pending mail keeps the dispatch gate checking that provider.
+ */
+function listHeldProviderQueues(hub, registry) {
+  const dir = path.join(appDir(hub), 'provider-queue');
+  let entries;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch (_err) {
+    return [];
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const cooldown = holdCooldownSecs(registry);
+  const holds = [];
+  for (const entry of entries) {
+    const match = /^([a-z0-9_-]+)\.json$/.exec(entry);
+    if (!match) continue;
+    const provider = match[1];
+    const s = readProviderQueueState(hub, provider);
+    if (!s.held) continue;
+    const heldAt = Number(s.heldAt || 0);
+    if (heldAt && now - heldAt >= cooldown) {
+      autoResumeProviderQueue(hub, provider, s);
+      continue;
+    }
+    holds.push({
+      provider,
+      consecutive: Number(s.consecutive || 0),
+      held_at: heldAt,
+      held_for_secs: heldAt ? Math.max(0, now - heldAt) : 0,
+      cooldown_remaining_secs: heldAt ? Math.max(0, cooldown - (now - heldAt)) : cooldown,
+      skipped: Number(s.skipped || 0),
+      last_kind: s.lastKind || '',
+    });
+  }
+  return holds;
 }
 
 /**
@@ -2036,10 +2140,12 @@ function dispatchPendingAgents(config) {
   const noteLaunch = (provider) => lastLaunchAtByProvider.set(provider, Date.now());
   // Provider queue (2026-10-23): a provider with consecutive failures backs
   // off exponentially; past the max-retry limit its pending mail is HELD
-  // (no automatic retries until the operator/hub resumes the queue).
-  const queueOpen = (provider) => {
+  // (no automatic retries until the operator/hub resumes the queue, or the
+  // hold auto-resumes after settings.dispatch.hold_cooldown_secs — 2026-11-14:
+  // a hold must never latch forever).
+  const queueGate = (provider) => {
     const gate = providerQueueGate(config.hub, provider);
-    return !gate.held && gate.backoffRemaining <= 0;
+    return { ...gate, open: !gate.held && gate.backoffRemaining <= 0 };
   };
 
   const hubNew = pendingUndispatchedMail(config.hub, 'hub', retrySecs, config.lockLeaseSecs);
@@ -2047,29 +2153,33 @@ function dispatchPendingAgents(config) {
     const hubProvider = agentProvider(config.registry, 'hub');
     if (fleetCooldownSecs > 0 || rateLimitCooldownRemaining(config.hub, hubProvider) > 0) {
       skippedCooldown += 1;
-    } else if (!queueOpen(hubProvider)) {
-      skippedQueue += 1;
-    } else if (serialBusy() || hubRunning >= hubSlots) {
-      skippedCap += 1;
-    } else if (!apiQueueOpen(hubProvider)) {
-      skippedSpacing += 1;
-    } else if (tryLock(config.hub, 'hub', config.lockLeaseSecs)) {
-      markMailDispatched(config.hub, 'hub', hubNew, retrySecs, config.lockLeaseSecs);
-      try {
-        launchHub(config);
-        launched += 1;
-        hubRunning += 1;
-        noteLaunch(hubProvider);
-      } catch (err) {
-        try { fs.rmSync(lockDir(config.hub, 'hub'), { recursive: true, force: true }); } catch (_e) { /* ignore */ }
-        logEvent(config.hub, {
-          event: 'hub_launch_error',
-          message: err.message,
-          status: 'error',
-        });
-      }
     } else {
-      skippedLocked += 1;
+      const hubQueue = queueGate(hubProvider);
+      if (!hubQueue.open) {
+        skippedQueue += 1;
+        if (hubQueue.held) noteQueueHoldSkip(config.hub, hubProvider);
+      } else if (serialBusy() || hubRunning >= hubSlots) {
+        skippedCap += 1;
+      } else if (!apiQueueOpen(hubProvider)) {
+        skippedSpacing += 1;
+      } else if (tryLock(config.hub, 'hub', config.lockLeaseSecs)) {
+        markMailDispatched(config.hub, 'hub', hubNew, retrySecs, config.lockLeaseSecs);
+        try {
+          launchHub(config);
+          launched += 1;
+          hubRunning += 1;
+          noteLaunch(hubProvider);
+        } catch (err) {
+          try { fs.rmSync(lockDir(config.hub, 'hub'), { recursive: true, force: true }); } catch (_e) { /* ignore */ }
+          logEvent(config.hub, {
+            event: 'hub_launch_error',
+            message: err.message,
+            status: 'error',
+          });
+        }
+      } else {
+        skippedLocked += 1;
+      }
     }
   }
 
@@ -2089,8 +2199,10 @@ function dispatchPendingAgents(config) {
       skippedCooldown += 1;
       continue;
     }
-    if (!queueOpen(provider)) {
+    const agentQueue = queueGate(provider);
+    if (!agentQueue.open) {
       skippedQueue += 1;
+      if (agentQueue.held) noteQueueHoldSkip(config.hub, provider);
       continue;
     }
     const running = runningByProvider[provider] || 0;
@@ -2151,6 +2263,10 @@ module.exports = {
   apiMinIntervalMs,
   ensureDispatchPrompt,
   failureBackoffLadder,
+  holdCooldownSecs,
+  autoResumeProviderQueue,
+  listHeldProviderQueues,
+  noteQueueHoldSkip,
   maxProviderFailures,
   providerQueueGate,
   recordProviderFailure,

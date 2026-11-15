@@ -4197,4 +4197,19 @@ esac
 rm -rf "$EADDR_HUB"
 
 
+# --- Provider-queue hold: self-clearing + visible in UI (2026-11-14) ---
+grep -q 'provider_queue_holds' "$ROOT/control-plane/server.js" \
+  || fail "/api/health must report held provider queues for the banner"
+grep -q 'health-banner-queue-resume' "$ROOT/control-plane/public/app.js" \
+  || fail "banner must render a Resume button for a held provider queue"
+grep -q 'queue held' "$ROOT/control-plane/public/app.js" \
+  || fail "banner must name the held provider queue"
+grep -q 'provider-queue/resume' "$ROOT/control-plane/public/app.js" \
+  || fail "Resume button must call the provider-queue resume endpoint"
+grep -q 'hold_cooldown_secs' "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "hold cooldown setting missing from the dispatcher"
+grep -q 'provider_queue_auto_resumed' "$ROOT/control-plane/lib/dispatcher.js" \
+  || fail "auto-resume must log a provider_queue_auto_resumed event"
+
+
 echo "  ok: control-plane"

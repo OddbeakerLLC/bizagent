@@ -3879,10 +3879,13 @@ function bannerDisplayState(h) {
   const cooldown = h && Number(h.rate_limit_cooldown_secs) > 0
     ? Number(h.rate_limit_cooldown_secs)
     : 0;
+  // Held provider queues (2026-11-14): each shows in the banner with a
+  // one-click Resume; a hold also auto-resumes after its cooldown.
+  const queueHolds = h && Array.isArray(h.provider_queue_holds) ? h.provider_queue_holds : [];
   const red = safeMode || level === 'critical' || level === 'emergency';
   const yellow = !red && (level === 'warn' || fallback || level === 'unknown' ||
-    visibleErrors.length > 0 || cooldown > 0);
-  return { level, safeMode, fallback, bad, visibleErrors, cooldown, red, yellow, shown: red || yellow };
+    visibleErrors.length > 0 || cooldown > 0 || queueHolds.length > 0);
+  return { level, safeMode, fallback, bad, visibleErrors, cooldown, queueHolds, red, yellow, shown: red || yellow };
 }
 
 let connectionLostShown = false;
@@ -3939,11 +3942,12 @@ function renderHealthBanner(h) {
   const bad = state.bad;
   const visibleErrors = state.visibleErrors;
   const cooldown = state.cooldown;
+  const queueHolds = state.queueHolds || [];
   const red = state.red;
   const yellow = state.yellow;
   if (!safeMode) safeModeNoteShown = false; // hub left safe mode — allow the quiet note again
   connectionLostShown = false;
-  if (!red && !yellow) {
+  if (!red && !yellow && !queueHolds.length) {
     el.hidden = true;
     el.innerHTML = '';
     syncChatBannerDedupe();
@@ -3957,15 +3961,31 @@ function renderHealthBanner(h) {
       ? `Hub health: ${level} — agent runs may fail`
       : fallback
         ? 'Paid LLM provider refused; hub turns running on local Ollama (provider_fallback_active)'
-        : visibleErrors.length
-          ? `Recent agent errors (${visibleErrors.length})`
-          : cooldown
-            ? 'Dispatches paused — rate-limit cooldown'
-            : `Hub health: ${level}`;
+        : queueHolds.length
+          ? `Provider queue held (${queueHolds.length})`
+          : visibleErrors.length
+            ? `Recent agent errors (${visibleErrors.length})`
+            : cooldown
+              ? 'Dispatches paused — rate-limit cooldown'
+              : `Hub health: ${level}`;
   const details = bad.slice(0, 4).map((c) => `${c.name}: ${c.detail}`).join(' · ');
   const cooldownHtml = cooldown > 0
     ? `<span class="health-banner-detail">Dispatches paused for ${cooldown}s (rate-limit cooldown) — auto-resumes.</span>`
     : '';
+  const capProvider = (p) => (p ? p.charAt(0).toUpperCase() + p.slice(1) : 'Fleet');
+  const holdsHtml = queueHolds.map((q) => {
+    const skipped = Number(q.skipped || 0);
+    const wait = Number(q.cooldown_remaining_secs || 0);
+    return (
+      `<div class="health-banner-error">` +
+      `<strong>${bannerEscape(capProvider(q.provider))} queue held</strong> ` +
+      `<span class="health-banner-detail">${skipped} launch${skipped === 1 ? '' : 'es'} skipped` +
+      (wait > 0 ? ` · auto-resumes in ${wait}s` : '') +
+      `</span>` +
+      `<button type="button" class="health-banner-queue-resume" data-provider="${bannerEscape(q.provider)}" title="Clear the hold and re-dispatch this provider's pending mail">Resume</button>` +
+      `</div>`
+    );
+  }).join('');
   const errorsHtml = visibleErrors.slice(0, BANNER_ERROR_CARD_CAP).map((e) => {
     const agent = e.slug ? ` — ${bannerEscape(e.slug)}` : '';
     const fix = e.fix ? ` Fix: ${bannerEscape(e.fix)}` : '';
@@ -3981,6 +4001,7 @@ function renderHealthBanner(h) {
     `<strong>${title}</strong>` +
     (details ? `<span class="health-banner-detail">${details}</span>` : '') +
     cooldownHtml +
+    holdsHtml +
     errorsHtml +
     (safeMode ? `<span class="health-banner-detail">Current health: ${level}. The hub will exit safe mode automatically once health is back to ok.</span>` : '') +
     (fallback && !safeMode ? '<span class="health-banner-detail">Fix the paid provider (top up / new key) to restore normal turns.</span>' : '');
@@ -4026,6 +4047,27 @@ document.addEventListener('click', (ev) => {
   dismissedBannerErrors.add(key);
   saveDismissedBannerErrors();
   if (lastHealthData) renderHealthBanner(lastHealthData);
+});
+
+// Resume a held provider queue from the banner (2026-11-14): one click clears
+// the hold and re-dispatches the provider's pending mail. The banner refreshes
+// from /api/health either way (the hold disappears when cleared or expired).
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest && ev.target.closest('.health-banner-queue-resume');
+  if (!btn) return;
+  const provider = btn.getAttribute('data-provider');
+  if (!provider || btn.disabled) return;
+  btn.disabled = true;
+  try {
+    await api('/api/dispatch/provider-queue/resume', {
+      method: 'POST',
+      body: JSON.stringify({ provider }),
+    });
+  } catch (_err) {
+    // 401 handled inside api(); other failures just fall through to the
+    // health re-poll, which re-renders the hold if it is still there.
+  }
+  pollHealthBanner();
 });
 
 // TLDR bubble: tapping the speaker re-speaks that reply's summary through the

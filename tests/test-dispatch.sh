@@ -579,6 +579,47 @@ if (cleared.held || cleared.backoffRemaining > 0 || cleared.consecutive !== 0) {
   fail(18, `success must clear backoff + hold, got ${JSON.stringify(cleared)}`);
 }
 
+// --- Self-clearing hold + skipped counter + held-queue listing (2026-11-14) ---
+if (dispatcher.holdCooldownSecs(registry) !== 900) fail(19, 'hold_cooldown_secs default must be 900');
+if (dispatcher.holdCooldownSecs({ settings: { dispatch: { hold_cooldown_secs: 5 } } }) !== 60) {
+  fail(19, 'hold_cooldown_secs must clamp to a 60s floor');
+}
+if (dispatcher.holdCooldownSecs({ settings: { dispatch: { hold_cooldown_secs: 999999 } } }) !== 86400) {
+  fail(19, 'hold_cooldown_secs must clamp to a 24h ceiling');
+}
+// Hold the queue again; a held provider counts skipped launches. Fresh
+// pending mail first (the earlier resume run marked the original mail
+// dispatched, so a new message is needed to exercise the gate).
+fs.writeFileSync(path.join(hub, 'agents/alpha/inbox/2026-11-14-alpha-2.md'), [
+  '---', 'from: hub', 'to: alpha', 'date: 2026-11-14', 'subject: retry', '---', '', 'alpha again', '',
+].join('\n'));
+for (let i = 0; i < 5; i += 1) dispatcher.recordProviderFailure(hub, registry, 'grok', 'network');
+const qfile = path.join(hub, '.bizagent/provider-queue/grok.json');
+const heldState = JSON.parse(fs.readFileSync(qfile, 'utf8'));
+if (!heldState.held) fail(19, 'queue must be held before the auto-resume checks');
+const skippedRun = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (skippedRun.skippedQueue !== 1) fail(19, `held provider must count a skippedQueue, got ${JSON.stringify(skippedRun)}`);
+const afterSkip = JSON.parse(fs.readFileSync(qfile, 'utf8'));
+if (afterSkip.skipped !== 1) fail(19, `held skip must be counted in the queue state, got ${JSON.stringify(afterSkip)}`);
+const holds = dispatcher.listHeldProviderQueues(hub, registry);
+if (holds.length !== 1 || holds[0].provider !== 'grok' || holds[0].skipped !== 1 || holds[0].cooldown_remaining_secs <= 0) {
+  fail(19, `listHeldProviderQueues must report the held grok queue, got ${JSON.stringify(holds)}`);
+}
+// Age the hold past the cooldown: the gate auto-resumes it and clears state.
+heldState.heldAt = Math.floor(Date.now() / 1000) - 901; // past the 900s default cooldown
+fs.writeFileSync(qfile, JSON.stringify(heldState));
+const expiredGate = dispatcher.providerQueueGate(hub, 'grok');
+if (expiredGate.held) fail(19, 'an expired hold must auto-resume in the gate');
+const afterAuto = JSON.parse(fs.readFileSync(qfile, 'utf8'));
+if (afterAuto.held || afterAuto.consecutive !== 0 || !afterAuto.auto_resumed) {
+  fail(19, `expired hold must be cleared with auto_resumed, got ${JSON.stringify(afterAuto)}`);
+}
+if (dispatcher.listHeldProviderQueues(hub, registry).length !== 0) {
+  fail(19, 'no held queues may remain after the cooldown auto-resume');
+}
+const autoResumed = dispatcher.dispatchPendingAgents(loadRuntimeConfig(hub));
+if (autoResumed.launched !== 1) fail(19, `auto-resumed provider must launch again, got ${JSON.stringify(autoResumed)}`);
+
 fs.rmSync(hub, { recursive: true, force: true });
 if (prevDry === undefined) delete process.env.BIZAGENT_DRY_RUN;
 else process.env.BIZAGENT_DRY_RUN = prevDry;
