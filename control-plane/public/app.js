@@ -3534,23 +3534,28 @@ async function openConnectPhoneModal() {
   urlEl.textContent = '';
   try {
     const info = await api('/api/connect-info');
-    urlEl.textContent = info && info.url ? info.url : '';
-    if (!info || (!info.url && !info.hint)) {
+    const url = info && info.url ? info.url : '';
+    urlEl.textContent = url;
+    // Show the QR whenever there is a phone-reachable URL — including WSL2
+    // NAT mode, where info.url is the Windows host's LAN IP (correct once
+    // the one-time portproxy from info.hint is applied). The hint renders as
+    // a warning status below the code; the canvas is hidden only when there
+    // is no URL to encode at all. (2026-11-17: the old hint branch hid the
+    // QR under WSL, which read as "the QR code does not display".)
+    const wrap = canvas.parentElement;
+    if (wrap) wrap.hidden = !url;
+    if (!info) {
       setConnectPhoneStatus('No connection info available', 'warn');
-    } else if (info.hint) {
-      // Not LAN-reachable yet (e.g. WSL2 NAT mode): the QR would encode an
-      // address the phone cannot open — show the fix instead.
-      const wrap = canvas.parentElement;
-      if (wrap) wrap.hidden = true;
-      setConnectPhoneStatus(info.hint, 'warn');
-    } else if (typeof QrCode !== 'undefined' && QrCode.render) {
-      const wrap = canvas.parentElement;
-      if (wrap) wrap.hidden = false;
-      QrCode.render(canvas, info.url, { scale: 6, quietZone: 4 });
-      setConnectPhoneStatus('');
-    } else {
+    } else if (url && typeof QrCode !== 'undefined' && QrCode.render) {
+      QrCode.render(canvas, url, { scale: 6, quietZone: 4 });
+      setConnectPhoneStatus(info.hint || '', info.hint ? 'warn' : 'neutral');
+    } else if (url) {
       // QR renderer missing — the URL text below still works.
-      setConnectPhoneStatus('QR rendering unavailable — type the address below into your phone', 'warn');
+      setConnectPhoneStatus(
+        (info.hint ? info.hint + '\n' : '') +
+        'QR rendering unavailable — type the address below into your phone', 'warn');
+    } else {
+      setConnectPhoneStatus(info.hint || 'No connection info available', 'warn');
     }
   } catch (err) {
     setConnectPhoneStatus(err.message || 'Could not load connection info', 'warn');

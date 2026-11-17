@@ -600,6 +600,17 @@ function request(port, { method, pathname, cookie, body }) {
 })().catch((e) => { console.error(e); process.exit(1); });
 NODE
 
+# WSL QR visibility (2026-11-17): the client must render the QR whenever the
+# server returns a URL. Under WSL2 NAT the hint (portproxy instructions) is a
+# warning shown next to the code — never a replacement that hides the canvas.
+grep -q 'wrap.hidden = !url' "$ROOT/control-plane/public/app.js" \
+  || fail "connect-phone client does not gate QR visibility on the URL"
+if grep -q 'wrap.hidden = true' "$ROOT/control-plane/public/app.js"; then
+  fail "connect-phone client still hides the QR canvas on a branch (hint path)"
+fi
+grep -q 'QrCode.render(canvas, url' "$ROOT/control-plane/public/app.js" \
+  || fail "connect-phone client does not render the QR from info.url"
+
 # H2 (2026-11-15 review): /api/health split — unauthenticated callers get a
 # minimal payload ({ok, level, safe_mode, ts}) and never trigger an inline
 # re-check; operational detail (recent_errors, checks, holds) requires a session.
