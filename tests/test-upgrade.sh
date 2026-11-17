@@ -288,3 +288,119 @@ for f in scripts/health-probe.sh scripts/health-alert-failure.sh \
 done
 echo "$out" | grep -qi 'health' \
   || fail "upgrade dry-run should mention the health-timer step: $out"
+
+# --- WSL shell-open autostart: upgrade must install/refresh the hook -------
+grep -q 'ensure_wsl_autostart_on_upgrade' "$SCRIPT" \
+  || fail "upgrade.sh missing WSL autostart ensure step"
+grep -q 'BIZAGENT_SKIP_WSL_AUTOSTART' "$SCRIPT" \
+  || fail "upgrade.sh missing BIZAGENT_SKIP_WSL_AUTOSTART opt-out"
+grep -q 'bizagent-cp-autostart' "$ROOT/install/install.sh" \
+  || fail "install/install.sh lost the WSL autostart hook installer"
+[[ -x "$ROOT/scripts/wsl-cp-autostart.sh" ]] \
+  || fail "scripts/wsl-cp-autostart.sh missing or not executable"
+bash -n "$ROOT/scripts/wsl-cp-autostart.sh" \
+  || fail "wsl-cp-autostart.sh bash -n failed"
+
+# Functional: extract the ensure function + its WSL detector from upgrade.sh
+# and run them against a sandbox HOME with the WSL check forced on/off (the
+# test host may or may not be WSL).
+WSL_FN_FILE="$TMP/wsl-ensure.sh"
+{
+  sed -n '/^is_wsl_host() {/,/^}/p' "$SCRIPT"
+  echo
+  sed -n '/^ensure_wsl_autostart_on_upgrade() {/,/^}/p' "$SCRIPT"
+} >"$WSL_FN_FILE"
+grep -q 'ensure_wsl_autostart_on_upgrade() {' "$WSL_FN_FILE" \
+  || fail "could not extract ensure_wsl_autostart_on_upgrade from upgrade.sh"
+
+run_wsl_ensure() {
+  # $1 = wsl detection result (0=wsl, 1=not wsl); $2 = hub; $3 = fake HOME
+  bash -c '
+    set -u
+    source "$1"
+    log() { printf '%s\n' "$*"; }
+    WSL_DETECT="$2"
+    is_wsl_host() { return "$WSL_DETECT"; }
+    HUB="$3"
+    HOME="$4"
+    if [[ -n "${5:-}" ]]; then export BIZAGENT_SKIP_WSL_AUTOSTART="$5"; fi
+    ensure_wsl_autostart_on_upgrade
+  ' _ "$WSL_FN_FILE" "$1" "$2" "$3" "${4:-}"
+}
+
+WSL_HUB="$TMP/wsl-hub"
+mkdir -p "$WSL_HUB/scripts" "$WSL_HUB/logs"
+cp "$ROOT/scripts/wsl-cp-autostart.sh" "$WSL_HUB/scripts/"
+WSL_HOME="$TMP/wsl-home"
+mkdir -p "$WSL_HOME"
+: >"$WSL_HOME/.bashrc"
+: >"$WSL_HOME/.profile"   # .zshrc deliberately absent → must be skipped
+
+wout="$(run_wsl_ensure 0 "$WSL_HUB" "$WSL_HOME")" \
+  || fail "WSL ensure failed: $wout"
+echo "$wout" | grep -qi 'autostart hook ensured' \
+  || fail "WSL ensure should report the hook install: $wout"
+for p in .bashrc .profile; do
+  grep -qF '# bizagent-cp-autostart' "$WSL_HOME/$p" \
+    || fail "hook marker missing in $p after WSL upgrade"
+  grep -qF "bash \"$WSL_HUB/scripts/wsl-cp-autostart.sh\"" "$WSL_HOME/$p" \
+    || fail "hook line missing/stale in $p after WSL upgrade"
+done
+[[ -f "$WSL_HOME/.zshrc" ]] && fail ".zshrc must not be created by the ensure step"
+[[ "$(grep -cF '# bizagent-cp-autostart' "$WSL_HOME/.bashrc")" -eq 1 ]] \
+  || fail "hook marker duplicated in .bashrc"
+
+# Idempotent re-run: no duplicates, "already current" report.
+wout2="$(run_wsl_ensure 0 "$WSL_HUB" "$WSL_HOME")" \
+  || fail "second WSL ensure failed: $wout2"
+echo "$wout2" | grep -qi 'already current' \
+  || fail "WSL ensure re-run should report already-current: $wout2"
+[[ "$(grep -cF '# bizagent-cp-autostart' "$WSL_HOME/.bashrc")" -eq 1 ]] \
+  || fail "WSL ensure re-run duplicated the marker in .bashrc"
+
+# Stale hook (hub moved): the old path must be refreshed to the current one.
+OLD_HUB="$TMP/old-hub-location"
+sed -i "s|$WSL_HUB|$OLD_HUB|" "$WSL_HOME/.bashrc"
+wout3="$(run_wsl_ensure 0 "$WSL_HUB" "$WSL_HOME")" \
+  || fail "stale-hook WSL ensure failed: $wout3"
+echo "$wout3" | grep -qi 'refreshed' \
+  || fail "WSL ensure should report a refresh for a stale hook path: $wout3"
+grep -qF "bash \"$OLD_HUB/scripts/wsl-cp-autostart.sh\"" "$WSL_HOME/.bashrc" \
+  && fail "stale hub path still present in .bashrc after refresh"
+[[ "$(grep -cF 'wsl-cp-autostart.sh' "$WSL_HOME/.bashrc")" -eq 1 ]] \
+  || fail "refresh left duplicate hook lines in .bashrc"
+grep -qF "bash \"$WSL_HUB/scripts/wsl-cp-autostart.sh\"" "$WSL_HOME/.bashrc" \
+  || fail "refresh did not write the current hub path"
+
+# Non-WSL host: nothing written.
+NW_HOME="$TMP/nwsl-home"
+mkdir -p "$NW_HOME"
+: >"$NW_HOME/.bashrc"
+nwout="$(run_wsl_ensure 1 "$WSL_HUB" "$NW_HOME")" \
+  || fail "non-WSL ensure failed: $nwout"
+grep -qF 'bizagent-cp-autostart' "$NW_HOME/.bashrc" \
+  && fail "hook written on a non-WSL host"
+
+# Opt-out env var: nothing written.
+SKIP_HOME="$TMP/skip-home"
+mkdir -p "$SKIP_HOME"
+: >"$SKIP_HOME/.bashrc"
+skout="$(BIZAGENT_SKIP_WSL_AUTOSTART=1 run_wsl_ensure 0 "$WSL_HUB" "$SKIP_HOME")" \
+  || fail "skip-path WSL ensure failed: $skout"
+echo "$skout" | grep -qi 'skipping WSL autostart' \
+  || fail "BIZAGENT_SKIP_WSL_AUTOSTART should be honored: $skout"
+grep -qF 'bizagent-cp-autostart' "$SKIP_HOME/.bashrc" \
+  && fail "hook written despite BIZAGENT_SKIP_WSL_AUTOSTART"
+
+# Missing starter after restore: soft skip, no crash.
+wout4="$(run_wsl_ensure 0 "$TMP/empty-hub" "$TMP/empty-home")" \
+  || fail "WSL ensure without starter script failed: $wout4"
+echo "$wout4" | grep -qi 'not present after restore' \
+  || fail "WSL ensure should soft-skip when the starter is missing: $wout4"
+
+# Starter guard: a stale BIZAGENT_HUB (no control-plane.sh) exits quietly.
+guard_out="$(BIZAGENT_HUB="$TMP/no-such-hub" bash "$ROOT/scripts/wsl-cp-autostart.sh" 2>&1)" \
+  || fail "starter should exit 0 on a stale BIZAGENT_HUB: $guard_out"
+[[ -z "$guard_out" ]] || fail "starter must stay quiet on a stale BIZAGENT_HUB: $guard_out"
+
+echo "  ok: WSL autostart ensure"

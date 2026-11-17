@@ -7,6 +7,12 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HUB="${BIZAGENT_HUB:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+# Guard: a stale BIZAGENT_HUB override (or a hub directory that moved) must
+# never spawn a broken start — exit quietly instead.
+if [[ ! -f "$HUB/scripts/control-plane.sh" ]]; then
+  exit 0
+fi
+
 # --- Already running? (port check, then process check) ---
 # Read the configured port (default 8787).
 PORT=8787

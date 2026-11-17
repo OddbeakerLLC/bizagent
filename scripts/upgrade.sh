@@ -26,6 +26,7 @@
 #   BIZAGENT_TTS_*       See scripts/install-oddbeaker-tts.sh
 #   BIZAGENT_SKIP_LLMAPI=1  Skip llmapi env/service ensure on upgrade
 #   BIZAGENT_SKIP_HEALTH_TIMER=1  Skip health probe timer ensure on upgrade
+#   BIZAGENT_SKIP_WSL_AUTOSTART=1  Skip WSL shell-open autostart hook ensure
 #
 # Manual path (any time): run this script, or ask PTL to apply updates.
 # Nightly auto path: only when registry.json settings.auto_update === true
@@ -153,6 +154,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "upgrade: would ensure ops .gitignore (OPS_HUB_GITIGNORE section) via factory-reset repair"
   log "upgrade: would ensure llmapi env line + service (scripts/install-llmapi.sh — soft-fail)"
   log "upgrade: would ensure health probe timer (scripts/install-health-timer.sh — systemd user timer or cron)"
+  log "upgrade: would ensure WSL shell-open autostart hook (scripts/wsl-cp-autostart.sh — WSL hosts only)"
   if [[ -d "$SOURCE_LABEL" ]]; then
     for path in "${FRAMEWORK_PATHS[@]}"; do
       if [[ -e "$SOURCE_LABEL/$path" ]]; then
@@ -404,6 +406,59 @@ ensure_health_timer_on_upgrade() {
 }
 
 ensure_health_timer_on_upgrade
+
+# WSL shell-open autostart: the hook is installed by install.sh's Service step
+# only, so a hub upgraded in place (scripts/upgrade.sh) on WSL would silently
+# lose autostart — the hook never landed in the shell profiles, or an old hook
+# still points at a hub path that moved during the upgrade. Idempotent: the
+# marker guard prevents duplicates, and a stale hook line (hub path changed)
+# is refreshed to the current path. Soft-fails so a profile problem never
+# blocks the framework upgrade itself.
+is_wsl_host() {
+  [[ "$(uname -s)" == "Linux" ]] || return 1
+  grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null
+}
+
+ensure_wsl_autostart_on_upgrade() {
+  if [[ -n "${BIZAGENT_SKIP_WSL_AUTOSTART:-}" ]]; then
+    log "upgrade: skipping WSL autostart ensure (BIZAGENT_SKIP_WSL_AUTOSTART)"
+    return 0
+  fi
+  if ! is_wsl_host; then
+    return 0
+  fi
+  local starter="$HUB/scripts/wsl-cp-autostart.sh"
+  if [[ ! -f "$starter" ]]; then
+    log "upgrade: scripts/wsl-cp-autostart.sh not present after restore — skipping WSL autostart ensure"
+    return 0
+  fi
+  chmod +x "$starter" 2>/dev/null || true
+  local marker="# bizagent-cp-autostart"
+  local hook="bash \"$HUB/scripts/wsl-cp-autostart.sh\" >/dev/null 2>&1"
+  local rc installed=0 refreshed=0
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    [[ -f "$rc" ]] || continue
+    if grep -qF "$marker" "$rc" 2>/dev/null; then
+      if ! grep -qF "$hook" "$rc" 2>/dev/null; then
+        # Stale hook (hub path moved, quoting changed): drop the old block
+        # (marker line + any wsl-cp-autostart line) and re-append current.
+        sed -i -e '/^# bizagent-cp-autostart/d' -e '/wsl-cp-autostart\.sh/d' "$rc"
+        { echo ""; echo "$marker (idempotent - do not duplicate)"; echo "$hook"; } >> "$rc"
+        refreshed=$((refreshed + 1))
+      fi
+    else
+      { echo ""; echo "$marker (idempotent - do not duplicate)"; echo "$hook"; } >> "$rc"
+      installed=$((installed + 1))
+    fi
+  done
+  if [[ "$installed" -gt 0 || "$refreshed" -gt 0 ]]; then
+    log "upgrade: WSL shell-open autostart hook ensured ($installed installed, $refreshed refreshed)"
+  else
+    log "upgrade: WSL shell-open autostart hook already current"
+  fi
+}
+
+ensure_wsl_autostart_on_upgrade
 
 log "upgrade: done"
 log "upgrade: operator data (registry, cli.json, agents, company, KS, library, mail, .bizagent) was not overwritten"
