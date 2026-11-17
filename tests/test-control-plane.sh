@@ -585,6 +585,10 @@ function request(port, { method, pathname, cookie, body }) {
       assert(nat.json.reachable === false, 'NAT mode must not claim reachability');
       assert(/portproxy/.test(nat.json.hint), 'NAT hint should explain netsh portproxy');
       assert(nat.json.hint.includes('172.28.55.40'), 'NAT hint should include the WSL IP for portproxy');
+      // Copy-paste format: each PowerShell command must start its own line.
+      assert(/\nnetsh interface portproxy /.test(nat.json.hint), 'NAT hint should put the netsh command on its own line');
+      assert(/\nNew-NetFirewallRule /.test(nat.json.hint), 'NAT hint should put the firewall command on its own line');
+      assert(nat.json.hint.includes('BIZAGENT_PUBLIC_URL'), 'NAT hint should mention the BIZAGENT_PUBLIC_URL alternative');
       assert(!/^172\.(1[6-9]|2\d|3[01])\./.test(nat.json.url || ''),
         `NAT url must not be a WSL-internal address, got ${nat.json.url}`);
     } finally {

@@ -2184,15 +2184,21 @@ function connectInfo(config) {
         url = ""; // no trustworthy Windows LAN IP — don't guess one
       }
       reachable = false;
+      // Hint is rendered by #connectPhoneStatus (white-space: pre-line), so
+      // plain newlines are layout: one-line explanation, then each PowerShell
+      // command on its own clearly copyable line, then brief alternatives.
       hint =
-        "BizAgent is running inside WSL2 (NAT networking), so a phone on your " +
-        "LAN cannot reach this address until Windows forwards the port. " +
+        "BizAgent is running inside WSL2 (NAT networking) — a phone on your LAN cannot reach this address until Windows forwards the port.\n" +
+        "\n" +
         "Run in an Administrator PowerShell on Windows:\n" +
+        "\n" +
         `netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=${port} connectaddress=${wslIP || "<WSL-IP>"} connectport=${port}\n` +
         `New-NetFirewallRule -DisplayName 'BizAgent' -Direction Inbound -LocalPort ${port} -Protocol TCP -Action Allow\n` +
-        "Or switch WSL to mirrored networking (.wslconfig: [wsl2] networkingMode=mirrored), " +
-        "or set BIZAGENT_PUBLIC_URL to an address that is already reachable." +
-        (url ? "" : " The Windows LAN IP could not be detected (PowerShell interop unavailable) — replace the host part with your Windows machine's LAN IP.");
+        "\n" +
+        "Alternatives (pick one):\n" +
+        "- Switch WSL to mirrored networking — .wslconfig: [wsl2] networkingMode=mirrored\n" +
+        "- Or set BIZAGENT_PUBLIC_URL to an address that is already reachable" +
+        (url ? "" : "\n\nThe Windows LAN IP could not be detected (PowerShell interop unavailable) — replace the host part with your Windows machine's LAN IP.");
     }
   } else {
     const host = addresses[0] || os.hostname();
