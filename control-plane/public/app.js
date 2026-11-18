@@ -2405,6 +2405,7 @@ let micRecording = false;
 let micRecorder = null;
 let micStream = null;
 let micChunks = [];
+let sttDownLogged = false;
 
 /** Probe the STT service (via the control-plane proxy) and update the mic button. */
 async function probeSttServer(force) {
@@ -2463,8 +2464,21 @@ function updateMicButtonUi() {
   if (sttAvailable === false) {
     btn.disabled = true;
     btn.classList.remove('recording');
-    btn.title = 'Speech to text unavailable (STT service down)';
+    // Observable, not silent: the tooltip carries the exact recovery command.
+    btn.title = 'Voice input unavailable: STT not running — start with: systemctl --user start oddbeaker-stt';
+    if (!sttDownLogged) {
+      sttDownLogged = true;
+      try {
+        console.info(
+          'BizAgent: voice input unavailable — STT service not running.'
+          + ' Health: http://127.0.0.1:9202/health (proxied at /api/stt/health).'
+          + ' Restart: systemctl --user restart oddbeaker-stt'
+          + ' (or re-run scripts/install-oddbeaker-stt.sh).'
+        );
+      } catch (_) { /* ignore */ }
+    }
   } else {
+    sttDownLogged = false;
     btn.disabled = false;
     btn.title = micRecording ? 'Stop recording' : 'Dictate (speech to text)';
   }

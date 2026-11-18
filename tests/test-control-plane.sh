@@ -4408,6 +4408,22 @@ if (!/secure context/.test(fn)) process.exit(1);
 if (!/not supported in this browser/.test(fn)) process.exit(1);
 NODE
 [ $? -eq 0 ] || fail "mic button must show disabled with a reason tooltip, never hide silently (insecure origin / unsupported browser)"
+# STT-down state must be observable with the exact recovery command (2026-11-18
+# follow-up): tooltip carries the start command; console.info carries health
+# URL + restart paths, logged once (not on every re-probe).
+node - "$ROOT/control-plane/public/app.js" <<'NODE'
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const m = src.match(/function updateMicButtonUi\(\) \{[\s\S]*?\n\}/);
+if (!m) process.exit(1);
+const fn = m[0];
+if (!/Voice input unavailable: STT not running/.test(fn)) process.exit(1);
+if (!/systemctl --user start oddbeaker-stt/.test(fn)) process.exit(1);
+if (!/sttDownLogged/.test(fn)) process.exit(1);
+if (!/install-oddbeaker-stt\.sh/.test(src)) process.exit(1);
+if (!/9202\/health/.test(src)) process.exit(1);
+NODE
+[ $? -eq 0 ] || fail "STT-down mic state must be observable: tooltip with start command + one-time console.info recovery line"
 
 
 echo "  ok: control-plane"
