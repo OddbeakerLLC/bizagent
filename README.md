@@ -141,8 +141,10 @@ the control plane; queues first-run setup mail when ready; and prints your URL.
 `scripts/install-oddbeaker-tts.sh` after cloning: installs the shared daemon on
 **port 9201** when the host allows, prompts for a preferred voice, and stores
 `BIZAGENT_TTS_VOICE` in `.bizagent/env`. The UI TTS toggle stays **off** until
-you enable it. One daemon per host (shared with Jobe if already on 9201). Soft
-failure leaves browser `speechSynthesis` as fallback.
+you enable it. One daemon per host (shared with Jobe if already on 9201). On
+WSL the advertised `BIZAGENT_TTS_URL` defaults to `http://127.0.0.1:9201` (the
+WSL NAT IP is ephemeral across reboots); native hosts keep the LAN-IP default.
+Soft failure leaves browser `speechSynthesis` as fallback.
 
 | Install env | Purpose |
 |-------------|--------|
@@ -159,9 +161,14 @@ Details: [`docs/TTS-CONSOLE.md`](docs/TTS-CONSOLE.md).
 `scripts/install-oddbeaker-stt.sh` after cloning: installs the shared daemon on
 **127.0.0.1:9202** (loopback-only; the control plane proxies it) when the host
 allows. The chat composer's mic button records, transcribes (verbatim + LLM
-cleanup), and inserts the cleaned text into the input — service down just
-greys the mic; chat input never breaks. Soft failure leaves dictation
-disabled.
+cleanup), and inserts the cleaned text into the input — chat input never
+breaks. If the STT service is down the mic greys out but stays clickable
+(clicking re-probes, and it also re-probes automatically every 10–60 s until
+the service is back); the tooltip shows the last health-check error plus the
+start command. On insecure origins (e.g. `http://<LAN-IP>:8787`) browsers hide
+the microphone API entirely, so the button shows disabled with an explanatory
+tooltip — open the console via `https://` or `http://localhost` to dictate.
+Soft failure leaves dictation disabled.
 
 | Install env | Purpose |
 |-------------|--------|
@@ -220,6 +227,12 @@ curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bas
 nvm install --lts && nvm use --lts
 ```
 
+**Auto-start on shell open.** On WSL the installer — and `scripts/upgrade.sh`
+on existing installs — adds a small guarded hook to `~/.bashrc` / `~/.zshrc` /
+`~/.profile` (whichever exist) that starts the control plane when you open a
+shell if it isn't already running; the `*/6` cron line stays as a safety net.
+Opt out with `BIZAGENT_SKIP_WSL_AUTOSTART=1`.
+
 ### Manual install
 
 ```sh
@@ -245,6 +258,10 @@ your `registry.json`).
   server-side (OpenAI-style and Anthropic `/v1/models`), with pricing when reported
 - **Vision paste** — paste clipboard images into chat (Ctrl/Cmd+V); agents receive
   them as `image_url` content when the model supports it
+- **Voice** — replies are spoken via the optional local oddbeaker-tts service
+  (browser `speechSynthesis` fallback), and the composer's mic button dictates
+  via oddbeaker-stt (transcribed text is inserted into the input, never
+  auto-sent). See [`docs/TTS-CONSOLE.md`](docs/TTS-CONSOLE.md).
 - **DGen forms** — agents can request secrets or structured input as a modal form
   (`kind: form-request` mail with a ` ```dgen ` block); values bypass chat history
   entirely and the answer file is deleted on claim. See

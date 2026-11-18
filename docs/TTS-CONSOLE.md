@@ -14,7 +14,7 @@ Optional text-to-speech for hub→operator console replies.
 Preferred path (when the local service is up):
 
 1. Browser → control plane `POST /api/tts/synthesize` (auth cookie).
-2. Control plane → **oddbeaker-tts** HTTP service (`POST <BIZAGENT_TTS_URL>/synthesize`; the installer writes the host's LAN IP, e.g. `http://192.168.1.10:9201`).
+2. Control plane → **oddbeaker-tts** HTTP service (`POST <BIZAGENT_TTS_URL>/synthesize`; the installer writes the host's LAN IP, e.g. `http://192.168.1.10:9201` — on WSL it defaults to `http://127.0.0.1:9201` because the WSL NAT IP is ephemeral).
 3. Browser plays the returned WAV via `GET /api/tts/audio/<file>.wav` (proxied from oddbeaker-tts cache).
 
 Fallback (service down / synthesize error):
@@ -31,7 +31,8 @@ Package: **oddbeaker-tts** (Oddbeaker Framework, Kokoro). Import `oddbeaker_tts`
 (binds `0.0.0.0` by default so other devices on the LAN can reach it;
 `BIZAGENT_TTS_BIND=127.0.0.1` keeps it loopback-only), prompts for a voice, and
 writes `BIZAGENT_TTS_VOICE` + `BIZAGENT_TTS_URL` (default
-`http://<LAN-IP>:9201`) into hub `.bizagent/env` (never clobbers an existing
+`http://<LAN-IP>:9201`; on WSL `http://127.0.0.1:9201`) into hub
+`.bizagent/env` (never clobbers an existing
 voice unless `--force-voice`).
 
 ```bash
@@ -72,8 +73,8 @@ process — BizAgent shares it.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `BIZAGENT_TTS_URL` | `http://<LAN-IP>:9201` (installer-detected; `127.0.0.1` fallback) | oddbeaker-tts base URL |
-| `BIZAGENT_TTS_HOST` | detected LAN IPv4 | Advertised host for the URL |
+| `BIZAGENT_TTS_URL` | `http://<LAN-IP>:9201` (installer-detected; `127.0.0.1` on WSL) | oddbeaker-tts base URL |
+| `BIZAGENT_TTS_HOST` | detected LAN IPv4 (unused on WSL — loopback default) | Advertised host for the URL |
 | `BIZAGENT_TTS_BIND` | `0.0.0.0` | Address the daemon binds (`127.0.0.1` = loopback-only) |
 | `BIZAGENT_TTS_VOICE` | _(service default, usually `af_heart`)_ | Optional voice id override |
 | `BIZAGENT_TTS_TIMEOUT_MS` | `20000` | Upstream synthesize timeout |
