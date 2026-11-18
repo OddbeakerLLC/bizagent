@@ -2438,12 +2438,24 @@ async function probeSttServer(force) {
 function updateMicButtonUi() {
   const btn = document.getElementById('micBtn');
   if (!btn) return;
-  const canRecord = typeof navigator !== 'undefined'
+  const hasMedia = typeof navigator !== 'undefined'
     && navigator.mediaDevices
     && typeof navigator.mediaDevices.getUserMedia === 'function'
     && typeof window.MediaRecorder === 'function';
-  if (!canRecord) {
-    btn.hidden = true;
+  if (!hasMedia) {
+    // Never hide the button silently: on insecure origins (http:// over a LAN
+    // IP) browsers hide navigator.mediaDevices entirely, which read as "the
+    // mic button vanished after the upgrade". Show it disabled with the fix.
+    const insecure = typeof window.isSecureContext === 'boolean' && !window.isSecureContext;
+    btn.hidden = false;
+    btn.disabled = true;
+    btn.classList.remove('recording');
+    btn.title = insecure
+      ? 'Microphone needs a secure context — open the console via https:// or http://localhost'
+      : 'Microphone not supported in this browser';
+    if (insecure) {
+      try { console.info('BizAgent: mic disabled — page is not a secure context (open via https:// or http://localhost)'); } catch (_) { /* ignore */ }
+    }
     return;
   }
   btn.hidden = false;

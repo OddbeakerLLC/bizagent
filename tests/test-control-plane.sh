@@ -4392,6 +4392,22 @@ grep -q "updateMicButtonUi" "$ROOT/control-plane/public/app.js" \
   || fail "app.js must grey out the mic when the STT service is down"
 grep -q "refreshSttProbe" "$ROOT/control-plane/public/app.js" \
   || fail "app.js must probe STT health after the session is ready"
+# Mic button must never be hidden silently: on insecure origins (http:// over a
+# LAN IP) browsers hide navigator.mediaDevices, which read as "mic button
+# missing after upgrade". The no-media branch must show the button disabled
+# with an explanatory tooltip instead of btn.hidden = true.
+node - "$ROOT/control-plane/public/app.js" <<'NODE'
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const m = src.match(/function updateMicButtonUi\(\) \{[\s\S]*?\n\}/);
+if (!m) process.exit(1);
+const fn = m[0];
+if (/btn\.hidden = true/.test(fn)) process.exit(1);
+if (!/isSecureContext/.test(fn)) process.exit(1);
+if (!/secure context/.test(fn)) process.exit(1);
+if (!/not supported in this browser/.test(fn)) process.exit(1);
+NODE
+[ $? -eq 0 ] || fail "mic button must show disabled with a reason tooltip, never hide silently (insecure origin / unsupported browser)"
 
 
 echo "  ok: control-plane"
