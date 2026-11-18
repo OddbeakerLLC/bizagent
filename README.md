@@ -155,6 +155,24 @@ Upgrade: `scripts/upgrade.sh` offers TTS when `:9201` is unhealthy (`--with-tts`
 / `--no-tts`). Manual: `scripts/install-oddbeaker-tts.sh --hub "$PWD" --prompt-voice`.
 Details: [`docs/TTS-CONSOLE.md`](docs/TTS-CONSOLE.md).
 
+**Optional — console STT (mic dictation via oddbeaker-stt).** The installer runs
+`scripts/install-oddbeaker-stt.sh` after cloning: installs the shared daemon on
+**127.0.0.1:9202** (loopback-only; the control plane proxies it) when the host
+allows. The chat composer's mic button records, transcribes (verbatim + LLM
+cleanup), and inserts the cleaned text into the input — service down just
+greys the mic; chat input never breaks. Soft failure leaves dictation
+disabled.
+
+| Install env | Purpose |
+|-------------|--------|
+| `BIZAGENT_STT_SOURCE` | Local checkout or git URL for oddbeaker-stt |
+| `BIZAGENT_STT_URL` | Service base URL (default `http://127.0.0.1:9202`; existing value never overwritten) |
+| `BIZAGENT_SKIP_STT=1` | Skip STT install entirely |
+| `BIZAGENT_NONINTERACTIVE=1` | No prompts |
+
+Upgrade: `scripts/upgrade.sh` offers STT when `:9202` is unhealthy
+(`--with-stt` / `--no-stt`). Manual: `scripts/install-oddbeaker-stt.sh --hub "$PWD"`.
+
 **Step 3.** Open the URL shown in your terminal (or `http://localhost:8787`
 if it doesn't appear). Create a login, then chat with PTL to finish onboarding
 (products, projects, prefs). Verify launch readiness anytime with

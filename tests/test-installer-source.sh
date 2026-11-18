@@ -177,6 +177,49 @@ if curl -fsS --max-time 2 http://127.0.0.1:9201/health 2>/dev/null | grep -q '"s
   rm -rf "$TTS_TMP_HUB"
 fi
 
+# oddbeaker-stt dependency (mic dictation — mirrors the TTS block above)
+grep -q 'ensure_oddbeaker_stt' "$ROOT/install.sh" \
+  || fail "install.sh missing ensure_oddbeaker_stt"
+grep -q 'install-oddbeaker-stt' "$ROOT/install.sh" \
+  || fail "install.sh does not call install-oddbeaker-stt"
+[ -x "$ROOT/scripts/install-oddbeaker-stt.sh" ] \
+  || fail "scripts/install-oddbeaker-stt.sh missing or not executable"
+bash -n "$ROOT/scripts/install-oddbeaker-stt.sh" \
+  || fail "install-oddbeaker-stt.sh bash -n failed"
+grep -q 'BIZAGENT_SKIP_STT' "$ROOT/install.sh" \
+  || fail "install.sh missing BIZAGENT_SKIP_STT"
+grep -q 'BIZAGENT_STT_URL' "$ROOT/.bizagent/env.example" \
+  || fail "env.example missing BIZAGENT_STT_URL"
+grep -q 'install-oddbeaker-stt' "$ROOT/README.md" \
+  || fail "README missing install-oddbeaker-stt docs"
+# STT is loopback-only by design (the CP proxies it; browser never hits :9202)
+grep -Eq 'DEFAULT_STT_BIND="127\.0\.0\.1"' "$ROOT/scripts/install-oddbeaker-stt.sh" \
+  || fail "install-oddbeaker-stt.sh does not default the bind to 127.0.0.1"
+grep -q 'BIZAGENT_STT_BIND' "$ROOT/scripts/install-oddbeaker-stt.sh" \
+  || fail "install-oddbeaker-stt.sh has no bind override (BIZAGENT_STT_BIND)"
+# Never clobber an operator-set BIZAGENT_STT_URL in hub env
+grep -q 'keeping existing BIZAGENT_STT_URL' "$ROOT/scripts/install-oddbeaker-stt.sh" \
+  || fail "install-oddbeaker-stt.sh does not preserve an existing BIZAGENT_STT_URL"
+grep -q 'BIZAGENT_SKIP_STT' "$ROOT/scripts/install-oddbeaker-stt.sh" \
+  || fail "install-oddbeaker-stt.sh does not honor BIZAGENT_SKIP_STT"
+
+# Live config-write check (only when an STT daemon is already on :9202 — the
+# "already running" path writes env and exits without touching the daemon).
+if curl -fsS --max-time 2 http://127.0.0.1:9202/health 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
+  STT_TMP_HUB="$(mktemp -d)"
+  # Unset ambient overrides (a running hub exports BIZAGENT_STT_URL to agents);
+  # we are testing the installer's DEFAULT, which must be loopback.
+  if env -u BIZAGENT_STT_URL -u BIZAGENT_STT_BIND \
+      BIZAGENT_NONINTERACTIVE=1 bash "$ROOT/scripts/install-oddbeaker-stt.sh" \
+      --hub "$STT_TMP_HUB" --yes >/dev/null 2>&1; then
+    grep -E '^BIZAGENT_STT_URL=http://127\.0\.0\.1:9202' "$STT_TMP_HUB/.bizagent/env" >/dev/null \
+      || fail "installer did not write the loopback BIZAGENT_STT_URL to hub env"
+  else
+    fail "install-oddbeaker-stt.sh failed on the already-running path (temp hub)"
+  fi
+  rm -rf "$STT_TMP_HUB"
+fi
+
 # Nesting guard: refuse to install inside an existing hub (nested clone bug —
 # running install.sh from inside a hub with a relative BIZAGENT_DIR created
 # <hub>/bizagent/, a full nested clone).

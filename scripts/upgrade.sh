@@ -18,12 +18,15 @@
 # Usage:
 #   scripts/upgrade.sh [--hub PATH] [--source PATH|URL] [--ref REF]
 #                      [--dry-run] [-v|--verbose] [--yes|-y] [--no-restart]
-#                      [--with-tts|--no-tts] [--no-health-timer]
+#                      [--with-tts|--no-tts] [--with-stt|--no-stt]
+#                      [--no-health-timer]
 #
 # Env:
 #   BIZAGENT_FRAMEWORK   Default framework path or git URL (same as factory-reset)
 #   BIZAGENT_SKIP_TTS=1  Skip oddbeaker-tts offer/install on upgrade
 #   BIZAGENT_TTS_*       See scripts/install-oddbeaker-tts.sh
+#   BIZAGENT_SKIP_STT=1  Skip oddbeaker-stt offer/install on upgrade
+#   BIZAGENT_STT_*       See scripts/install-oddbeaker-stt.sh
 #   BIZAGENT_SKIP_LLMAPI=1  Skip llmapi env/service ensure on upgrade
 #   BIZAGENT_SKIP_HEALTH_TIMER=1  Skip health probe timer ensure on upgrade
 #   BIZAGENT_SKIP_WSL_AUTOSTART=1  Skip WSL shell-open autostart hook ensure
@@ -44,6 +47,7 @@ VERBOSE=0
 YES=0
 NO_RESTART=0
 WITH_TTS=""   # empty=auto (offer if missing), 1=force try, 0=skip
+WITH_STT=""   # empty=auto (offer if missing), 1=force try, 0=skip
 WITH_HEALTH_TIMER=1  # 0=skip via --no-health-timer or BIZAGENT_SKIP_HEALTH_TIMER
 DEFAULT_FRAMEWORK_URL="https://github.com/OddbeakerLLC/bizagent.git"
 
@@ -67,6 +71,8 @@ while [[ $# -gt 0 ]]; do
     --no-restart) NO_RESTART=1; shift ;;
     --with-tts) WITH_TTS=1; shift ;;
     --no-tts) WITH_TTS=0; shift ;;
+    --with-stt) WITH_STT=1; shift ;;
+    --no-stt) WITH_STT=0; shift ;;
     --no-health-timer) WITH_HEALTH_TIMER=0; shift ;;
     -h|--help) usage ;;
     *)
@@ -332,6 +338,62 @@ ensure_tts_on_upgrade() {
 }
 
 ensure_tts_on_upgrade
+
+# Optional: install oddbeaker-stt when missing (never clobber BIZAGENT_STT_URL).
+# The mic button in the web chat proxies to this service (127.0.0.1:9202);
+# when it is down the mic greys out and chat input keeps working, so this
+# step is best-effort exactly like TTS.
+ensure_stt_on_upgrade() {
+  if [[ -n "${BIZAGENT_SKIP_STT:-}" || "$WITH_STT" == "0" ]]; then
+    log "upgrade: skipping oddbeaker-stt (BIZAGENT_SKIP_STT or --no-stt)"
+    return 0
+  fi
+  local helper="$HUB/scripts/install-oddbeaker-stt.sh"
+  if [[ ! -x "$helper" ]]; then
+    log "upgrade: install-oddbeaker-stt.sh not present — skip STT"
+    return 0
+  fi
+  local stt_url="${BIZAGENT_STT_URL:-http://127.0.0.1:9202}"
+  stt_url="${stt_url%/}"
+  local healthy=0
+  if curl -fsS --max-time 2 "$stt_url/health" >/dev/null 2>&1; then
+    healthy=1
+  fi
+  local url_set=0
+  if [[ -f "$HUB/.bizagent/env" ]] && grep -qE '^(export[[:space:]]+)?BIZAGENT_STT_URL=' "$HUB/.bizagent/env" 2>/dev/null; then
+    url_set=1
+  fi
+  # Already healthy + URL persisted → nothing to do
+  if [[ "$healthy" -eq 1 && "$url_set" -eq 1 && "$WITH_STT" != "1" ]]; then
+    log "upgrade: oddbeaker-stt already healthy; BIZAGENT_STT_URL preserved"
+    return 0
+  fi
+  # Auto path: only offer/install when missing
+  if [[ "$healthy" -eq 1 && "$WITH_STT" != "1" ]]; then
+    log "upgrade: oddbeaker-stt up — ensuring BIZAGENT_STT_URL in .bizagent/env (no clobber)"
+    bash "$helper" --hub "$HUB" --yes --no-start || true
+    return 0
+  fi
+  local args=(--hub "$HUB")
+  if [[ "$YES" -eq 1 || ! -t 0 ]]; then
+    args+=(--yes)
+  else
+    # Interactive: ask once
+    printf 'oddbeaker-stt (mic-button speech-to-text) is not healthy on this host. Install/start it now? [Y/n] '
+    read -r ans || ans="y"
+    ans="${ans:-y}"
+    if [[ "$ans" != "y" && "$ans" != "Y" && "$ans" != "yes" ]]; then
+      log "upgrade: skipped oddbeaker-stt install"
+      return 0
+    fi
+    args+=(--yes)
+  fi
+  [[ -n "${BIZAGENT_STT_SOURCE:-}" ]] && args+=(--source "$BIZAGENT_STT_SOURCE")
+  log "upgrade: ensuring oddbeaker-stt (soft-fail)…"
+  bash "$helper" "${args[@]}" || log "upgrade: WARN oddbeaker-stt step failed — hub upgrade still ok"
+}
+
+ensure_stt_on_upgrade
 
 # Major-upgrade migration: bring pre-llmapi installs onto the current layout.
 # The llmapi upgrade added a root-level llmapi.js, BIZAGENT_LLMAPI_URL in

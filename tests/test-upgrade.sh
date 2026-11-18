@@ -264,6 +264,16 @@ grep -q 'install-oddbeaker-tts\|ensure_tts_on_upgrade\|with-tts' "$SCRIPT" \
 grep -q 'BIZAGENT_TTS_VOICE' "$ROOT/scripts/install-oddbeaker-tts.sh" \
   || fail "install-oddbeaker-tts missing voice persistence"
 
+# oddbeaker-stt on upgrade path (mic dictation — mirrors TTS)
+grep -q 'ensure_stt_on_upgrade' "$SCRIPT" \
+  || fail "upgrade.sh missing oddbeaker-stt ensure step"
+grep -q 'BIZAGENT_SKIP_STT' "$SCRIPT" \
+  || fail "upgrade.sh missing BIZAGENT_SKIP_STT opt-out"
+grep -q 'install-oddbeaker-stt' "$SCRIPT" \
+  || fail "upgrade.sh does not call install-oddbeaker-stt"
+grep -q 'BIZAGENT_STT_URL' "$ROOT/scripts/install-oddbeaker-stt.sh" \
+  || fail "install-oddbeaker-stt missing URL persistence"
+
 # llmapi migration wired into upgrade + factory-reset (framework path lists in sync)
 grep -q 'ensure_llmapi_on_upgrade' "$SCRIPT" \
   || fail "upgrade.sh missing llmapi ensure step"

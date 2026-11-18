@@ -19,10 +19,11 @@ fail() { echo "  FAIL: $1"; exit 1; }
 INSTALL="$ROOT/install.sh"
 INSTALL_CP="$ROOT/install/install.sh"
 TTS="$ROOT/scripts/install-oddbeaker-tts.sh"
+STT="$ROOT/scripts/install-oddbeaker-stt.sh"
 CP="$ROOT/scripts/control-plane.sh"
 READY="$ROOT/scripts/check-hub-ready.sh"
 
-for f in "$INSTALL" "$INSTALL_CP" "$TTS" "$CP" "$READY"; do
+for f in "$INSTALL" "$INSTALL_CP" "$TTS" "$STT" "$CP" "$READY"; do
   [[ -f "$f" ]] || fail "missing file: $f"
   bash -n "$f" || fail "bash -n failed: $f"
 done
@@ -31,7 +32,7 @@ done
 # Required actions whose stderr must surface (with the real cause), never be
 # discarded. Best-effort probes/cleanup are fine and not matched here.
 REQUIRED_ACTION='git clone|npm install|pip install|apt-get install|apt install|dnf install|pacman -S|zypper install|brew install|pkg_install|\$INSTALL [a-z]+ |\$INSTALL cronie'
-for f in "$INSTALL" "$INSTALL_CP" "$TTS" "$CP"; do
+for f in "$INSTALL" "$INSTALL_CP" "$TTS" "$STT" "$CP"; do
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     fail "$f: required action discards stderr: $line"
@@ -77,6 +78,12 @@ grep -q 'remote remove origin' "$INSTALL" \
   || fail "install.sh detach-framework-remote still swallows failure with || true"
 grep -q 'exit 3' "$TTS" \
   || fail "install-oddbeaker-tts.sh soft_fail exits 0 — callers cannot tell failure from success"
+grep -q 'clone_err="$(git clone --quiet --branch "$STT_REF" -- "$src" "$STT_DIR" 2>&1)"' "$STT" \
+  || fail "install-oddbeaker-stt.sh first clone attempt still discards stderr"
+! grep -nE 'git clone .*2>/dev/null' "$STT" \
+  || fail "install-oddbeaker-stt.sh still has a stderr-discarding git clone"
+grep -q 'exit 3' "$STT" \
+  || fail "install-oddbeaker-stt.sh soft_fail exits 0 — callers cannot tell failure from success"
 
 # install/install.sh mirrors
 grep -q 'die "Unknown BIZAGENT_PROVIDER' "$INSTALL_CP" \
@@ -133,7 +140,7 @@ grep -qE '^cli\.json$' "$ROOT/.gitignore" \
 # Every warn in the installers must be either followed by a die/non-zero exit
 # within a few lines, or sit on the soft-fail allowlist below (optional
 # components whose failure is explicitly reported and survivable).
-SOFT_FAIL='TTS|tts|health probe|Health watchdog|WSL|wsl|curl not found|Homebrew|cron\.|service cron|detach|remove public origin|check it manually|may only be reachable|browser speechSynthesis|stays optional|voice in|Re-run|API key|BIZAGENT_AUTO_UPDATE|Enter 1|re-enter|Please enter|existing registry|welcome seed|seed-first-run|llmapi service unit|as a process'
+SOFT_FAIL='TTS|tts|STT|stt|mic dictation|health probe|Health watchdog|WSL|wsl|curl not found|Homebrew|cron\.|service cron|detach|remove public origin|check it manually|may only be reachable|browser speechSynthesis|stays optional|voice in|Re-run|API key|BIZAGENT_AUTO_UPDATE|Enter 1|re-enter|Please enter|existing registry|welcome seed|seed-first-run|llmapi service unit|as a process'
 scan_warns() {
   local f="$1"
   local n text window

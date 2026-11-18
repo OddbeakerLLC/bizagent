@@ -20,6 +20,7 @@
 #   BIZAGENT_TTS_SOURCE=path|url   oddbeaker-tts checkout or git URL (default: discover/SSH)
 #   BIZAGENT_TTS_DIR=path          Install root for oddbeaker-tts (default ~/.bizagent/oddbeaker-tts)
 #   BIZAGENT_SKIP_TTS=1            Skip oddbeaker-tts install (console TTS stays browser-only)
+#   BIZAGENT_SKIP_STT=1            Skip oddbeaker-stt install (mic dictation stays disabled)
 #   BIZAGENT_SKIP_HEALTH_TIMER=1   Skip the out-of-process health probe timer install
 #   BIZAGENT_NONINTERACTIVE=1      No prompts (provider/key/voice use env/defaults)
 #
@@ -1552,6 +1553,42 @@ ensure_oddbeaker_tts() {
   ok "oddbeaker-tts step finished (voice in .bizagent/env when set)"
 }
 
+# --- optional oddbeaker-stt (mic dictation) local service ---
+# Installs/starts the shared daemon on 127.0.0.1:9202 when possible; persists
+# BIZAGENT_STT_URL in .bizagent/env (never clobbers an existing value).
+# Soft-fails so hub install still succeeds — the mic button simply stays
+# disabled and chat input keeps working without it.
+ensure_oddbeaker_stt() {
+  if [[ -n "${BIZAGENT_SKIP_STT:-}" ]]; then
+    ok "skipping oddbeaker-stt (BIZAGENT_SKIP_STT)"
+    return 0
+  fi
+  local helper=""
+  if [[ -x "$INSTALL_DIR/scripts/install-oddbeaker-stt.sh" ]]; then
+    helper="$INSTALL_DIR/scripts/install-oddbeaker-stt.sh"
+  elif [[ -x "$(dirname "${BASH_SOURCE[0]}")/scripts/install-oddbeaker-stt.sh" ]]; then
+    helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/install-oddbeaker-stt.sh"
+  fi
+  if [[ -z "$helper" ]]; then
+    warn "install-oddbeaker-stt.sh missing — mic dictation stays disabled (chat input unaffected)"
+    note "Later: place oddbeaker-stt on the host and run scripts/install-oddbeaker-stt.sh"
+    return 0
+  fi
+  step "Console STT (oddbeaker-stt / mic dictation)"
+  note "Optional local service on 127.0.0.1:9202 (loopback-only; the control plane proxies it)."
+  note "One daemon per host — shared with other Oddbeaker products if already running."
+  local args=(--hub "$INSTALL_DIR" --yes)
+  if [[ -n "${BIZAGENT_STT_SOURCE:-}" ]]; then
+    args+=(--source "$BIZAGENT_STT_SOURCE")
+  fi
+  # Do not fail the whole BizAgent install if STT cannot be built on this host.
+  if ! bash "$helper" "${args[@]}"; then
+    warn "oddbeaker-stt install reported failure — hub continues; mic dictation stays disabled"
+    return 0
+  fi
+  ok "oddbeaker-stt step finished (BIZAGENT_STT_URL in .bizagent/env when set)"
+}
+
 # --- out-of-process health watchdog (survival instinct) ---
 # Installs the systemd user timer (or cron fallback) for scripts/health-probe.sh
 # so the operator does not have to run scripts/install-health-timer.sh by hand.
@@ -1913,6 +1950,7 @@ main() {
   write_llmapi_env_line
   apply_industry_template
   ensure_oddbeaker_tts
+  ensure_oddbeaker_stt
   ensure_health_timer
 
   handoff
