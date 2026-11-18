@@ -4337,4 +4337,61 @@ grep -q 'provider_queue_auto_resumed' "$ROOT/control-plane/lib/dispatcher.js" \
   || fail "auto-resume must log a provider_queue_auto_resumed event"
 
 
+# --- Mic button: dictation via oddbeaker-stt proxy (2026-11-18) ---
+[ -f "$ROOT/control-plane/lib/stt-proxy.js" ] || fail "stt-proxy module missing"
+grep -q 'DEFAULT_STT_URL = "http://127.0.0.1:9202"' "$ROOT/control-plane/lib/stt-proxy.js" \
+  || fail "stt-proxy must default to http://127.0.0.1:9202"
+grep -q 'BIZAGENT_STT_URL' "$ROOT/control-plane/lib/stt-proxy.js" \
+  || fail "stt base URL must be configurable via BIZAGENT_STT_URL"
+grep -q '"/transcribe"' "$ROOT/control-plane/lib/stt-proxy.js" \
+  || fail "stt-proxy must POST /transcribe on the upstream service"
+grep -q '"/api/stt/health"' "$ROOT/control-plane/server.js" \
+  || fail "server must expose GET /api/stt/health"
+grep -q '"/api/stt/transcribe"' "$ROOT/control-plane/server.js" \
+  || fail "server must expose POST /api/stt/transcribe"
+grep -q 'stt-proxy' "$ROOT/control-plane/server.js" \
+  || fail "server must require the stt-proxy module"
+# Mic button sits between the textarea and the Send button in the composer.
+node - "$ROOT/control-plane/public/index.html" <<'NODE'
+const fs = require('fs');
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const ta = html.indexOf('<textarea id="messageInput"');
+const mic = html.indexOf('<button type="button" id="micBtn"');
+const send = html.indexOf('<button type="submit">Send</button>');
+if (ta < 0 || mic < 0 || send < 0) process.exit(1);
+if (!(ta < mic && mic < send)) process.exit(1);
+NODE
+[ $? -eq 0 ] || fail "mic button must render between the input field and the send button"
+grep -q "id=\"micBtn\"" "$ROOT/control-plane/public/index.html" \
+  || fail "index.html must render the mic button"
+grep -q "mic-btn" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles.css must style the mic button"
+grep -q "mic-btn.recording" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles.css must style the recording state"
+grep -q "toggleMicRecording" "$ROOT/control-plane/public/app.js" \
+  || fail "app.js must wire the mic button click"
+grep -q "MediaRecorder" "$ROOT/control-plane/public/app.js" \
+  || fail "app.js must record via MediaRecorder"
+grep -q "'/api/stt/transcribe'" "$ROOT/control-plane/public/app.js" \
+  || fail "app.js must POST recordings to the STT proxy endpoint"
+grep -q "insertTranscript" "$ROOT/control-plane/public/app.js" \
+  || fail "app.js must insert the transcript into the chat input"
+grep -q "data.cleaned || data.text || data.verbatim" "$ROOT/control-plane/public/app.js" \
+  || fail "app.js must prefer the cleaned transcription text"
+grep -q "requestSubmit\|type=\"submit\"" "$ROOT/control-plane/public/app.js" >/dev/null 2>&1
+# Transcript insertion must not auto-send: insertTranscript only sets input.value.
+node - "$ROOT/control-plane/public/app.js" <<'NODE'
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const m = src.match(/function insertTranscript\(text\) \{[\s\S]*?\n\}/);
+if (!m) process.exit(1);
+if (/requestSubmit|submit\(\)/.test(m[0])) process.exit(1);
+NODE
+[ $? -eq 0 ] || fail "transcript insertion must not auto-send the message"
+grep -q "updateMicButtonUi" "$ROOT/control-plane/public/app.js" \
+  || fail "app.js must grey out the mic when the STT service is down"
+grep -q "refreshSttProbe" "$ROOT/control-plane/public/app.js" \
+  || fail "app.js must probe STT health after the session is ready"
+
+
 echo "  ok: control-plane"

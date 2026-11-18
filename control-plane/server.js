@@ -152,6 +152,7 @@ const {
   ttsFetchAudio,
   rewriteAudioUrl,
 } = require("./lib/tts-proxy");
+const { sttHealth, sttTranscribe } = require("./lib/stt-proxy");
 const { agentMailStatus, routeOutboxes, writeOutboxMessage } = require("./lib/mail");
 const enterpriseClient = require("./lib/enterprise-server-client");
 const { getProfile, setProfile } = require("./lib/profile");
@@ -1545,6 +1546,36 @@ async function handleApi(config, req, res) {
       if (code === "bad_request") return send(res, 400, { error: err.message });
       if (code === "not_found") return send(res, 404, { error: err.message });
       return send(res, 502, { error: err.message || "TTS audio unavailable" });
+    }
+  }
+
+  // --- Console STT proxy → local oddbeaker-stt (default :9202) ---
+  // Mic button in the chat composer; service-down leaves chat input untouched.
+  if (url.pathname === "/api/stt/health" && req.method === "GET") {
+    const healthResult = await sttHealth();
+    return send(res, 200, healthResult);
+  }
+
+  if (url.pathname === "/api/stt/transcribe" && req.method === "POST") {
+    try {
+      const ct = String(req.headers["content-type"] || "");
+      if (!ct.includes("multipart/form-data")) {
+        return send(res, 400, { error: "multipart/form-data required" });
+      }
+      const raw = await readRequestBuffer(req);
+      const result = await sttTranscribe({ body: raw, contentType: ct });
+      return send(res, 200, { ok: true, engine: "oddbeaker-stt", ...result });
+    } catch (err) {
+      const code = err && err.code;
+      if (code === "bad_request") return send(res, 400, { error: err.message });
+      const status =
+        code === "upstream" && err.status >= 400 && err.status < 600
+          ? err.status
+          : 502;
+      return send(res, status, {
+        error: err.message || "STT unavailable",
+        available: false,
+      });
     }
   }
 

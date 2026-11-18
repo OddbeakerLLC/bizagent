@@ -2396,6 +2396,205 @@ function refreshTtsServerProbe() {
   probeTtsServer(true).then(() => updateTtsToggleUi()).catch(() => {});
 }
 
+// --- Mic button: dictation via oddbeaker-stt (2026-11-18) -------------------
+
+let sttAvailable = null; // null = unknown, true/false after probe
+let sttProbedAt = 0;
+const STT_REPROBE_MS = 5 * 60 * 1000;
+let micRecording = false;
+let micRecorder = null;
+let micStream = null;
+let micChunks = [];
+
+/** Probe the STT service (via the control-plane proxy) and update the mic button. */
+async function probeSttServer(force) {
+  const now = Date.now();
+  if (!force && sttAvailable === true) return true;
+  if (!force && sttAvailable === false && (now - sttProbedAt) < STT_REPROBE_MS) {
+    return false;
+  }
+  try {
+    const res = await fetch('/api/stt/health', { credentials: 'same-origin' });
+    if (!res.ok) {
+      // 401/403 before the session is ready is not "service down" — leave unknown.
+      if (res.status === 401 || res.status === 403) return sttAvailable === true;
+      sttAvailable = false;
+      sttProbedAt = now;
+      updateMicButtonUi();
+      return false;
+    }
+    const data = await res.json().catch(() => ({}));
+    sttAvailable = !!(data && data.available);
+    sttProbedAt = now;
+  } catch (_) {
+    sttAvailable = false;
+    sttProbedAt = now;
+  }
+  updateMicButtonUi();
+  return sttAvailable === true;
+}
+
+/** Show the mic only when the browser can record; grey it out when STT is down. */
+function updateMicButtonUi() {
+  const btn = document.getElementById('micBtn');
+  if (!btn) return;
+  const canRecord = typeof navigator !== 'undefined'
+    && navigator.mediaDevices
+    && typeof navigator.mediaDevices.getUserMedia === 'function'
+    && typeof window.MediaRecorder === 'function';
+  if (!canRecord) {
+    btn.hidden = true;
+    return;
+  }
+  btn.hidden = false;
+  btn.classList.toggle('recording', !!micRecording);
+  if (sttAvailable === false) {
+    btn.disabled = true;
+    btn.classList.remove('recording');
+    btn.title = 'Speech to text unavailable (STT service down)';
+  } else {
+    btn.disabled = false;
+    btn.title = micRecording ? 'Stop recording' : 'Dictate (speech to text)';
+  }
+}
+
+/** Small error hint without touching the chat input. */
+function showMicHint(message) {
+  setAuthStatus(message, 'warn');
+}
+
+/** Insert transcribed text into the composer input (never auto-sends). */
+function insertTranscript(text) {
+  const input = document.getElementById('messageInput');
+  if (!input) return;
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return;
+  const existing = input.value;
+  input.value = existing && !/\s$/.test(existing) ? `${existing} ${trimmed}` : existing + trimmed;
+  input.focus();
+  // Move the caret to the end.
+  try {
+    input.setSelectionRange(input.value.length, input.value.length);
+  } catch (_) { /* ignore */ }
+}
+
+async function transcribeMicBlob(blob) {
+  const form = new FormData();
+  const ext = blob && blob.type && blob.type.includes('webm') ? 'webm' : 'audio';
+  form.append('audio', blob, `dictation.${ext}`);
+  const res = await fetch('/api/stt/transcribe', {
+    method: 'POST',
+    credentials: 'same-origin',
+    body: form,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data && data.error ? data.error : `STT failed (${res.status})`);
+  }
+  return data;
+}
+
+async function toggleMicRecording() {
+  if (micRecording) {
+    // Stop: onstop handler transcribes and inserts the text.
+    try { micRecorder.stop(); } catch (_) { cleanupMicRecording(); }
+    return;
+  }
+  if (sttAvailable === false) {
+    // Re-probe once on click; if still down, surface a hint.
+    const ok = await probeSttServer(true);
+    if (!ok) {
+      showMicHint('Speech to text unavailable — STT service is down. Chat input unaffected.');
+      return;
+    }
+  }
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    showMicHint('This browser does not support audio recording.');
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    showMicHint('Microphone access denied or unavailable.');
+    return;
+  }
+  micStream = stream;
+  micChunks = [];
+  let recorder;
+  try {
+    recorder = new MediaRecorder(stream);
+  } catch (err) {
+    cleanupMicRecording();
+    showMicHint('Audio recording is not supported in this browser.');
+    return;
+  }
+  micRecorder = recorder;
+  recorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) micChunks.push(event.data);
+  };
+  recorder.onstop = async () => {
+    const blob = new Blob(micChunks, { type: recorder.mimeType || 'audio/webm' });
+    cleanupMicRecording();
+    if (!blob.size) {
+      showMicHint('No audio captured — try again.');
+      return;
+    }
+    setAuthStatus('Transcribing...', 'pending');
+    try {
+      const data = await transcribeMicBlob(blob);
+      insertTranscript(data.cleaned || data.text || data.verbatim || '');
+      setAuthStatus(displayName ? `Signed in as ${displayName}` : 'Signed in', 'ok');
+    } catch (err) {
+      showMicHint(err.message || 'Speech to text failed. Chat input unaffected.');
+      sttAvailable = false;
+      sttProbedAt = Date.now();
+      updateMicButtonUi();
+    }
+  };
+  recorder.onerror = () => {
+    cleanupMicRecording();
+    showMicHint('Recording failed. Chat input unaffected.');
+  };
+  try {
+    recorder.start();
+  } catch (err) {
+    cleanupMicRecording();
+    showMicHint('Could not start recording. Chat input unaffected.');
+    return;
+  }
+  micRecording = true;
+  updateMicButtonUi();
+}
+
+function cleanupMicRecording() {
+  micRecording = false;
+  micRecorder = null;
+  micChunks = [];
+  if (micStream) {
+    try { micStream.getTracks().forEach((t) => t.stop()); } catch (_) { /* ignore */ }
+    micStream = null;
+  }
+  updateMicButtonUi();
+}
+
+function bindMicButton() {
+  const btn = document.getElementById('micBtn');
+  if (!btn || btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', (event) => {
+    event.preventDefault();
+    toggleMicRecording();
+  });
+  updateMicButtonUi();
+}
+
+/** Probe STT after the session is ready (same pattern as refreshTtsServerProbe). */
+function refreshSttProbe() {
+  bindMicButton();
+  probeSttServer(true).catch(() => {});
+}
+
 let allowConcurrency = true;
 let concurrencyEnvForcedOff = false;
 let concurrencyBusy = false;
@@ -3024,6 +3223,7 @@ async function boot() {
     setAuthenticated(true, displayName ? `Signed in as ${displayName}` : 'Signed in');
     // Session cookie is valid — probe Kokoro now (not at bindTtsToggle pre-login).
     refreshTtsServerProbe();
+    refreshSttProbe();
     if (!named) return;
     // Prefetch CLI/model catalog for the agent config dialog (non-blocking).
     loadCliModels().catch(() => {});

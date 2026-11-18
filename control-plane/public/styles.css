@@ -776,6 +776,35 @@ body.logs-page {
 .attach-btn:hover {
   background: #f3f4f6;
 }
+.mic-btn {
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  user-select: none;
+  background: #ffffff;
+  color: #172033;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 16px;
+  line-height: 1;
+}
+.mic-btn:hover {
+  background: #f3f4f6;
+}
+.mic-btn.recording {
+  background: #fee2e2;
+  border-color: #ef4444;
+  color: #b91c1c;
+}
+.mic-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .attach-recipient {
   flex: 0 0 auto;
   max-width: 180px;
