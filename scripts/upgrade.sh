@@ -19,7 +19,7 @@
 #   scripts/upgrade.sh [--hub PATH] [--source PATH|URL] [--ref REF]
 #                      [--dry-run] [-v|--verbose] [--yes|-y] [--no-restart]
 #                      [--with-tts|--no-tts] [--with-stt|--no-stt]
-#                      [--no-health-timer]
+#                      [--with-tls|--no-tls] [--no-health-timer]
 #
 # Env:
 #   BIZAGENT_FRAMEWORK   Default framework path or git URL (same as factory-reset)
@@ -30,6 +30,7 @@
 #   BIZAGENT_SKIP_LLMAPI=1  Skip llmapi env/service ensure on upgrade
 #   BIZAGENT_SKIP_HEALTH_TIMER=1  Skip health probe timer ensure on upgrade
 #   BIZAGENT_SKIP_WSL_AUTOSTART=1  Skip WSL shell-open autostart hook ensure
+#   BIZAGENT_SKIP_TLS=1  Skip console https (TLS) ensure on upgrade
 #
 # Manual path (any time): run this script, or ask PTL to apply updates.
 # Nightly auto path: only when registry.json settings.auto_update === true
@@ -48,6 +49,7 @@ YES=0
 NO_RESTART=0
 WITH_TTS=""   # empty=auto (offer if missing), 1=force try, 0=skip
 WITH_STT=""   # empty=auto (offer if missing), 1=force try, 0=skip
+WITH_TLS=""   # empty=auto (enable if not configured), 1=force try, 0=skip
 WITH_HEALTH_TIMER=1  # 0=skip via --no-health-timer or BIZAGENT_SKIP_HEALTH_TIMER
 DEFAULT_FRAMEWORK_URL="https://github.com/OddbeakerLLC/bizagent.git"
 
@@ -73,6 +75,8 @@ while [[ $# -gt 0 ]]; do
     --no-tts) WITH_TTS=0; shift ;;
     --with-stt) WITH_STT=1; shift ;;
     --no-stt) WITH_STT=0; shift ;;
+    --with-tls) WITH_TLS=1; shift ;;
+    --no-tls) WITH_TLS=0; shift ;;
     --no-health-timer) WITH_HEALTH_TIMER=0; shift ;;
     -h|--help) usage ;;
     *)
@@ -416,6 +420,41 @@ ensure_stt_on_upgrade() {
 }
 
 ensure_stt_on_upgrade
+
+# Optional: enable https for the console (the mic needs a secure context on
+# non-localhost origins — browsers hide navigator.mediaDevices over plain
+# http://<LAN-IP>). The control plane serves http AND https on the same port
+# (protocol sniffing), so enabling TLS never breaks existing http use —
+# localhost http, health probes, and scripts keep working unchanged.
+# Soft-fail exactly like TTS/STT: a TLS problem never blocks the upgrade.
+ensure_tls_on_upgrade() {
+  if [[ -n "${BIZAGENT_SKIP_TLS:-}" || "$WITH_TLS" == "0" ]]; then
+    log "upgrade: skipping TLS ensure (BIZAGENT_SKIP_TLS or --no-tls)"
+    return 0
+  fi
+  local helper="$HUB/scripts/setup-tls.sh"
+  if [[ ! -x "$helper" ]]; then
+    log "upgrade: setup-tls.sh not present — skip TLS"
+    return 0
+  fi
+  if [[ -n "${BIZAGENT_TLS_KEY:-}" || -n "${BIZAGENT_TLS_CERT:-}" ]]; then
+    log "upgrade: TLS already configured via BIZAGENT_TLS_KEY/BIZAGENT_TLS_CERT — leaving as is"
+    return 0
+  fi
+  local already=0
+  if command -v node >/dev/null 2>&1 && [[ -f "$HUB/registry.json" ]]; then
+    already="$(node -e 'try{const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const t=r&&r.settings&&r.settings.control_plane&&r.settings.control_plane.tls||{};process.stdout.write(t.enabled||t.key||t.cert?"1":"0")}catch(_e){process.stdout.write("0")}' "$HUB/registry.json" 2>/dev/null || echo 0)"
+  fi
+  if [[ "$already" == "1" && "$WITH_TLS" != "1" ]]; then
+    log "upgrade: TLS already configured in registry.json — leaving as is"
+    return 0
+  fi
+  log "upgrade: enabling console https (self-signed cert with SANs; http stays available on the same port)…"
+  bash "$helper" --hub "$HUB" --yes \
+    || log "upgrade: WARN TLS setup failed — hub upgrade still ok (run scripts/setup-tls.sh later)"
+}
+
+ensure_tls_on_upgrade
 
 # Major-upgrade migration: bring pre-llmapi installs onto the current layout.
 # The llmapi upgrade added a root-level llmapi.js, BIZAGENT_LLMAPI_URL in

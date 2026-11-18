@@ -1,6 +1,7 @@
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
+const net = require("net");
 const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
@@ -2023,17 +2024,29 @@ function generateSelfSignedCert(dir, hostname) {
   const keyPath = path.join(dir, "tls.key");
   const certPath = path.join(dir, "tls.crt");
   if (fs.existsSync(keyPath) && fs.existsSync(certPath)) return { keyPath, certPath };
-  execFileSync(
-    "openssl",
-    [
-      "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-      "-keyout", keyPath,
-      "-out", certPath,
-      "-days", "3650",
-      "-subj", `/CN=${hostname}`,
-    ],
-    { stdio: "ignore" },
-  );
+  // Modern browsers ignore the CN and match on SANs only — without them a
+  // remote device gets a name-mismatch warning even after trusting the cert.
+  // Cover the hostname, localhost, and every LAN IPv4 the box has.
+  const sans = [`DNS:${hostname}`, "DNS:localhost", "IP:127.0.0.1", "IP:::1"];
+  for (const ip of lanIPv4Addresses()) {
+    if (!sans.includes(`IP:${ip}`)) sans.push(`IP:${ip}`);
+  }
+  const baseArgs = [
+    "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+    "-keyout", keyPath,
+    "-out", certPath,
+    "-days", "3650",
+    "-subj", `/CN=${hostname}`,
+  ];
+  try {
+    execFileSync("openssl", [...baseArgs, "-addext", `subjectAltName=${sans.join(",")}`], {
+      stdio: "ignore",
+    });
+  } catch (_err) {
+    // Ancient openssl without -addext: a CN-only cert still serves https
+    // (browsers show a warning; the origin is still a secure context).
+    execFileSync("openssl", baseArgs, { stdio: "ignore" });
+  }
   try { fs.chmodSync(keyPath, 0o600); } catch (_err) { /* best effort */ }
   return { keyPath, certPath };
 }
@@ -2252,14 +2265,45 @@ function connectInfo(config) {
 
 function createServer(config) {
   const tlsOptions = resolveTlsOptions(config);
-  const server = (tlsOptions ? https : http).createServer(tlsOptions || {}, (req, res) => {    if (req.url.startsWith("/api/")) {
+  const requestHandler = (req, res) => {
+    if (req.url.startsWith("/api/")) {
       handleApi(config, req, res).catch((err) =>
         send(res, 500, { error: err.message }),
       );
       return;
     }
     if (!serveStatic(req, res)) send(res, 404, "not found");
-  });
+  };
+  const httpServer = http.createServer(requestHandler);
+  let server;
+  let httpsServer = null;
+  if (tlsOptions) {
+    httpsServer = https.createServer(tlsOptions, requestHandler);
+    // Same-port dual http/https: peek the first byte of each connection —
+    // a TLS ClientHello starts with 0x16, plain HTTP does not. Remote
+    // devices get https (secure context → mic works over the LAN) while
+    // http://localhost keeps working on the same port (health probes,
+    // scripts, operator habit). No second port, no llmapi:8788 conflict.
+    // (read(1) + unshift — the pause/once('data') sniff pattern hangs the
+    // TLS handshake on Node ≥ 19; the readable/read path works everywhere.)
+    server = net.createServer((socket) => {
+      // Pre-routing socket errors (scanner probes, RST before any data) are
+      // per-connection noise — never crash the process.
+      socket.on("error", () => socket.destroy());
+      const route = () => {
+        const buf = socket.read(1);
+        if (!buf) { socket.once("readable", route); return; }
+        socket.unshift(buf);
+        (buf[0] === 0x16 ? httpsServer : httpServer).emit("connection", socket);
+      };
+      socket.once("readable", route);
+    });
+    // TLS handshake failures (scanner probes, http client misdirected to the
+    // https path) are per-connection noise — never crash the process.
+    httpsServer.on("tlsClientError", () => {});
+  } else {
+    server = httpServer;
+  }
   // Exposed for the startup log in start() (scheme selection).
   server.tlsActive = Boolean(tlsOptions);
 
@@ -2268,7 +2312,7 @@ function createServer(config) {
   if (WebSocket && WebSocket.WebSocketServer) {
     const wss = new WebSocket.WebSocketServer({ noServer: true });
 
-    server.on('upgrade', (req, socket, head) => {
+    const upgradeHandler = (req, socket, head) => {
       // Only accept the feeds endpoint; other upgrades (if any) are ignored.
       const u = new URL(req.url, `http://${req.headers.host}`);
       if (u.pathname !== '/ws') {
@@ -2343,7 +2387,10 @@ function createServer(config) {
         // Welcome / ready (client still needs to subscribe)
         wsSend(ws, { feed: 'ready', ok: true });
       });
-    });
+    };
+    // WebSockets ride both protocols (wss over the https path, ws over http).
+    httpServer.on('upgrade', upgradeHandler);
+    if (httpsServer) httpsServer.on('upgrade', upgradeHandler);
   }
 
   return server;
@@ -2467,6 +2514,8 @@ function start(hubInput) {
     const logLine = openUrl !== bindUrl
       ? `bizagent-control-plane listening on ${config.host}:${config.port} poll=${config.pollSeconds}s (open ${openUrl})`
       : `bizagent-control-plane listening on ${bindUrl} poll=${config.pollSeconds}s`;
+    // Same-port dual protocol: with TLS on, plain http keeps working too.
+    const dualNote = server.tlsActive ? " — http:// also accepted on this port" : "";
 
     logEvent(config.hub, {
       event: 'control_plane_start',
@@ -2477,7 +2526,7 @@ function start(hubInput) {
       bind_url: bindUrl,
       tls: Boolean(server.tlsActive)
     });
-    console.log(`${new Date().toISOString()} ${logLine}`);
+    console.log(`${new Date().toISOString()} ${logLine}${dualNote}`);
   });
   return server;
 }
