@@ -274,6 +274,16 @@ grep -q 'install-oddbeaker-stt' "$SCRIPT" \
 grep -q 'BIZAGENT_STT_URL' "$ROOT/scripts/install-oddbeaker-stt.sh" \
   || fail "install-oddbeaker-stt missing URL persistence"
 
+# upgrade health probes must read the URL the CP actually uses (shell env wins,
+# else .bizagent/env) — a plain "${VAR:-default}" probes the default URL while
+# the running CP keeps probing a configured custom/dead one (mic greyed, log clean)
+grep -q 'env_var_or BIZAGENT_STT_URL' "$SCRIPT" \
+  || fail "upgrade.sh STT health probe ignores .bizagent/env BIZAGENT_STT_URL"
+grep -q 'env_var_or BIZAGENT_TTS_URL' "$SCRIPT" \
+  || fail "upgrade.sh TTS health probe ignores .bizagent/env BIZAGENT_TTS_URL"
+grep -q 'env_var_or()' "$SCRIPT" \
+  || fail "upgrade.sh missing env_var_or helper"
+
 # llmapi migration wired into upgrade + factory-reset (framework path lists in sync)
 grep -q 'ensure_llmapi_on_upgrade' "$SCRIPT" \
   || fail "upgrade.sh missing llmapi ensure step"

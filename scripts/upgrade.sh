@@ -285,6 +285,26 @@ if [[ -f "$HUB/agent-runtime/src/index.js" ]] && command -v node >/dev/null 2>&1
 fi
 
 # Optional: install oddbeaker-tts when missing (never clobber BIZAGENT_TTS_VOICE).
+
+# Read a config value for the health probes below: the shell environment wins,
+# else the value the control plane actually loads at start (.bizagent/env).
+# The CP sources .bizagent/env only inside control-plane.sh, so a plain
+# "${BIZAGENT_TTS_URL:-default}" here probes the DEFAULT URL even when the hub
+# is configured with a custom one — the "already healthy" check then passes on
+# the wrong URL while the running CP keeps probing a dead one (mic/TTS greyed
+# with the real URL in the tooltip, upgrade log still "clean").
+env_var_or() {
+  local key="$1" default="$2" val=""
+  eval "val=\"\${${key}:-}\""
+  if [[ -z "$val" && -f "$HUB/.bizagent/env" ]]; then
+    val="$(grep -E "^(export[[:space:]]+)?${key}=" "$HUB/.bizagent/env" 2>/dev/null \
+      | tail -1 \
+      | sed -E "s/^(export[[:space:]]+)?${key}=//" \
+      | sed -e "s/^\"//" -e "s/\"$//" -e "s/^'//" -e "s/'$//")"
+  fi
+  printf '%s' "${val:-$default}"
+}
+
 ensure_tts_on_upgrade() {
   if [[ -n "${BIZAGENT_SKIP_TTS:-}" || "$WITH_TTS" == "0" ]]; then
     log "upgrade: skipping oddbeaker-tts (BIZAGENT_SKIP_TTS or --no-tts)"
@@ -295,8 +315,9 @@ ensure_tts_on_upgrade() {
     log "upgrade: install-oddbeaker-tts.sh not present — skip TTS"
     return 0
   fi
-  local tts_url="${BIZAGENT_TTS_URL:-http://127.0.0.1:9201}"
+  local tts_url="$(env_var_or BIZAGENT_TTS_URL "http://127.0.0.1:9201")"
   tts_url="${tts_url%/}"
+  log "upgrade: oddbeaker-tts health probe: $tts_url/health"
   local healthy=0
   if curl -fsS --max-time 2 "$tts_url/health" >/dev/null 2>&1; then
     healthy=1
@@ -353,8 +374,9 @@ ensure_stt_on_upgrade() {
     log "upgrade: install-oddbeaker-stt.sh not present — skip STT"
     return 0
   fi
-  local stt_url="${BIZAGENT_STT_URL:-http://127.0.0.1:9202}"
+  local stt_url="$(env_var_or BIZAGENT_STT_URL "http://127.0.0.1:9202")"
   stt_url="${stt_url%/}"
+  log "upgrade: oddbeaker-stt health probe: $stt_url/health"
   local healthy=0
   if curl -fsS --max-time 2 "$stt_url/health" >/dev/null 2>&1; then
     healthy=1
