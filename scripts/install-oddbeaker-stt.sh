@@ -19,7 +19,7 @@
 #   BIZAGENT_STT_DIR        Install root (default ~/.bizagent/oddbeaker-stt)
 #   BIZAGENT_SKIP_STT=1     Exit 0 immediately (installer/upgrade honor this)
 #   BIZAGENT_NONINTERACTIVE Non-empty → no prompts
-#   BIZAGENT_STT_REF        Git ref when cloning (default: master)
+#   BIZAGENT_STT_REF        Git ref when cloning (default: main)
 #   BIZAGENT_STT_PYTHON     Python interpreter for the venv (default: python3;
 #                           needs >=3.10)
 #
@@ -42,7 +42,7 @@ DEFAULT_STT_BIND="127.0.0.1"
 DEFAULT_GIT_HTTPS="https://github.com/OddbeakerLLC/oddbeaker-stt.git"
 DEFAULT_GIT_SSH="ssh://git@github.com/OddbeakerLLC/oddbeaker-stt.git"
 DEFAULT_GIT_SCP="git@github.com:OddbeakerLLC/oddbeaker-stt.git"
-STT_REF="${BIZAGENT_STT_REF:-master}"
+STT_REF="${BIZAGENT_STT_REF:-main}"
 STT_PYTHON="${BIZAGENT_STT_PYTHON:-python3}"
 
 usage() {
@@ -226,8 +226,8 @@ clone_or_link_source() {
     # best-effort fetch
     git -C "$STT_DIR" fetch --quiet origin 2>/dev/null || true
     git -C "$STT_DIR" checkout --quiet "$STT_REF" 2>/dev/null \
-      || git -C "$STT_DIR" checkout --quiet master 2>/dev/null \
       || git -C "$STT_DIR" checkout --quiet main 2>/dev/null \
+      || git -C "$STT_DIR" checkout --quiet master 2>/dev/null \
       || true
     return 0
   fi
