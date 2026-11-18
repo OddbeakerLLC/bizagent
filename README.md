@@ -315,25 +315,6 @@ Install: `scripts/install-llmapi.sh` (systemd) or `scripts/llmapi.sh
 start|status|stop`; default port **8788** (8787 is the control plane's).
 Details: [`docs/LLMAPI-LOGGING.md`](docs/LLMAPI-LOGGING.md).
 
-### Remote access / TLS (mic from other devices)
-
-Browsers only expose the microphone on **secure contexts** (`https://` or
-`http://localhost`), so a console opened from another device over
-`http://<host>:8787` has a disabled mic. Enable TLS — one command:
-
-```bash
-scripts/setup-tls.sh                  # self-signed cert (SANs: hostname, localhost, LAN IPs)
-scripts/control-plane.sh restart     # then open https://<host>:8787 remotely
-```
-
-The control plane serves **http and https on the same port** (protocol
-sniffing), so `http://localhost:8787`, health probes, and scripts keep
-working unchanged. Fresh installs enable TLS by default; `upgrade.sh` turns
-it on for existing installs (`BIZAGENT_SKIP_TLS=1` / `--no-tls` to opt out).
-Bring your own cert with `--cert/--key`. Browser-trust steps, config
-reference, and troubleshooting:
-[`docs/REMOTE-ACCESS-TLS.md`](docs/REMOTE-ACCESS-TLS.md).
-
 ---
 
 ## Control plane

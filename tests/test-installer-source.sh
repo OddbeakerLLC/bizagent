@@ -242,19 +242,3 @@ grep -q 'ancestor/control-plane' "$ROOT/install.sh" \
   || fail "install.sh nesting guard does not detect a hub by control-plane/"
 bash -n "$ROOT/install.sh" || fail "install.sh bash -n failed"
 
-
-# --- Console https (TLS) on fresh installs (2026-11-18) ---------------------
-# The mic needs a secure context on non-localhost origins; fresh installs
-# enable TLS by default via scripts/setup-tls.sh (BIZAGENT_SKIP_TLS opt-out).
-[ -x "$ROOT/scripts/setup-tls.sh" ] \
-  || fail "scripts/setup-tls.sh missing or not executable"
-bash -n "$ROOT/scripts/setup-tls.sh" || fail "setup-tls.sh bash -n failed"
-grep -q 'ensure_tls()' "$ROOT/install.sh" \
-  || fail "install.sh missing ensure_tls step"
-grep -q 'BIZAGENT_SKIP_TLS' "$ROOT/install.sh" \
-  || fail "install.sh must honor BIZAGENT_SKIP_TLS"
-grep -q 'setup-tls.sh' "$ROOT/install.sh" \
-  || fail "install.sh must call scripts/setup-tls.sh"
-grep -q 'ensure_tls$' "$ROOT/install.sh" \
-  || fail "install.sh main flow must call ensure_tls"
-echo "  ok: installer TLS step"

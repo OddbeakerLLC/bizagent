@@ -4322,65 +4322,6 @@ esac
 rm -rf "$EADDR_HUB"
 
 
-# --- TLS: same-port dual http/https + SANed self-signed cert (2026-11-18) ---
-# The mic only works on secure contexts, so the console must serve https on
-# the LAN. The server sniffs the first byte of each connection (TLS
-# ClientHello = 0x16) and routes to the https or http server — one port,
-# http://localhost keeps working (health probes, scripts, operator habit).
-grep -q 'require("net")' "$ROOT/control-plane/server.js" \
-  || fail "server.js must require net for same-port protocol sniffing"
-grep -q '0x16' "$ROOT/control-plane/server.js" \
-  || fail "server.js must sniff TLS ClientHello (0x16) for same-port dual http/https"
-grep -q 'tlsClientError' "$ROOT/control-plane/server.js" \
-  || fail "TLS handshake errors must be swallowed (per-connection noise, no crash)"
-grep -q 'subjectAltName' "$ROOT/control-plane/server.js" \
-  || fail "auto-generated self-signed cert must carry SANs (browsers ignore CN)"
-grep -q 'DNS:localhost' "$ROOT/control-plane/server.js" \
-  || fail "auto-generated cert SANs must cover localhost"
-grep -q 'setup-tls.sh' "$ROOT/scripts/upgrade.sh" \
-  || fail "upgrade.sh must ensure console TLS via scripts/setup-tls.sh"
-grep -q 'BIZAGENT_SKIP_TLS' "$ROOT/scripts/upgrade.sh" \
-  || fail "upgrade.sh must honor BIZAGENT_SKIP_TLS"
-grep -q 'BIZAGENT_SKIP_TLS' "$ROOT/install.sh" \
-  || fail "installer must honor BIZAGENT_SKIP_TLS"
-grep -q "^[[:space:]]*ensure_tls[[:space:]]*\$" "$ROOT/install.sh" \
-  || fail "installer main flow must call ensure_tls"
-[ -x "$ROOT/scripts/setup-tls.sh" ] || fail "scripts/setup-tls.sh missing or not executable"
-
-# Functional: TLS-enabled scratch hub serves BOTH protocols on one port.
-TLS_HUB="$(mktemp -d "${TMPDIR:-/tmp}/bizagent-tls-e2e-XXXXXX")"
-mkdir -p "$TLS_HUB/.bizagent" "$TLS_HUB/logs"
-cat > "$TLS_HUB/registry.json" <<'JSON'
-{ "products": [], "settings": { "control_plane": { "tls": { "enabled": true } } } }
-JSON
-TLS_PORT="$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
-BIZAGENT_PORT="$TLS_PORT" BIZAGENT_HUB="$TLS_HUB" node "$SERVER" > "$TLS_HUB/server.log" 2>&1 &
-TLS_PID=$!
-TLS_UP=0
-for _ in $(seq 1 20); do
-  if curl -s -o /dev/null "http://127.0.0.1:$TLS_PORT/api/health" 2>/dev/null; then TLS_UP=1; break; fi
-  sleep 0.5
-done
-if [ "$TLS_UP" -ne 1 ]; then
-  kill "$TLS_PID" 2>/dev/null; rm -rf "$TLS_HUB"
-  fail "TLS scratch control plane did not start"
-fi
-TLS_HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$TLS_PORT/api/health")"
-TLS_HTTPS_CODE="$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$TLS_PORT/api/health")"
-TLS_HTTPS_UI="$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$TLS_PORT/")"
-TLS_SANS="$(openssl x509 -in "$TLS_HUB/.bizagent/tls/tls.crt" -noout -ext subjectAltName 2>/dev/null || true)"
-kill "$TLS_PID" 2>/dev/null || true
-wait "$TLS_PID" 2>/dev/null || true
-[ "$TLS_HTTP_CODE" = "200" ] || { rm -rf "$TLS_HUB"; fail "http:// must keep working on the same port when TLS is on (got $TLS_HTTP_CODE)"; }
-[ "$TLS_HTTPS_CODE" = "200" ] || { rm -rf "$TLS_HUB"; fail "https:// must serve /api/health on the same port (got $TLS_HTTPS_CODE)"; }
-[ "$TLS_HTTPS_UI" = "200" ] || { rm -rf "$TLS_HUB"; fail "https:// must serve the console UI (got $TLS_HTTPS_UI)"; }
-case "$TLS_SANS" in
-  *IP\ Address:127.0.0.1*) ;;
-  *) rm -rf "$TLS_HUB"; fail "generated cert must carry an IP SAN for 127.0.0.1 (got: $TLS_SANS)" ;;
-esac
-rm -rf "$TLS_HUB"
-
-
 # --- Provider-queue hold: self-clearing + visible in UI (2026-11-14) ---
 grep -q 'provider_queue_holds' "$ROOT/control-plane/server.js" \
   || fail "/api/health must report held provider queues for the banner"

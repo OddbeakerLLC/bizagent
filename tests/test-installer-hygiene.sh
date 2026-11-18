@@ -140,7 +140,7 @@ grep -qE '^cli\.json$' "$ROOT/.gitignore" \
 # Every warn in the installers must be either followed by a die/non-zero exit
 # within a few lines, or sit on the soft-fail allowlist below (optional
 # components whose failure is explicitly reported and survivable).
-SOFT_FAIL='TTS|tts|STT|stt|mic dictation|health probe|Health watchdog|WSL|wsl|curl not found|Homebrew|cron\.|service cron|detach|remove public origin|check it manually|may only be reachable|browser speechSynthesis|stays optional|voice in|Re-run|API key|BIZAGENT_AUTO_UPDATE|Enter 1|re-enter|Please enter|existing registry|welcome seed|seed-first-run|llmapi service unit|as a process|TLS|tls|console stays http'
+SOFT_FAIL='TTS|tts|STT|stt|mic dictation|health probe|Health watchdog|WSL|wsl|curl not found|Homebrew|cron\.|service cron|detach|remove public origin|check it manually|may only be reachable|browser speechSynthesis|stays optional|voice in|Re-run|API key|BIZAGENT_AUTO_UPDATE|Enter 1|re-enter|Please enter|existing registry|welcome seed|seed-first-run|llmapi service unit|as a process'
 scan_warns() {
   local f="$1"
   local n text window

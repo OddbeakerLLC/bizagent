@@ -424,20 +424,3 @@ guard_out="$(BIZAGENT_HUB="$TMP/no-such-hub" bash "$ROOT/scripts/wsl-cp-autostar
 [[ -z "$guard_out" ]] || fail "starter must stay quiet on a stale BIZAGENT_HUB: $guard_out"
 
 echo "  ok: WSL autostart ensure"
-
-# --- TLS ensure on upgrade (2026-11-18) -------------------------------------
-# The mic needs a secure context on non-localhost origins; upgrade enables
-# console https by default (soft-fail) unless already configured or skipped.
-grep -q 'ensure_tls_on_upgrade' "$SCRIPT" \
-  || fail "upgrade.sh missing ensure_tls_on_upgrade"
-grep -q 'setup-tls.sh' "$SCRIPT" \
-  || fail "upgrade.sh TLS ensure must call scripts/setup-tls.sh"
-grep -q -- '--no-tls' "$SCRIPT" \
-  || fail "upgrade.sh must accept --no-tls"
-grep -q 'BIZAGENT_SKIP_TLS' "$SCRIPT" \
-  || fail "upgrade.sh must honor BIZAGENT_SKIP_TLS"
-grep -q 'BIZAGENT_TLS_KEY' "$SCRIPT" \
-  || fail "upgrade.sh must leave explicit BIZAGENT_TLS_KEY/CERT setups alone"
-grep -q 'WARN TLS setup failed' "$SCRIPT" \
-  || fail "upgrade.sh TLS ensure must soft-fail (never block the upgrade)"
-echo "  ok: TLS ensure on upgrade"

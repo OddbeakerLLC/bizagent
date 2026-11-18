@@ -1589,38 +1589,6 @@ ensure_oddbeaker_stt() {
   ok "oddbeaker-stt step finished (BIZAGENT_STT_URL in .bizagent/env when set)"
 }
 
-# --- console https (TLS) ---
-# Browsers only expose the mic on secure contexts, so a headless box reached
-# from another device over http://<LAN-IP>:8787 has a disabled mic. Enable
-# TLS by default on fresh installs: scripts/setup-tls.sh generates a
-# self-signed cert with SANs (hostname, localhost, LAN IPs) and flips
-# settings.control_plane.tls.enabled. The control plane serves http AND
-# https on the same port (protocol sniffing), so localhost http keeps
-# working. Soft-fail: a TLS problem never blocks the install.
-ensure_tls() {
-  if [[ -n "${BIZAGENT_SKIP_TLS:-}" ]]; then
-    ok "skipping console https setup (BIZAGENT_SKIP_TLS)"
-    return 0
-  fi
-  local helper=""
-  if [[ -x "$INSTALL_DIR/scripts/setup-tls.sh" ]]; then
-    helper="$INSTALL_DIR/scripts/setup-tls.sh"
-  elif [[ -x "$(dirname "${BASH_SOURCE[0]}")/scripts/setup-tls.sh" ]]; then
-    helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/setup-tls.sh"
-  fi
-  if [[ -z "$helper" ]]; then
-    warn "scripts/setup-tls.sh missing — console stays http (mic needs https on remote devices)"
-    return 0
-  fi
-  step "Console https (TLS, self-signed cert)"
-  note "Serves https AND http on the same port; the mic only works over https from remote devices."
-  if bash "$helper" --hub "$INSTALL_DIR" --yes; then
-    ok "Console https enabled (self-signed cert; see the printed browser-trust step)"
-  else
-    warn "TLS setup failed — console stays http; run scripts/setup-tls.sh later"
-  fi
-}
-
 # --- out-of-process health watchdog (survival instinct) ---
 # Installs the systemd user timer (or cron fallback) for scripts/health-probe.sh
 # so the operator does not have to run scripts/install-health-timer.sh by hand.
@@ -1897,13 +1865,6 @@ PY
 
   printf "\n${BOLD}Open this URL in your browser to set up BizAgent:${NC}\n\n"
   printf "  ${BOLD}http://localhost:%s${NC}\n\n" "$port"
-  # With TLS enabled (fresh installs default), remote devices must use https
-  # for the mic (secure context). Same port — the server speaks both.
-  if grep -q '"tls"' "$INSTALL_DIR/registry.json" 2>/dev/null \
-      && node -e 'try{const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const t=r&&r.settings&&r.settings.control_plane&&r.settings.control_plane.tls||{};process.exit((t.enabled||t.key||t.cert)?0:1)}catch(_e){process.exit(1)}' "$INSTALL_DIR/registry.json" 2>/dev/null; then
-    note "Remote devices: open https://<this-host-LAN-IP>:$port — the mic needs https (http://localhost keeps working)."
-    note "Self-signed cert: trust it once (see docs/REMOTE-ACCESS-TLS.md) or click through the browser warning."
-  fi
 
   if command -v xdg-open >/dev/null 2>&1; then
     xdg-open "http://localhost:$port" 2>/dev/null &
@@ -1987,7 +1948,6 @@ main() {
   write_registry_seed
   write_env_file
   write_llmapi_env_line
-  ensure_tls
   apply_industry_template
   ensure_oddbeaker_tts
   ensure_oddbeaker_stt
