@@ -16,8 +16,14 @@
 #   BIZAGENT_TTS_VOICE      Preferred voice id (default af_heart when prompting skipped)
 #   BIZAGENT_TTS_URL        Service base URL (default http://<LAN-IP>:9201 — the
 #                           host's LAN address, so other devices/hosts can reach
-#                           it; falls back to 127.0.0.1 when no LAN IP is found)
-#   BIZAGENT_TTS_HOST       Advertised host for the URL (default: detected LAN IPv4)
+#                           it; falls back to 127.0.0.1 when no LAN IP is found.
+#                           On WSL the default is http://127.0.0.1:9201 — the
+#                           WSL NAT IP is ephemeral (changes on Windows reboot)
+#                           and unreachable from other devices without a
+#                           portproxy, so a recorded 172.x URL silently goes
+#                           stale and the console falls back to browser TTS)
+#   BIZAGENT_TTS_HOST       Advertised host for the URL (default: detected LAN
+#                           IPv4; 127.0.0.1 on WSL)
 #   BIZAGENT_TTS_BIND       Address the daemon binds (default 0.0.0.0; set
 #                           127.0.0.1 to keep it loopback-only)
 #   BIZAGENT_TTS_DIR        Install root (default ~/.bizagent/oddbeaker-tts)
@@ -153,7 +159,26 @@ detect_lan_ip() {
 }
 
 TTS_BIND="${BIZAGENT_TTS_BIND:-0.0.0.0}"
-TTS_HOST="${BIZAGENT_TTS_HOST:-$(detect_lan_ip)}"
+
+# WSL2 (NAT mode): the WSL eth0 address is an ephemeral 172.16/12 NAT IP that
+# changes on every Windows reboot, and LAN devices cannot reach it without a
+# netsh portproxy — so a recorded http://172.x.x.x:9201 silently goes stale and
+# the control plane's TTS health probe starts failing (console falls back to
+# browser speechSynthesis with no error anywhere). The only consumer of this
+# URL — the same-host control plane proxy — is better served by loopback, so
+# WSL defaults the advertised host to 127.0.0.1. The bind stays 0.0.0.0
+# (harmless; a portproxy can still target the current WSL IP). Explicit
+# BIZAGENT_TTS_HOST / BIZAGENT_TTS_URL always win.
+is_wsl_host() {
+  grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null
+}
+
+default_tts_host() {
+  if is_wsl_host; then printf '%s\n' "127.0.0.1"; return 0; fi
+  detect_lan_ip
+}
+
+TTS_HOST="${BIZAGENT_TTS_HOST:-$(default_tts_host)}"
 TTS_URL="$(printf '%s' "${BIZAGENT_TTS_URL:-http://$TTS_HOST:$DEFAULT_TTS_PORT}" | sed 's:/*$::')"
 TTS_DIR="${BIZAGENT_TTS_DIR:-$HOME/.bizagent/oddbeaker-tts}"
 ENV_FILE="$HUB/.bizagent/env"

@@ -153,6 +153,13 @@ grep -q 'BIZAGENT_TTS_BIND' "$ROOT/scripts/install-oddbeaker-tts.sh" \
   || fail "install-oddbeaker-tts.sh has no bind override (BIZAGENT_TTS_BIND)"
 grep -q 'BIZAGENT_TTS_HOST' "$ROOT/scripts/install-oddbeaker-tts.sh" \
   || fail "install-oddbeaker-tts.sh has no advertised-host override (BIZAGENT_TTS_HOST)"
+# WSL default: loopback URL (the WSL NAT IP is ephemeral across Windows
+# reboots — a recorded 172.x URL goes stale and the console silently falls
+# back to browser TTS; the CP is same-host so loopback is always right there).
+grep -q 'is_wsl_host' "$ROOT/scripts/install-oddbeaker-tts.sh" \
+  || fail "install-oddbeaker-tts.sh has no WSL detection (is_wsl_host)"
+grep -q 'default_tts_host' "$ROOT/scripts/install-oddbeaker-tts.sh" \
+  || fail "install-oddbeaker-tts.sh has no WSL-aware default host (default_tts_host)"
 grep -Eq 'DEFAULT_TTS_URL="http://(127\.0\.0\.1|localhost)' "$ROOT/scripts/install-oddbeaker-tts.sh" \
   && fail "install-oddbeaker-tts.sh still defaults the TTS URL to localhost"
 grep -q 'BIZAGENT_TTS_URL' "$ROOT/.bizagent/env.example" \
@@ -169,8 +176,12 @@ if curl -fsS --max-time 2 http://127.0.0.1:9201/health 2>/dev/null | grep -q '"s
       --hub "$TTS_TMP_HUB" --yes >/dev/null 2>&1; then
     grep -E '^BIZAGENT_TTS_URL=http://' "$TTS_TMP_HUB/.bizagent/env" >/dev/null \
       || fail "installer did not write BIZAGENT_TTS_URL to hub env"
-    grep -E '^BIZAGENT_TTS_URL=http://(127\.0\.0\.1|localhost)(:|/|$)' "$TTS_TMP_HUB/.bizagent/env" >/dev/null \
-      && fail "installer wrote a localhost BIZAGENT_TTS_URL"
+    # On WSL a loopback URL is the CORRECT default (ephemeral NAT IP) — only
+    # flag localhost on native hosts.
+    if ! grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null; then
+      grep -E '^BIZAGENT_TTS_URL=http://(127\.0\.0\.1|localhost)(:|/|$)' "$TTS_TMP_HUB/.bizagent/env" >/dev/null \
+        && fail "installer wrote a localhost BIZAGENT_TTS_URL"
+    fi
   else
     fail "install-oddbeaker-tts.sh failed on the already-running path (temp hub)"
   fi
