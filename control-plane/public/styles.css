@@ -805,6 +805,12 @@ body.logs-page {
   opacity: 0.45;
   cursor: not-allowed;
 }
+/* STT down: greyed like disabled but still clickable — the click re-probes
+ * the service (a disabled button never fires click events). */
+.mic-btn.stt-down {
+  opacity: 0.45;
+  cursor: progress;
+}
 .attach-recipient {
   flex: 0 0 auto;
   max-width: 180px;

@@ -2406,6 +2406,45 @@ let micRecorder = null;
 let micStream = null;
 let micChunks = [];
 let sttDownLogged = false;
+let sttLastError = '';
+let sttLastUrl = '';
+let sttReprobeTimer = null;
+let sttReprobeStep = 0;
+const STT_REPROBE_STEPS_MS = [10 * 1000, 20 * 1000, 40 * 1000];
+const STT_REPROBE_CAP_MS = 60 * 1000;
+
+/** While STT is believed down, keep re-probing (10s → 20s → 40s, then 60s cap)
+ * so a transient failure (engine still loading its model after a restart,
+ * control-plane restart, brief network hiccup) recovers on its own instead of
+ * leaving the mic disabled until the next page reload. */
+function scheduleSttReprobe() {
+  if (typeof setTimeout !== 'function') return;
+  if (sttReprobeTimer) clearTimeout(sttReprobeTimer);
+  const delay = sttReprobeStep < STT_REPROBE_STEPS_MS.length
+    ? STT_REPROBE_STEPS_MS[sttReprobeStep]
+    : STT_REPROBE_CAP_MS;
+  sttReprobeStep += 1;
+  sttReprobeTimer = setTimeout(() => {
+    sttReprobeTimer = null;
+    if (sttAvailable === false) probeSttServer(true).catch(() => {});
+  }, delay);
+}
+
+/** Re-probe as soon as the tab is looked at again or the network returns. */
+function bindSttReprobeListeners() {
+  if (bindSttReprobeListeners.bound) return;
+  bindSttReprobeListeners.bound = true;
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && sttAvailable === false) probeSttServer(true).catch(() => {});
+    });
+  }
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('online', () => {
+      if (sttAvailable === false) probeSttServer(true).catch(() => {});
+    });
+  }
+}
 
 /** Probe the STT service (via the control-plane proxy) and update the mic button. */
 async function probeSttServer(force) {
@@ -2421,15 +2460,29 @@ async function probeSttServer(force) {
       if (res.status === 401 || res.status === 403) return sttAvailable === true;
       sttAvailable = false;
       sttProbedAt = now;
+      sttLastError = `health check failed (HTTP ${res.status})`;
       updateMicButtonUi();
+      scheduleSttReprobe();
       return false;
     }
     const data = await res.json().catch(() => ({}));
     sttAvailable = !!(data && data.available);
     sttProbedAt = now;
+    if (sttAvailable) {
+      sttLastError = '';
+      sttLastUrl = '';
+      sttReprobeStep = 0;
+      if (sttReprobeTimer) { clearTimeout(sttReprobeTimer); sttReprobeTimer = null; }
+    } else {
+      sttLastError = (data && data.error) || 'service reported unavailable';
+      sttLastUrl = (data && data.url) || '';
+      scheduleSttReprobe();
+    }
   } catch (_) {
     sttAvailable = false;
     sttProbedAt = now;
+    sttLastError = 'health check unreachable';
+    scheduleSttReprobe();
   }
   updateMicButtonUi();
   return sttAvailable === true;
@@ -2462,10 +2515,19 @@ function updateMicButtonUi() {
   btn.hidden = false;
   btn.classList.toggle('recording', !!micRecording);
   if (sttAvailable === false) {
-    btn.disabled = true;
+    // Greyed but CLICKABLE: a disabled button never fires click events, which
+    // made the click-to-re-probe path unreachable — one transient probe
+    // failure (e.g. the engine still loading its model after a restart, so
+    // the port refuses connections while systemctl already says "running")
+    // then kept the mic disabled until the next page reload.
     btn.classList.remove('recording');
-    // Observable, not silent: the tooltip carries the exact recovery command.
-    btn.title = 'Voice input unavailable: STT not running — start with: systemctl --user start oddbeaker-stt';
+    btn.classList.add('stt-down');
+    btn.setAttribute('aria-disabled', 'true');
+    // Observable, not silent: the tooltip carries the exact recovery command
+    // plus the last probe failure, so a wrong BIZAGENT_STT_URL or an outdated
+    // control plane (HTTP 404) is diagnosable instead of reading as "down".
+    btn.title = 'Voice input unavailable: STT not running — start with: systemctl --user start oddbeaker-stt'
+      + (sttLastError ? ` (last check: ${sttLastError}${sttLastUrl ? ` at ${sttLastUrl}` : ''})` : '');
     if (!sttDownLogged) {
       sttDownLogged = true;
       try {
@@ -2474,12 +2536,15 @@ function updateMicButtonUi() {
           + ' Health: http://127.0.0.1:9202/health (proxied at /api/stt/health).'
           + ' Restart: systemctl --user restart oddbeaker-stt'
           + ' (or re-run scripts/install-oddbeaker-stt.sh).'
+          + (sttLastError ? ` Last check: ${sttLastError}${sttLastUrl ? ` at ${sttLastUrl}` : ''}.` : '')
         );
       } catch (_) { /* ignore */ }
     }
   } else {
     sttDownLogged = false;
     btn.disabled = false;
+    btn.classList.remove('stt-down');
+    btn.removeAttribute('aria-disabled');
     btn.title = micRecording ? 'Stop recording' : 'Dictate (speech to text)';
   }
 }
@@ -2508,14 +2573,26 @@ async function transcribeMicBlob(blob) {
   const form = new FormData();
   const ext = blob && blob.type && blob.type.includes('webm') ? 'webm' : 'audio';
   form.append('audio', blob, `dictation.${ext}`);
-  const res = await fetch('/api/stt/transcribe', {
-    method: 'POST',
-    credentials: 'same-origin',
-    body: form,
-  });
+  let res;
+  try {
+    res = await fetch('/api/stt/transcribe', {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: form,
+    });
+  } catch (_) {
+    const err = new Error('STT service unreachable');
+    err.sttDown = true;
+    throw err;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data && data.error ? data.error : `STT failed (${res.status})`);
+    const err = new Error(data && data.error ? data.error : `STT failed (${res.status})`);
+    // Only a control-plane→engine transport failure means "service down";
+    // a 4xx/5xx from the engine itself means the engine is UP but the request
+    // failed (bad audio, engine error) — disabling the mic there was wrong.
+    err.sttDown = res.status === 502 || res.status === 503;
+    throw err;
   }
   return data;
 }
@@ -2573,9 +2650,13 @@ async function toggleMicRecording() {
       setAuthStatus(displayName ? `Signed in as ${displayName}` : 'Signed in', 'ok');
     } catch (err) {
       showMicHint(err.message || 'Speech to text failed. Chat input unaffected.');
-      sttAvailable = false;
-      sttProbedAt = Date.now();
-      updateMicButtonUi();
+      if (err && err.sttDown) {
+        sttAvailable = false;
+        sttProbedAt = Date.now();
+        sttLastError = err.message || 'transcribe unreachable';
+        updateMicButtonUi();
+        scheduleSttReprobe();
+      }
     }
   };
   recorder.onerror = () => {
@@ -2618,6 +2699,7 @@ function bindMicButton() {
 /** Probe STT after the session is ready (same pattern as refreshTtsServerProbe). */
 function refreshSttProbe() {
   bindMicButton();
+  bindSttReprobeListeners();
   probeSttServer(true).catch(() => {});
 }
 

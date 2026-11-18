@@ -4424,6 +4424,50 @@ if (!/install-oddbeaker-stt\.sh/.test(src)) process.exit(1);
 if (!/9202\/health/.test(src)) process.exit(1);
 NODE
 [ $? -eq 0 ] || fail "STT-down mic state must be observable: tooltip with start command + one-time console.info recovery line"
+# STT-down recovery (2026-11-18 follow-up): a transient probe failure (engine
+# still loading its model after a restart — systemctl says "running" while
+# :9202 refuses connections) must not disable the mic until reload. The button
+# stays clickable so click-to-re-probe works, re-probes are scheduled
+# automatically, and the last probe error is surfaced for diagnosis.
+node - "$ROOT/control-plane/public/app.js" <<'NODE'
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const m = src.match(/function updateMicButtonUi\(\) \{[\s\S]*?\n\}/);
+if (!m) process.exit(1);
+const fn = m[0];
+const at = fn.indexOf('if (sttAvailable === false) {');
+if (at < 0) process.exit(1);
+const down = fn.slice(at);
+// The STT-down branch must not use the disabled attribute (clicks on a
+// disabled button never fire, which made re-probe-on-click unreachable).
+if (/btn\.disabled = true/.test(down)) process.exit(1);
+if (!/aria-disabled/.test(down)) process.exit(1);
+if (!/stt-down/.test(down)) process.exit(1);
+if (!/sttLastError/.test(down)) process.exit(1);
+NODE
+[ $? -eq 0 ] || fail "STT-down mic must stay clickable (aria-disabled + stt-down class, never btn.disabled) and surface the last probe error"
+grep -q "mic-btn.stt-down" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles.css must style the STT-down mic state"
+grep -q "function scheduleSttReprobe" "$ROOT/control-plane/public/app.js" \
+  || fail "app.js must schedule automatic STT re-probes while down"
+grep -q "visibilitychange" "$ROOT/control-plane/public/app.js" \
+  || fail "app.js must re-probe STT when the tab becomes visible again"
+node - "$ROOT/control-plane/public/app.js" <<'NODE'
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const m = src.match(/async function transcribeMicBlob\(blob\) \{[\s\S]*?\n\}/);
+if (!m) process.exit(1);
+const fn = m[0];
+const down = fn.match(/err\.sttDown = res\.status === 502[^;]+;/);
+if (!down || !/503/.test(down[0])) process.exit(1);
+// The recorder.onstop catch must disable + schedule a re-probe only for
+// transport-shaped failures (err.sttDown), not for every transcribe error.
+const onstop = src.match(/recorder\.onstop = async \(\) => \{[\s\S]*?\n  \};/);
+if (!onstop) process.exit(1);
+if (!/err && err\.sttDown/.test(onstop[0])) process.exit(1);
+if (!/scheduleSttReprobe\(\)/.test(onstop[0])) process.exit(1);
+NODE
+[ $? -eq 0 ] || fail "transcribe failures must mark STT down only on transport errors (502/503), and the onstop catch must re-probe via scheduleSttReprobe"
 
 
 echo "  ok: control-plane"
