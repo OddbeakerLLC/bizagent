@@ -2706,6 +2706,117 @@ NODE
     fail "renderMarkdown regression: numbers in chat messages render as literal 'undefined'"
   fi
 
+  # Regression (hub dispatch 2026-11-19): speak-only slash/colon pronunciation —
+  # numeric/numeric slashes read as fractions ("3/5" → "3 of 5"), 3+ word
+  # chains comma-join ("this/that/other" → "this, that, other"), clock times
+  # read as hours/minutes(/seconds), ratio-shaped colons read "by", and unit
+  # slashes expand ("km/h"). Paths must keep hitting pathToSpeech, and the
+  # existing decimal/dot/URL/tilde behavior must not regress.
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(`${root}/control-plane/public/app.js`, 'utf8');
+const noop = () => {};
+const el = () => ({
+  addEventListener: noop, textContent: '', innerHTML: '', dataset: {}, value: '',
+  style: {}, classList: { toggle: noop, add: noop, remove: noop, contains: () => false },
+  setAttribute: noop, getAttribute: () => null, appendChild: noop, removeChild: noop,
+  querySelector: () => null, querySelectorAll: () => [], title: '', disabled: false,
+  checked: false, focus: noop, click: noop,
+});
+const sandbox = {
+  document: { getElementById: () => el(), querySelector: () => null, querySelectorAll: () => [], createElement: el, addEventListener: noop, body: el(), documentElement: el() },
+  setInterval: () => 0, setTimeout: () => 0, clearInterval: noop, clearTimeout: noop,
+  localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  navigator: { userAgent: 'node-test' },
+  location: { hash: '', href: 'http://localhost/', pathname: '/', search: '' },
+  history: { replaceState: noop, pushState: noop },
+  speechSynthesis: undefined, SpeechSynthesisUtterance: function () {},
+  Audio: function () { this.play = () => Promise.resolve(); this.pause = noop; },
+  URL, Blob: function () {}, fetch: () => Promise.reject(new Error('no network in test')),
+  EventSource: function() { this.onmessage = null; this.onerror = null; this.close = noop; },
+  console, addEventListener: noop, removeEventListener: noop,
+};
+sandbox.window = sandbox; sandbox.self = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox);
+const p = (s) => sandbox.pronounceForSpeech(s);
+const sc = (s) => sandbox.scrubDenseSpeechTokens(s);
+const eqCases = [
+  // Operator case 1: numeric/numeric slash → fraction/ratio "of".
+  ['p 3/5', p('3/5'), '3 of 5'],
+  ['p 1/2', p('1/2'), '1 of 2'],
+  ['p 10/20', p('10/20'), '10 of 20'],
+  ['p 3.5/10', p('3.5/10'), '3 point 5 of 10'],
+  // Operator case 2: two-word slash → "or" (existing, still exact-two only).
+  ['p this/that', p('this/that'), 'this or that'],
+  // Operator case 3: 3+ word chains comma-join (used to fall through raw).
+  ['p chain', p('this/that/other/etc'), 'this, that, other, etc'],
+  ['sc chain', sc('this/that/other'), 'this, that, other'],
+  // Operator case 4: clock times vs ratios.
+  ['p hms', p('12:34:56'), 'twelve hours, thirty four minutes, fifty six seconds'],
+  ['p hm', p('12:34'), 'twelve hours, thirty four minutes'],
+  ['p 1:01:02', p('1:01:02'), 'one hour, one minute, two seconds'],
+  ['p 16:9', p('16:9'), '16 by 9'],
+  ['p 9:16', p('9:16'), '9 by 16'],
+  ['p 16:10', p('16:10'), '16 by 10'],
+  ['p 1920:1080', p('1920:1080'), '1920 by 1080'],
+  // Additional implemented cases.
+  ['p kmh', p('90km/h'), '90 kilometers per hour'],
+  ['p kmh sp', p('90 km/h'), '90 kilometers per hour'],
+  ['p MBs', p('100 MB/s'), '100 megabytes per second'],
+  ['p Mbs', p('50 Mb/s'), '50 megabits per second'],
+  ['p w/', p('w/ tests'), 'with tests'],
+  ['p date', p('due 11/19/2026'), 'due 11 slash 19 slash 2026'],
+  ['p 24/7', p('open 24/7.'), 'open twenty four seven.'],
+  ['p 24/7/365', p('24/7/365'), 'twenty four seven three sixty five'],
+  ['p 50/50', p('50/50 chance'), 'fifty fifty chance'],
+  ['p 9/11', p('since 9/11'), 'since nine eleven'],
+  ['p dec chain', p('3.2.1'), '3 point 2 point 1'],
+  ['sc 3/5', sc('3/5'), '3 of 5'],
+  ['sc 12:34', sc('at 12:34'), 'at twelve hours, thirty four minutes'],
+  ['sc kmh', sc('90km/h'), '90 kilometers per hour'],
+  // Idempotence: scrub then pronounce must not double-transform.
+  ['p idem', p(p('3/5 and 12:34')), p('3/5 and 12:34')],
+];
+for (const [label, got, want] of eqCases) {
+  if (got !== want) {
+    console.error(`slash/colon speech case failed ${label}: got "${got}" want "${want}"`);
+    process.exit(30);
+  }
+}
+// Paths still read via pathToSpeech (slash chains must not eat them).
+const pathCases = [
+  [sc('/usr/local/bin'), 'usr local bin'],
+  [sc('control-plane/public/app.js'), 'control-plane public app dot js'],
+  [sc('src/main.js'), 'src main dot js'],
+];
+for (const [got, want] of pathCases) {
+  if (got !== want) {
+    console.error(`path speech regressed: got "${got}" want "${want}"`);
+    process.exit(31);
+  }
+}
+// Existing decimal/dot/URL/tilde behavior unchanged.
+const keepCases = [
+  [p('beakerboard.net'), 'beakerboard dot net'],
+  [p('~280 users'), 'about 280 users'],
+  [p('see https://example.com/docs'), 'see example dot com'],
+  [sc('keep/delete it'), 'keep or delete it'],
+];
+for (const [got, want] of keepCases) {
+  if (got !== want) {
+    console.error(`existing speech behavior regressed: got "${got}" want "${want}"`);
+    process.exit(32);
+  }
+}
+NODE
+  then
+    fail "slash/colon speech pronunciation regression"
+  fi
+
   # Regression (hub dispatch 2026-11-08): console TTS defaults ON for a fresh
   # profile, an explicit OFF persists and wins on reload, first paint reflects
   # the default-on state, and a no-gesture tab degrades gracefully.

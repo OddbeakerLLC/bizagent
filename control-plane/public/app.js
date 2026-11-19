@@ -1555,10 +1555,14 @@ function scrubDenseSpeechTokens(text) {
   t = t.replace(/(\d+(?:,\d{3})*(?:\.\d+)?)\s*~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, '$1 to $2');
   t = t.replace(/~\s*(\d+(?:,\d{3})*(?:\.\d+)?)/g, 'about $1');
   t = t.replace(/\babout\s+about\b/gi, 'about');
+  // Speak-only slash/colon tokens (fractions, word chains, unit slashes, clock
+  // times) BEFORE the path wipes, so prose chains are not eaten as paths.
+  // Absolute/dotted/hyphenated paths are left for the path regexes below.
+  t = pronounceSlashColonTokens(t);
   // Speak-only: slash-separated alternatives "keep/delete" → "keep or delete".
   // Guarded so multi-segment paths (/a/b, a/b/c, ~/x) still hit the path wipes below.
   t = t.replace(/\band\/or\b/gi, 'and or');
-  t = t.replace(/(^|[^\/])\b([A-Za-z]+)\/([A-Za-z]+)\b(?!\/)/g, '$1$2 or $3');
+  t = t.replace(/(^|[^\/])\b([A-Za-z]+)\/([A-Za-z]+)\b(?!\/)(?!\.\w)/g, '$1$2 or $3');
   // Absolute / home / relative multi-segment paths (with or without trailing slash).
   // Home paths require "/" after ~ or ~user so bare "~280" is not treated as a path.
   // Speak paths instead of dropping them (on-screen markdown unchanged).
@@ -1637,6 +1641,121 @@ function restoreProtectedDots(text) {
   return String(text || '').replace(/\uE000/g, '.');
 }
 
+// --- Speak-only slash/colon pronunciation (hub dispatch 2026-11-19) --------
+// Number words for clock times ("12:34" → "twelve hours, thirty four
+// minutes"). 0–999 covers every h/m/s component; anything larger stays
+// numeric for the engine to read.
+const SPEECH_NUM_ONES = [
+  'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
+  'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen',
+  'sixteen', 'seventeen', 'eighteen', 'nineteen',
+];
+const SPEECH_NUM_TENS = [
+  '', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',
+];
+function speakNumberWords(n) {
+  n = Number(n);
+  if (!Number.isFinite(n) || n < 0 || n > 999) return String(n);
+  if (n < 20) return SPEECH_NUM_ONES[n];
+  if (n < 100) {
+    const tens = SPEECH_NUM_TENS[Math.floor(n / 10)];
+    const rest = n % 10;
+    return rest ? `${tens} ${SPEECH_NUM_ONES[rest]}` : tens;
+  }
+  const hundreds = Math.floor(n / 100);
+  const rest = n % 100;
+  return rest
+    ? `${SPEECH_NUM_ONES[hundreds]} hundred ${speakNumberWords(rest)}`
+    : `${SPEECH_NUM_ONES[hundreds]} hundred`;
+}
+
+const SPEECH_METRIC_PREFIX = { k: 'kilo', m: 'mega', g: 'giga', t: 'tera', p: 'peta' };
+// Colon pairs that are near-always ratios (aspect ratios, odds, scores), so
+// they read "by" instead of being misread as clock times ("9:16", "16:10").
+const SPEECH_RATIO_COLONS = new Set([
+  '1:1', '2:1', '1:2', '3:1', '1:3', '3:2', '2:3', '4:3', '3:4', '5:4', '4:5',
+  '5:3', '3:5', '8:5', '5:8', '12:5', '16:9', '9:16', '16:10', '10:16',
+  '21:9', '9:21', '32:9', '9:32', '64:27',
+]);
+
+/**
+ * Speak-only transforms for slash- and colon-separated tokens. Runs BEFORE the
+ * path wipes in scrubDenseSpeechTokens (so prose chains are not eaten as
+ * paths) and again inside pronounceForSpeech — idempotent, because every
+ * output form contains no slashes or colons. Absolute paths (leading "/"),
+ * dotted/hyphenated path-ish tokens and filenames are left for the existing
+ * pathToSpeech wipes; on-screen markdown is never passed through this.
+ */
+function pronounceSlashColonTokens(t) {
+  // Common idioms before the generic numeric rules ("24/7" is not "24 of 7").
+  t = t.replace(/(^|[^\/\w.])24\/7\/365(?!\d)/g, '$1twenty four seven three sixty five');
+  t = t.replace(/(^|[^\/\w.])24\/7(?!\d)/g, '$1twenty four seven');
+  t = t.replace(/(^|[^\/\w.])50\/50(?!\d)/gi, '$1fifty fifty');
+  t = t.replace(/(^|[^\/\w.])9\/11(?!\d)/g, '$1nine eleven');
+
+  // Unit slashes with a per-readable expansion. Longer/specific forms first;
+  // the [^A-Za-z] prefix guard keeps "km/s" from matching the m/s rule and
+  // leaves identifiers like "Xkm/h" alone. A space is added so a glued unit
+  // ("90km/h") does not merge with the number; doubles collapse downstream.
+  t = t.replace(/(^|[^A-Za-z])([kKmMgGtT])B\/s\b/g,
+    (_, pre, p) => `${pre} ${SPEECH_METRIC_PREFIX[p.toLowerCase()]}bytes per second`);
+  t = t.replace(/(^|[^A-Za-z])([kKmMgGtT])b\/s\b/g,
+    (_, pre, p) => `${pre} ${SPEECH_METRIC_PREFIX[p.toLowerCase()]}bits per second`);
+  t = t.replace(/(^|[^A-Za-z])km\/h\b/gi, '$1 kilometers per hour');
+  t = t.replace(/(^|[^A-Za-z])km\/s\b/gi, '$1 kilometers per second');
+  t = t.replace(/(^|[^A-Za-z])mi\/h\b/gi, '$1 miles per hour');
+  t = t.replace(/(^|[^A-Za-z])ft\/s\b/gi, '$1 feet per second');
+  t = t.replace(/(^|[^A-Za-z])cm\/s\b/gi, '$1 centimeters per second');
+  t = t.replace(/(^|[^A-Za-z])m\/s\b/gi, '$1 meters per second');
+  // Single-letter abbreviations the word rules below can never match.
+  t = t.replace(/(^|[^A-Za-z])w\/(?=\s)/gi, '$1with ');
+  t = t.replace(/(^|[^A-Za-z])c\/o\b/gi, '$1care of');
+
+  // 3+ numeric segments (dates like 11/19/2026, multi ratios) → "slash" join —
+  // never "of" chains; a 3-part numeric token is far more likely a date than
+  // a nested fraction. The [^\/\w.] prefix guard keeps absolute paths and
+  // version-ish tokens (v1/2/3) out.
+  t = t.replace(/(^|[^\/\w.])((?:\d+(?:\.\d+)?\/){2,}\d+(?:\.\d+)?)/g,
+    (_, pre, chain) => `${pre}${chain.split('/').join(' slash ')}`);
+
+  // numeric/numeric → fraction/ratio "of" ("3/5" → "3 of 5", "3.5/10" →
+  // "3.5 of 10"; the decimal→point rule runs later). Trailing lookahead keeps
+  // a leftover "a/b/" path tail from partial-matching.
+  t = t.replace(/(^|[^\/\w.])(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)(?![\/\d])/g, '$1$2 of $3');
+
+  // 3+ word chains ("this/that/other/etc") → comma-joined ("this, that,
+  // other, etc"). Guards: pure alphabetic segments only (paths with dots,
+  // digits or hyphens fall through to the path wipes), no leading slash
+  // (absolute paths stay paths), and no ".ext" tail (filenames stay paths).
+  t = t.replace(/(^|[^\w\/.-])([A-Za-z]+(?:\/[A-Za-z]+){2,})(?!\.[A-Za-z0-9]|[/\w-])/g,
+    (_, pre, chain) => `${pre}${chain.split('/').join(', ')}`);
+
+  // Clock times: "12:34:56" → "twelve hours, thirty four minutes, fifty six
+  // seconds"; "12:34" → "twelve hours, thirty four minutes" (singular forms
+  // when the component is 1). Out-of-range or ratio-shaped tokens read "by".
+  t = t.replace(/(^|[^\/.\w:])(\d{1,2}):(\d{1,2}):(\d{1,2})(?![\d:])/g, (m, pre, h, mi, s) => {
+    const hh = +h; const mm = +mi; const ss = +s;
+    if (hh <= 23 && mm <= 59 && ss <= 59) {
+      return `${pre}${speakNumberWords(hh)} ${hh === 1 ? 'hour' : 'hours'}, `
+        + `${speakNumberWords(mm)} ${mm === 1 ? 'minute' : 'minutes'}, `
+        + `${speakNumberWords(ss)} ${ss === 1 ? 'second' : 'seconds'}`;
+    }
+    return `${pre}${hh} by ${mm} by ${ss}`;
+  });
+  t = t.replace(/(^|[^\/.\w:])(\d{1,4}):(\d{1,4})(?![\d:])/g, (m, pre, a, b) => {
+    const aa = +a; const bb = +b;
+    if (SPEECH_RATIO_COLONS.has(`${aa}:${bb}`) || (bb >= 1 && bb <= 9)) {
+      return `${pre}${aa} by ${bb}`;
+    }
+    if (aa <= 23 && bb <= 59) {
+      return `${pre}${speakNumberWords(aa)} ${aa === 1 ? 'hour' : 'hours'}, `
+        + `${speakNumberWords(bb)} ${bb === 1 ? 'minute' : 'minutes'}`;
+    }
+    return `${pre}${aa} by ${bb}`;
+  });
+  return t;
+}
+
 /**
  * Speak-only pronunciation: numeric decimals → "point"; other no-space dotted
  * tokens (hostnames, file.tar.gz, v2.x labels after decimals handled) → "dot".
@@ -1662,11 +1781,13 @@ function pronounceForSpeech(text) {
   t = t.replace(/\babout\s+about\b/gi, 'about');
 
   // Slash-separated alternatives (speak-only): "keep/delete" → "keep or delete".
+  t = pronounceSlashColonTokens(t);
   t = t.replace(/\band\/or\b/gi, 'and or');
-  t = t.replace(/(^|[^\/])\b([A-Za-z]+)\/([A-Za-z]+)\b(?!\/)/g, '$1$2 or $3');
+  t = t.replace(/(^|[^\/])\b([A-Za-z]+)\/([A-Za-z]+)\b(?!\/)(?!\.\w)/g, '$1$2 or $3');
 
-  // 1) digit.digit → point (repeat for 3.1.4-style version chains)
-  t = t.replace(/(\d)\.(\d)/g, '$1 point $2');
+  // 1) digit.digit → point (lookahead keeps 3.1.4-style version chains fully
+  //    covered — "3.2.1" → "3 point 2 point 1", not "3 point 2 dot 1")
+  t = t.replace(/(\d)\.(?=\d)/g, '$1 point ');
   // Collapse accidental double spaces from chained replaces
   t = t.replace(/\s{2,}/g, ' ');
 
