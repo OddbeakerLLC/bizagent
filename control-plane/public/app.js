@@ -4324,6 +4324,15 @@ function bannerDisplayState(h) {
 
 let connectionLostShown = false;
 
+// Unread-reply attention (2026-11-19): replies that landed in a conversation
+// the operator is not viewing surface as banner cards (same visual treatment
+// as error cards). The badge keeps error/pointer lines only.
+function bannerAttentionItems() {
+  return crossChatAlertsCache.filter(
+    (a) => a && a.kind === 'reply' && a.conversationId && a.conversationId !== currentConversation,
+  );
+}
+
 /** Keys the banner is currently displaying (empty when the banner is hidden). */
 function bannerDisplayedErrorKeys(h) {
   // Connection-lost banner replaces the error cards — nothing is being shown,
@@ -4379,9 +4388,10 @@ function renderHealthBanner(h) {
   const queueHolds = state.queueHolds || [];
   const red = state.red;
   const yellow = state.yellow;
+  const attention = bannerAttentionItems();
   if (!safeMode) safeModeNoteShown = false; // hub left safe mode — allow the quiet note again
   connectionLostShown = false;
-  if (!red && !yellow && !queueHolds.length) {
+  if (!red && !yellow && !queueHolds.length && !attention.length) {
     el.hidden = true;
     el.innerHTML = '';
     syncChatBannerDedupe();
@@ -4401,7 +4411,9 @@ function renderHealthBanner(h) {
             ? `Recent agent errors (${visibleErrors.length})`
             : cooldown
               ? 'Dispatches paused — rate-limit cooldown'
-              : `Hub health: ${level}`;
+              : attention.length
+                ? `Response needs your attention (${attention.length})`
+                : `Hub health: ${level}`;
   const details = bannerEscape(bad.slice(0, 4).map((c) => `${c.name}: ${c.detail}`).join(' · '));
   const cooldownHtml = cooldown > 0
     ? `<span class="health-banner-detail">Dispatches paused for ${cooldown}s (rate-limit cooldown) — auto-resumes.</span>`
@@ -4417,6 +4429,18 @@ function renderHealthBanner(h) {
       (wait > 0 ? ` · auto-resumes in ${wait}s` : '') +
       `</span>` +
       `<button type="button" class="health-banner-queue-resume" data-provider="${bannerEscape(q.provider)}" title="Clear the hold and re-dispatch this provider's pending mail">Resume</button>` +
+      `</div>`
+    );
+  }).join('');
+  // Unread replies waiting in other conversations (2026-11-19) — same card
+  // treatment as error cards; the view button reuses the cross-chat jump.
+  const attentionHtml = attention.slice(0, BANNER_ERROR_CARD_CAP).map((a) => {
+    const name = bannerEscape(a.conversation_name || 'another conversation');
+    return (
+      `<div class="health-banner-error">` +
+      `<strong>Response needs your attention</strong> ` +
+      `<span class="health-banner-detail">in “${name}” · ${bannerEscape(bannerTimeAgo(a.ts))}</span>` +
+      `<button type="button" class="cross-chat-alert-link" data-conv-id="${bannerEscape(a.conversationId)}" title="Open that conversation">view</button>` +
       `</div>`
     );
   }).join('');
@@ -4436,6 +4460,7 @@ function renderHealthBanner(h) {
     (details ? `<span class="health-banner-detail">${details}</span>` : '') +
     cooldownHtml +
     holdsHtml +
+    attentionHtml +
     errorsHtml +
     (safeMode ? `<span class="health-banner-detail">Current health: ${bannerEscape(level)}. The hub will exit safe mode automatically once health is back to ok.</span>` : '') +
     (fallback && !safeMode ? '<span class="health-banner-detail">Fix the paid provider (top up / new key) to restore normal turns.</span>' : '');
@@ -4531,6 +4556,9 @@ let crossChatAlertsCache = [];
 /** Which alerts the operator should see in the chat they are viewing. */
 function crossChatAlertVisibleFor(alert, currentId) {
   if (!alert || !alert.conversationId) return false;
+  // kind 'reply' (unread reply in another chat) is surfaced by the top health
+  // banner instead of this badge (2026-11-19).
+  if (alert.kind === 'reply') return false;
   return alert.kind === 'pointer'
     ? alert.conversationId === currentId
     : alert.conversationId !== currentId;
@@ -4582,6 +4610,9 @@ async function pollCrossChatAlerts() {
     const data = await res.json();
     crossChatAlertsCache = Array.isArray(data.alerts) ? data.alerts : [];
     renderCrossChatAlerts();
+    // Attention cards live in the health banner — re-render it immediately
+    // instead of waiting for the next 30s health poll.
+    if (lastHealthData) renderHealthBanner(lastHealthData);
   } catch (_err) { /* server down — indicator state unchanged */ }
 }
 
@@ -4591,6 +4622,7 @@ async function clearCrossChatAlertsFor(id) {
     (a) => !a || a.conversationId !== id,
   );
   renderCrossChatAlerts();
+  if (lastHealthData) renderHealthBanner(lastHealthData);
   try {
     await fetch('/api/cross-chat-alerts/clear', {
       method: 'POST',

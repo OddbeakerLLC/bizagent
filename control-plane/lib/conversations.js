@@ -474,7 +474,25 @@ function appendMessage(hub, id, role, content, meta = {}) {
     }));
   }
   conv.messages.push(msg);
-  return saveConversation(hub, conv);
+  const saved = saveConversation(hub, conv);
+  // Unread-reply attention (2026-11-19): a real hub/agent reply that lands in a
+  // conversation the operator is NOT currently viewing leaves a cross-chat
+  // alert (kind 'reply') so the console banner can flag it. Same rule as the
+  // error path: only when there is an active (viewed) chat and it differs —
+  // with no console open the default landing chat is the most-recently-updated
+  // one anyway, so no alert is needed.
+  if (role === 'hub') {
+    try {
+      const activeNow = getActiveConversationId(hub);
+      if (activeNow && activeNow !== conv.id) {
+        const firstLine = String(msg.content || '')
+          .split('\n')
+          .find((line) => line.trim()) || 'agent reply';
+        recordCrossChatAlert(hub, conv.id, 'hub', firstLine, { kind: 'reply' });
+      }
+    } catch (_err) { /* non-fatal */ }
+  }
+  return saved;
 }
 
 /**
