@@ -16,6 +16,10 @@
 #   - Never invents conversation_id; only stamps what you pass.
 #   - Product agents should not invent console conversation_ids.
 #   - Writes to hub/outbox when --from hub, else agents/<from>/outbox.
+#   - A --body-file older than ~15 minutes is refused (host /tmp is shared across
+#     agents/sessions; a stale file can carry another conversation's content).
+#     Override the window with BIZAGENT_BODY_FILE_MAX_AGE_SECS, or pass
+#     --allow-stale-body-file to send an old file deliberately.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

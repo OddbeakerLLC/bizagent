@@ -3575,6 +3575,52 @@ if (!t3.includes('from file')) {
   process.exit(12);
 }
 
+// CLI stale --content-file guard (2026-11-19 cross-conversation leak): a body
+// file older than the window must be refused; --allow-stale-body-file overrides.
+const staleFile = path.join(hub, 'stale-body.txt');
+fs.writeFileSync(staleFile, 'stale body\n');
+const staleAge = process.platform === 'darwin' ? '2026-01-01T00:00:00' : '2026-01-01 00:00:00';
+spawnSync('touch', ['-d', staleAge, staleFile]);
+const staleCli = spawnSync('node', [
+  `${root}/scripts/bizagent-control-plane.js`, 'write-message',
+  '--hub', hub,
+  '--from', 'hub',
+  '--to', 'alpha',
+  '--subject', 'stale body',
+  '--content-file', staleFile,
+], { encoding: 'utf8' });
+if (staleCli.status !== 1) {
+  console.error('stale content-file not refused', staleCli.status, staleCli.stderr, staleCli.stdout);
+  process.exit(12);
+}
+if (!/stale|old|DIFFERENT/i.test(staleCli.stderr)) {
+  console.error('stale refusal missing guidance', staleCli.stderr);
+  process.exit(12);
+}
+const staleOut = fs.readdirSync(path.join(hub, 'outbox')).filter((n) => n.includes('stale-body'));
+if (staleOut.length !== 0) {
+  console.error('stale content-file wrote an outbox file anyway', staleOut);
+  process.exit(12);
+}
+const overrideCli = spawnSync('node', [
+  `${root}/scripts/bizagent-control-plane.js`, 'write-message',
+  '--hub', hub,
+  '--from', 'hub',
+  '--to', 'alpha',
+  '--subject', 'stale body override',
+  '--content-file', staleFile,
+  '--allow-stale-body-file',
+], { encoding: 'utf8' });
+if (overrideCli.status !== 0) {
+  console.error('--allow-stale-body-file override failed', overrideCli.status, overrideCli.stderr, overrideCli.stdout);
+  process.exit(12);
+}
+const overrideOut = fs.readdirSync(path.join(hub, 'outbox')).filter((n) => n.includes('stale-body-override'));
+if (overrideOut.length !== 1 || !fs.readFileSync(path.join(hub, 'outbox', overrideOut[0]), 'utf8').includes('stale body')) {
+  console.error('override mail missing', overrideOut);
+  process.exit(12);
+}
+
 // CLI stdin via shell wrapper
 const sh = spawnSync('bash', [
   `${root}/scripts/write-message.sh`,

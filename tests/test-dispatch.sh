@@ -76,6 +76,10 @@ if grep -q "{{PRODUCT_SLUG}}" "$TMP/agents/alpha/.dispatch.md"; then
 fi
 grep -q -- "--from alpha" "$TMP/agents/alpha/.dispatch.md" \
   || fail "dispatch prompt form-request example not bound to the agent slug"
+# 2026-11-19 cross-conversation leak: the dispatch prompt must carry the
+# stale-body-file rule (never send a --body-file you did not just write).
+grep -q "did not just write" "$TMP/agents/alpha/.dispatch.md" \
+  || fail "dispatch prompt missing stale-body-file rule"
 
 # --- 30-min lock-lease double-dispatch fix (2026-09-07) ---
 # (a) live pid + age>lease must NOT steal; (b) dead pid may reclaim;

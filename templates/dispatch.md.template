@@ -25,4 +25,6 @@ Exactly one outbox file per logical completion event: never emit two identical (
 
 **Outbox files are consumed by the control plane the moment they are routed/delivered. An empty outbox means your message was delivered successfully — never re-send or recreate a sent message because the file vanished.**
 
+**Never pass a `--body-file` you did not just write in this turn.** `/tmp` is shared across every agent and session on the host — a stale file there can carry another conversation's content, which would then be sent under your subject and land in the wrong chat. Write the body file fresh (or pipe stdin) immediately before sending; `write-message.sh` refuses body files older than ~15 minutes for exactly this reason.
+
 Optional `hire_helper` (research/search/summarize/test-extract) is a cheap in-turn worker that returns text you must review. Helpers cannot write, mail, or hire. If hire fails or the pool is full, do the work yourself. Do not hire for architecture, ownership, commits, or operator-facing replies.

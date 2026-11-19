@@ -15,6 +15,7 @@ function usage() {
     '  append-hub-turn: --conversation ID --content TEXT|--content-file PATH',
     '  write-message: --to SLUG --subject TEXT [--from SLUG] [--conversation ID]',
     '                 [--kind KIND] [--content TEXT|--content-file PATH]  (body also via stdin)',
+    '                 [--allow-stale-body-file]  (a content-file older than ~15 min is refused',
     '  form-answer:   FORM_ID — print a submitted form response (JSON) and delete it',
     '  form-sweep:    delete unclaimed form responses older than 24h',
     '  enterprise-init: requires settings.enterprise.enabled; delegates to package',
@@ -32,6 +33,7 @@ function parseArgs(argv) {
     else if (arg === '--conversation' || arg === '--conversation-id') opts.conversation = argv[++i];
     else if (arg === '--content' || arg === '--body') opts.content = argv[++i];
     else if (arg === '--content-file' || arg === '--body-file') opts.contentFile = argv[++i];
+    else if (arg === '--allow-stale-body-file') opts.allowStaleBodyFile = true;
     else if (arg === '--to') opts.to = argv[++i];
     else if (arg === '--from') opts.from = argv[++i];
     else if (arg === '--subject') opts.subject = argv[++i];
@@ -58,6 +60,37 @@ function readStdin() {
     process.stdin.on('end', () => resolve(data));
     process.stdin.on('error', reject);
   });
+}
+
+// Stale-body-file guard (2026-11-19 cross-conversation leak): agents of every
+// product share the host /tmp. An agent that passes --content-file pointing at
+// a file it did not just write can silently mail another conversation's content
+// under its own subject; the router then delivers it to the sender's bound chat
+// and the operator sees a foreign report in the middle of an unrelated thread.
+// Refuse body files older than the window unless the caller opts out.
+const DEFAULT_BODY_FILE_MAX_AGE_SECS = 15 * 60;
+
+function assertFreshContentFile(file, opts, label) {
+  if (!file || (opts && opts.allowStaleBodyFile)) return;
+  let maxAgeSecs = Number.parseInt(process.env.BIZAGENT_BODY_FILE_MAX_AGE_SECS || '', 10);
+  if (!Number.isFinite(maxAgeSecs) || maxAgeSecs <= 0) maxAgeSecs = DEFAULT_BODY_FILE_MAX_AGE_SECS;
+  let stat;
+  try {
+    stat = require('fs').statSync(file);
+  } catch (_err) {
+    return; // missing file: the subsequent read fails with its own clear error
+  }
+  const ageSecs = Math.max(0, Math.round((Date.now() - stat.mtimeMs) / 1000));
+  if (ageSecs <= maxAgeSecs) return;
+  const mins = Math.max(1, Math.round(ageSecs / 60));
+  console.error([
+    `${label}: --content-file ${file} is ~${mins} min old (limit ${Math.round(maxAgeSecs / 60)} min).`,
+    'A body file this old was likely written by a DIFFERENT agent/session (host /tmp is shared) —',
+    'sending it would deliver another conversation\'s content under your subject.',
+    'Fix: write the body file fresh in this turn and re-run, pipe the body via stdin,',
+    'or pass --allow-stale-body-file if the old file really is what you meant to send.',
+  ].join('\n'));
+  process.exit(1);
 }
 
 async function main() {
@@ -88,6 +121,7 @@ async function main() {
   }
   if (opts.command === 'append-hub-turn') {
     if (!opts.conversation) usage();
+    assertFreshContentFile(opts.contentFile, opts, 'append-hub-turn');
     const content = opts.contentFile
       ? require('fs').readFileSync(opts.contentFile, 'utf8')
       : opts.content || '';
@@ -97,6 +131,7 @@ async function main() {
   }
   if (opts.command === 'write-message') {
     if (!opts.to || !opts.subject) usage();
+    assertFreshContentFile(opts.contentFile, opts, 'write-message');
     let body = '';
     if (opts.contentFile) {
       body = require('fs').readFileSync(opts.contentFile, 'utf8');
