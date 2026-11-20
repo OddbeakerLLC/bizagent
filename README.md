@@ -266,7 +266,9 @@ your `registry.json`).
   (`kind: form-request` mail with a ` ```dgen ` block); values bypass chat history
   entirely and the answer file is deleted on claim. See
   [`docs/2026-10-18-dgen-form-requests.md`](docs/2026-10-18-dgen-form-requests.md).
-- **Health banner** — recent agent errors, fleet rate-limit cooldowns, and a
+- **Health banner** — recent agent errors, fleet rate-limit cooldowns, unread
+  replies waiting in conversations you are not viewing ("Response needs your
+  attention" cards with a jump-to-chat button), and a
   connection-lost indicator surface in the UI; an out-of-process watchdog
   (`scripts/health-probe.sh`, systemd user timer or cron every 2 min) watches
   disk and service health even when the control plane is wedged. See
