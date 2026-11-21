@@ -74,7 +74,43 @@ function classifyProviderError(text) {
     };
   }
 
-  if (/unknown model|couldn't set model|model.?not.?found|invalid model/i.test(t)) {
+  // Model-server failures (2026-11-21 incident review): 404 model-not-found,
+  // 503 model-load and 400 context-overflow are NON-transient — retrying the
+  // same turn against the same model just burns dispatch slots. They get
+  // dedicated cards with one-click actions instead of a retry loop.
+  if (
+    (/\b404\b/.test(t) && /model/i.test(t)) ||
+    /model.?not.?found|no endpoints found for model|model .{0,40}does not exist/i.test(t)
+  ) {
+    return {
+      kind: 'model_missing',
+      title: 'Model not available on this endpoint',
+      summary: 'The provider answered 404 — the configured model id does not exist on this endpoint (or was renamed/removed).',
+      fix: 'Pick a valid model for this agent in the agent rail (one-click "Switch model" on this card), then run the agent again.',
+    };
+  }
+  if (
+    /\b503\b/.test(t) && /model|load/i.test(t) ||
+    /model.?load|failed to load model|model is loading/i.test(t)
+  ) {
+    return {
+      kind: 'model_load',
+      title: 'Model server could not load the model',
+      summary: 'The model server answered 503 — it could not load the model right now (often local Ollama still loading, or the model was unloaded).',
+      fix: 'Check the model server (e.g. ollama list / logs), then run the agent again. No automatic retry — this failure is not transient.',
+    };
+  }
+  if (
+    /context (length|window|overflow)|maximum context|too many tokens|token limit|input length exceeds|prompt is too long/i.test(t)
+  ) {
+    return {
+      kind: 'context_overflow',
+      title: 'Conversation too long for the model (context overflow)',
+      summary: 'The provider rejected the request with 400 — the conversation history no longer fits the model context window.',
+      fix: 'The hub auto-compacts the conversation history and retries once. If it recurs, start a fresh conversation or switch to a larger-context model.',
+    };
+  }
+  if (/unknown model|couldn't set model|invalid model/i.test(t)) {
     return {
       kind: 'model',
       title: 'LLM model rejected',
@@ -92,7 +128,42 @@ function classifyProviderError(text) {
     };
   }
 
+  // Provider flakiness (2026-11-21 incident review): malformed / truncated
+  // model responses are transient — the provider rotates to the next one
+  // instead of retry-looping the same endpoint.
+  if (/parse error|invalid json|unexpected (token|end of json)|malformed|failed to parse|unexpected character/i.test(t)) {
+    return {
+      kind: 'parse',
+      title: 'Provider returned a malformed response',
+      summary: 'The model server answered, but the response could not be parsed (truncated or invalid output).',
+      fix: 'Transient — dispatch automatically rotates to the next configured provider. If one provider keeps failing, check its status page.',
+    };
+  }
+
   return null;
+}
+
+/**
+ * Kinds that must NOT be auto-retried (2026-11-21 incident review): retrying
+ * the same turn against the same broken model / missing key / oversized
+ * history only burns dispatch slots. These hold the mail and surface an
+ * actionable card instead of entering the failure-backoff ladder.
+ */
+const NON_TRANSIENT_KINDS = ['model_missing', 'model_load', 'context_overflow', 'auth'];
+
+function isNonTransientKind(kind) {
+  return NON_TRANSIENT_KINDS.includes(String(kind || ''));
+}
+
+/**
+ * Kinds treated as transient provider flakiness: the dispatch rotates to the
+ * next configured provider and only escalates to an operator card after N
+ * consecutive failures (single blips stay log-only).
+ */
+const TRANSIENT_KINDS = ['rate_limit', 'network', 'parse'];
+
+function isTransientKind(kind) {
+  return TRANSIENT_KINDS.includes(String(kind || ''));
 }
 
 /**
@@ -140,4 +211,8 @@ module.exports = {
   classifyProviderError,
   formatProviderFailureMessage,
   nameProviderInClassification,
+  isNonTransientKind,
+  isTransientKind,
+  NON_TRANSIENT_KINDS,
+  TRANSIENT_KINDS,
 };

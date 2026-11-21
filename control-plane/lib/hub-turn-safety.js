@@ -575,6 +575,22 @@ function ensureHubUserReply(hub, turn) {
     conversation_id: conversationId,
     reason: 'no_reserved_body'
   });
+  // Actionable failure card (2026-11-21 incident review): the hard-fail chat
+  // message already carries the CLI's last stderr lines; also feed the banner
+  // so the operator gets a one-click "Retry this turn" even in another chat.
+  try {
+    const { recordRecentError } = require('./dispatcher');
+    recordRecentError(hub, {
+      ts: Date.now(),
+      slug: 'hub',
+      kind: 'hub_turn_failed',
+      title: 'Hub turn failed — no reply was produced',
+      summary: `The hub CLI exited without writing a reply${turn && turn.exitCode != null && turn.exitCode !== '' ? ` (exit ${turn.exitCode})` : ''}.`,
+      detail: String(stderrSnippet(turn, 300) || '').trim(),
+      fix: 'Use "Retry this turn" to re-dispatch the pending mail once you have checked logs/dispatch-hub.stderr.',
+      conversationId: conversationId || '',
+    });
+  } catch (_err) { /* best-effort */ }
   notifyConversationMutated(hub, conversationId);
   return { action: 'failed', conversationId, mutated: true };
 }

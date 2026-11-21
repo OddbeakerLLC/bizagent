@@ -55,18 +55,19 @@ function clearStaleLock(hub, lockDir, slug, findAgentCliPid) {
 }
 
 /**
- * Full startup recovery pass. `config` is the runtime config (needs .hub,
- * .lockLeaseSecs); `dispatcher` is the dispatcher module (passed in to avoid
- * a circular require at module load).
+ * Periodic recovery sweep (2026-11-21 incident review): the boot-time pass
+ * only ran once, so a killed wrapper left a phantom running lock until the
+ * next restart. The control plane now calls this every ~10 dispatcher ticks.
+ * Covers the crash-recovery core: drain stale pending hub turns, clear
+ * stale locks/pidfiles whose owners are gone, and re-queue interrupted
+ * dispatches. Best-effort throughout.
  */
-function runStartupRecovery(config, dispatcher) {
+function runRecoverySweep(config, dispatcher) {
   const hub = config.hub;
   const actions = {
     pending_hub_turns_drained: 0,
-    outbox_routed: 0,
     locks_cleared: 0,
     dispatches_requeued: 0,
-    tmp_files_removed: 0,
   };
 
   // 1. Drain stale pending hub turns (existing mechanism). A genuinely live
@@ -75,12 +76,6 @@ function runStartupRecovery(config, dispatcher) {
     const results = drainPendingHubTurns(hub, () =>
       dispatcher.isAgentActive(hub, 'hub', config.lockLeaseSecs)) || [];
     actions.pending_hub_turns_drained = results.length;
-  } catch (_err) { /* best-effort */ }
-
-  // 2. Re-route any unrouted outbox mail left by a crashed turn.
-  try {
-    const routed = routeOutboxes(hub) || {};
-    actions.outbox_routed = (routed.delivered || 0) + (routed.quarantined || 0);
   } catch (_err) { /* best-effort */ }
 
   // 3. Clear stale locks/pidfiles whose owners are gone.
@@ -140,6 +135,38 @@ function runStartupRecovery(config, dispatcher) {
         }
       } catch (_err) { /* no markers for this slug */ }
     }
+  } catch (_err) { /* best-effort */ }
+
+  return actions;
+}
+
+/**
+ * Full startup recovery pass. `config` is the runtime config (needs .hub,
+ * .lockLeaseSecs); `dispatcher` is the dispatcher module (passed in to avoid
+ * a circular require at module load).
+ */
+function runStartupRecovery(config, dispatcher) {
+  const hub = config.hub;
+  const actions = {
+    pending_hub_turns_drained: 0,
+    outbox_routed: 0,
+    locks_cleared: 0,
+    dispatches_requeued: 0,
+    tmp_files_removed: 0,
+  };
+
+  // Crash-recovery core (shared with the periodic sweep).
+  try {
+    const core = runRecoverySweep(config, dispatcher) || {};
+    actions.pending_hub_turns_drained = core.pending_hub_turns_drained || 0;
+    actions.locks_cleared = core.locks_cleared || 0;
+    actions.dispatches_requeued = core.dispatches_requeued || 0;
+  } catch (_err) { /* best-effort */ }
+
+  // 2. Re-route any unrouted outbox mail left by a crashed turn.
+  try {
+    const routed = routeOutboxes(hub) || {};
+    actions.outbox_routed = (routed.delivered || 0) + (routed.quarantined || 0);
   } catch (_err) { /* best-effort */ }
 
   // 5. Clean leftover tmp staging files from crashed atomic writers.
@@ -203,5 +230,6 @@ module.exports = {
   clearStaleLock,
   pidAlive,
   registerCrashHandlers,
+  runRecoverySweep,
   runStartupRecovery,
 };

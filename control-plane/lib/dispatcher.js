@@ -4,12 +4,13 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { agentsFromRegistry, appDir, loadHubEnv, loadRegistry } = require('./config');
 const { writeJsonAtomic } = require('./atomic-state');
-const { compileAgentCommand, getCliSettings } = require('./cli-config');
+const { compileAgentCommand, getCliSettings, providerEntries } = require('./cli-config');
 const {
   buildAgentTurnPrompt,
   buildHubTurnPrompt,
   ensureHubRuntimeCwd,
   ensureHubRuntimePrompt,
+  compactHubSession,
   pickPendingConversationId,
 } = require('./hub-memory');
 const { pendingMail, quarantineInboxMail, writeOutboxMessage } = require('./mail');
@@ -43,7 +44,11 @@ const {
   classifyProviderError,
   formatProviderFailureMessage,
   nameProviderInClassification,
+  isNonTransientKind,
+  isTransientKind,
 } = require('./provider-errors');
+const { providerApiKey } = require('./provider-models');
+const preflight = require('./preflight');
 const ollamaFallback = require('./ollama-fallback');
 const {
   clearThinking,
@@ -479,6 +484,7 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   // hold + one-time operator notice instead of retry-looping forever).
   let provider = '';
   let queueHold = null;
+  let consecutive = 0;
   try {
     const registry = loadRegistry(hub);
     provider = agentProvider(registry, slug);
@@ -487,7 +493,13 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
       classified = nameProviderInClassification(classified, provider);
     }
     const q = recordProviderFailure(hub, registry, provider, kind);
+    consecutive = Number(q.consecutive || 0);
     if (q.justHeld) queueHold = q;
+    // Provider flakiness (2026-11-21 incident review): transient failures
+    // arm a rotation onto the next configured provider after 2 strikes.
+    if (isTransientKind(kind)) {
+      try { maybeArmProviderRotation(hub, slug, provider, consecutive); } catch (_err) { /* ignore */ }
+    }
   } catch (_err) { /* best-effort */ }
 
   // Hub-only Ollama fallback: paid provider reachable but refused (credits /
@@ -497,6 +509,18 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   try {
     ollamaFallback.maybeTriggerFallback(hub, { slug, text: stderrTail || combined });
   } catch (_err) { /* ignore */ }
+
+  // Auth failure loops (2026-11-21 incident review): never retry-loop an auth
+  // failure — hold the mail (non-transient path below) and ask the operator
+  // for a fresh key via a DGen form-request (debounced 1/day/slug).
+  if (kind === 'auth') {
+    try { maybeEmitAuthFormRequest(hub, slug, provider); } catch (_err) { /* ignore */ }
+  }
+  // Context overflow on a hub turn: auto-compact the conversation history and
+  // retry once (guarded — never a compact/retry loop).
+  if (kind === 'context_overflow' && slug === 'hub' && conversationId) {
+    try { armContextOverflowRetry(hub, conversationId); } catch (_err) { /* ignore */ }
+  }
 
   const errorMsg = formatProviderFailureMessage({
     slug,
@@ -553,9 +577,18 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
     fix: classified ? classified.fix : `See logs/dispatch-${slug}.log`,
     conversationId: cid || '',
   };
-  try {
-    recordRecentError(hub, recentEntry);
-  } catch (_err) { /* ignore */ }
+  // Provider flakiness (2026-11-21 incident review): a single transient blip
+  // (rate limit / network / parse) stays log-only — the card + chat bubble
+  // escalate only after N consecutive failures (or when the queue holds).
+  const TRANSIENT_CARD_THRESHOLD = 3;
+  const escalateCard = !isTransientKind(kind)
+    || consecutive >= TRANSIENT_CARD_THRESHOLD
+    || !!queueHold;
+  if (escalateCard) {
+    try {
+      recordRecentError(hub, recentEntry);
+    } catch (_err) { /* ignore */ }
+  }
 
   const dateStr = require('./local-time').localDateString();
   const subject = classified
@@ -566,7 +599,7 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
 
   // Primary: status error in the console conversation (visible immediately on poll).
   let postedToChat = false;
-  if (cid) {
+  if (cid && escalateCard) {
     try {
       // Same key as the banner card (chat skips the bubble while the banner is
       // showing it; the chat is the fallback when the banner is not).
@@ -593,7 +626,7 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   }
 
   // Backup path: user inbox (relayed on next CP tick) if direct append failed.
-  if (cid && !postedToChat) {
+  if (cid && escalateCard && !postedToChat) {
     try {
       writeFileUnique(path.join(hub, 'user', 'inbox'), `${dateStr}-cp-agent-error`, [
         '---',
@@ -612,7 +645,7 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   }
 
   // No chat at all: queue for hub so PTL can relay once operator is back.
-  if (!cid) {
+  if (!cid && escalateCard) {
     try {
       writeFileUnique(path.join(hub, 'inbox'), `${dateStr}-cp-agent-error-${slug}`, [
         '---',
@@ -661,6 +694,7 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   } catch (_err) {
     /* ignore */
   }
+  return kind;
 }
 
 /**
@@ -669,11 +703,16 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
  */
 function notifyAgentExitFromLogs(hub, slug, exitCode) {
   // Successful turn: clear the provider queue's backoff/hold for this
-  // agent's provider (2026-10-23 provider queue).
+  // agent's provider (2026-10-23 provider queue), reset the watchdog strike
+  // counter and any provider-rotation override, and feed repeat-loop
+  // detection (a clean exit over still-pending mail is a no-op turn).
   if (Number(exitCode) === 0) {
     try {
       recordProviderSuccess(hub, agentProvider(loadRegistry(hub), slug));
     } catch (_err) { /* best-effort */ }
+    try { noteWatchdogRecovery(hub, slug); } catch (_err) { /* ignore */ }
+    try { clearProviderRotation(hub, slug); } catch (_err) { /* ignore */ }
+    try { noteCleanTurnExit(hub, slug); } catch (_err) { /* ignore */ }
     return;
   }
   // Operator hard-stop: suppress failure chatter + hard-fail re-dispatch.
@@ -691,13 +730,17 @@ function notifyAgentExitFromLogs(hub, slug, exitCode) {
   const stderrTail = readStderrTail(
     path.join(hub, 'logs', `dispatch-${slug}.stderr`),
   );
-  recordAgentError(hub, slug, exitCode, stderrTail, null);
+  const failedKind = recordAgentError(hub, slug, exitCode, stderrTail, null);
   // Failed turn: do not let its fresh dispatch markers pin the inbox for the
   // whole lease — shorten them to the failure backoff so the dispatcher
   // retries automatically (operator report 2026-10-21, "green light" bug).
-  try {
-    backoffFailedDispatch(hub, slug, agentRetrySecs(hub));
-  } catch (_err) { /* ignore */ }
+  // Non-transient failures (model missing / auth / context overflow) must NOT
+  // retry-loop — the mail stays held for the operator instead (2026-11-21).
+  if (!isNonTransientKind(failedKind)) {
+    try {
+      backoffFailedDispatch(hub, slug, agentRetrySecs(hub));
+    } catch (_err) { /* ignore */ }
+  }
 }
 
 function rateLimitCooldownFile(hub, provider = '') {
@@ -1698,16 +1741,24 @@ function launchAgent(config, slug, model = '', cliName = '') {
       try {
         recordProviderSuccess(hub, agentProvider(loadRegistry(hub), slug));
       } catch (_err) { /* ignore */ }
+      if (code === 0) {
+        try { noteWatchdogRecovery(hub, slug); } catch (_err) { /* ignore */ }
+        try { clearProviderRotation(hub, slug); } catch (_err) { /* ignore */ }
+        try { noteCleanTurnExit(hub, slug); } catch (_err) { /* ignore */ }
+      }
     }
     if (code !== 0 && code !== null && !wasOperatorStopped(hub, slug)) {
       const stderrTail = readStderrTail(agentStderr);
-      recordAgentError(hub, slug, code, stderrTail, null);
+      const failedKind = recordAgentError(hub, slug, code, stderrTail, null);
       // Mirror the cold-path recovery: shorten dispatch markers to the
       // failure backoff so a crashed run retries instead of idling out
-      // the full lease (operator report 2026-10-21).
-      try {
-        backoffFailedDispatch(config.hub, slug, dispatchRetrySecs(config));
-      } catch (_err) { /* ignore */ }
+      // the full lease (operator report 2026-10-21). Non-transient
+      // failures hold instead of retry-looping (2026-11-21 incident review).
+      if (!isNonTransientKind(failedKind)) {
+        try {
+          backoffFailedDispatch(config.hub, slug, dispatchRetrySecs(config));
+        } catch (_err) { /* ignore */ }
+      }
     }
   });
 
@@ -2172,6 +2223,8 @@ function dispatchPendingAgents(config) {
   let skippedQueue = 0;
   let skippedSpacing = 0;
   let skippedSuspended = 0;
+  let skippedRepeat = 0;
+  let skippedPreflight = 0;
   const retrySecs = dispatchRetrySecs(config);
   const serialBusy = () => !allowConcurrency && (hubRunning + agentRunning) >= 1;
   // Fleet-wide fallback cooldown (unnamed file): gates every launch, for
@@ -2202,13 +2255,20 @@ function dispatchPendingAgents(config) {
   const hubNew = pendingUndispatchedMail(config.hub, 'hub', retrySecs, config.lockLeaseSecs);
   if (hubNew.length > 0) {
     const hubProvider = agentProvider(config.registry, 'hub');
-    if (fleetCooldownSecs > 0 || rateLimitCooldownRemaining(config.hub, hubProvider) > 0) {
+    // Repeat-loop hold (2026-11-21): the hub repeated the same useless turn
+    // 3× — dispatch is held until the operator picks Skip / Retry / Leave.
+    const hubRepeat = readRepeatLoopState(config.hub, 'hub');
+    if (hubRepeat && hubRepeat.held) {
+      skippedRepeat += 1;
+    } else if (fleetCooldownSecs > 0 || rateLimitCooldownRemaining(config.hub, hubProvider) > 0) {
       skippedCooldown += 1;
     } else {
       const hubQueue = queueGate(hubProvider);
       if (!hubQueue.open) {
         skippedQueue += 1;
         if (hubQueue.held) noteQueueHoldSkip(config.hub, hubProvider);
+      } else if (preflight.preflightGate(config.hub, hubProvider, config.hubModel || '').block) {
+        skippedPreflight += 1;
       } else if (serialBusy() || hubRunning >= hubSlots) {
         skippedCap += 1;
       } else if (!apiQueueOpen(hubProvider)) {
@@ -2245,6 +2305,13 @@ function dispatchPendingAgents(config) {
     if (fresh.length === 0) {
       continue;
     }
+    // Repeat-loop hold (2026-11-21): 3 identical consecutive no-op turns —
+    // dispatch held until the operator picks Skip / Retry / Leave pending.
+    const repeatState = readRepeatLoopState(config.hub, agent.slug);
+    if (repeatState && repeatState.held) {
+      skippedRepeat += 1;
+      continue;
+    }
     const provider = agentProvider(config.registry, agent.slug);
     if (fleetCooldownSecs > 0 || rateLimitCooldownRemaining(config.hub, provider) > 0) {
       skippedCooldown += 1;
@@ -2254,6 +2321,14 @@ function dispatchPendingAgents(config) {
     if (!agentQueue.open) {
       skippedQueue += 1;
       if (agentQueue.held) noteQueueHoldSkip(config.hub, provider);
+      continue;
+    }
+    const launchModel = agent.model || config.agentDefaultModel || '';
+    // Model-availability preflight (2026-11-21): a cached live check confirmed
+    // this model is missing from the endpoint — hold the launch + card instead
+    // of burning a turn on a guaranteed 404.
+    if (preflight.preflightGate(config.hub, provider, launchModel).block) {
+      skippedPreflight += 1;
       continue;
     }
     const running = runningByProvider[provider] || 0;
@@ -2267,7 +2342,27 @@ function dispatchPendingAgents(config) {
     }
     if (tryLock(config.hub, agent.slug, config.lockLeaseSecs)) {
       markMailDispatched(config.hub, agent.slug, fresh, retrySecs, config.lockLeaseSecs);
-      launchAgent(config, agent.slug, agent.model || config.agentDefaultModel || '', agent.cliName || '');
+      // Provider rotation (2026-11-21): a transient-failure override launches
+      // this turn on the next configured provider instead of the failing one.
+      const rotation = providerRotationOverride(config.hub, agent.slug);
+      if (rotation) {
+        try {
+          logEvent(config.hub, {
+            event: 'provider_rotation_launch',
+            slug: agent.slug,
+            from_provider: provider,
+            to_provider: rotation.provider,
+            model: rotation.model || '',
+            t: nowIso(),
+          });
+        } catch (_err) { /* ignore */ }
+      }
+      launchAgent(
+        config,
+        agent.slug,
+        rotation ? rotation.model : launchModel,
+        rotation ? rotation.provider : (agent.cliName || ''),
+      );
       launched += 1;
       runningByProvider[provider] = running + 1;
       agentRunning += 1;
@@ -2285,6 +2380,8 @@ function dispatchPendingAgents(config) {
     skippedQueue,
     skippedSpacing,
     skippedSuspended,
+    skippedRepeat,
+    skippedPreflight,
     suspendProductAgents,
     running: hubRunning + agentRunning,
     hubRunning,
@@ -2304,6 +2401,628 @@ function drainHubTurnSafety(config) {
     isAgentActive(config.hub, 'hub', config.lockLeaseSecs),
   );
 }
+
+// --- Incident-driven resilience (2026-11-21 hub work order) ------------------
+// Hung-turn watchdog, repeat-loop detection, stale-lock surfacing, quarantine
+// surfacing and provider rotation. All best-effort: never block a dispatch
+// tick on a resilience failure.
+
+/**
+ * settings.dispatch.turn_timeout_secs — hung-turn watchdog timeout.
+ * Default 45 min (incident review), clamp 60 s–24 h.
+ */
+function turnTimeoutSecs(registry) {
+  const dispatch = (registry && registry.settings && registry.settings.dispatch) || {};
+  const n = Number(dispatch.turn_timeout_secs);
+  if (!Number.isFinite(n)) return 45 * 60;
+  return Math.max(60, Math.min(24 * 3600, Math.floor(n)));
+}
+
+function watchdogStatePath(hub, slug) {
+  return path.join(appDir(hub), 'watchdog', `${slug}.json`);
+}
+
+function readWatchdogState(hub, slug) {
+  try {
+    const s = JSON.parse(fs.readFileSync(watchdogStatePath(hub, slug), 'utf8'));
+    return s && typeof s === 'object' ? s : {};
+  } catch (_err) {
+    return {};
+  }
+}
+
+function writeWatchdogState(hub, slug, state) {
+  try {
+    fs.mkdirSync(path.dirname(watchdogStatePath(hub, slug)), { recursive: true });
+    writeJsonAtomic(watchdogStatePath(hub, slug), state);
+  } catch (_err) { /* best-effort */ }
+}
+
+/** A turn for this slug finished cleanly — reset the watchdog strike counter. */
+function noteWatchdogRecovery(hub, slug) {
+  const prev = readWatchdogState(hub, slug);
+  if (!prev.consecutive) return;
+  writeWatchdogState(hub, slug, { slug, consecutive: 0, recoveredAt: nowIso() });
+}
+
+/**
+ * Relax a slug's dispatch markers so its still-unarchived pending mail
+ * re-dispatches on the next tick (used by the watchdog after auto-stopping a
+ * hung turn). No-op after a recent operator stop (those markers must hold).
+ */
+function requeueDispatchMarkers(hub, slug, retrySecs) {
+  if (wasOperatorStopped(hub, slug)) return false;
+  const target = dispatchStateFile(hub, slug);
+  let state;
+  try {
+    state = JSON.parse(fs.readFileSync(target, 'utf8'));
+  } catch (_err) {
+    return false; // no markers — next tick decides fresh anyway
+  }
+  if (!state || !Array.isArray(state.handled) || state.handled.length === 0) return false;
+  const now = Math.floor(Date.now() / 1000);
+  const inboxDir = slug === 'hub' ? path.join(hub, 'inbox') : path.join(hub, 'agents', slug, 'inbox');
+  const shifted = now - Math.max(1, Number(retrySecs || 0)) - 1;
+  let changed = false;
+  state.handled = state.handled.map((item) => {
+    if (item && fs.existsSync(path.join(inboxDir, item.file))) {
+      changed = true;
+      return { ...item, dispatchedAt: shifted };
+    }
+    return item;
+  });
+  if (!changed) return false;
+  try {
+    writeJsonAtomic(target, state);
+  } catch (_err) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Hung-turn watchdog sweep: any turn (hub or product agent) whose lock is
+ * older than turn_timeout_secs while a live process still holds it is
+ * SIGKILLed (process group), its lock dropped, and its pending mail re-queued
+ * so the next tick retries — self-healing instead of a lock held forever.
+ * After 3 consecutive watchdog stops without a clean turn, the mail is HELD
+ * (repeat-loop hold) instead of re-firing the same hang forever.
+ * Returns the list of stopped slugs.
+ */
+function watchdogSweep(config) {
+  const hub = config.hub;
+  const timeoutSecs = turnTimeoutSecs(config.registry);
+  let agentSlugs = [];
+  try {
+    const agentsDir = path.join(hub, 'agents');
+    agentSlugs = fs.existsSync(agentsDir)
+      ? fs.readdirSync(agentsDir).filter((s) => s !== 'hub')
+      : [];
+  } catch (_err) { /* best-effort */ }
+  const stopped = [];
+  for (const slug of ['hub', ...agentSlugs]) {
+    const lock = lockDir(hub, slug);
+    if (!fs.existsSync(lock)) continue;
+    const ageSecs = lockAgeSecs(lock);
+    if (ageSecs < timeoutSecs) continue;
+    // Only act when a live process actually holds the lock — plain stale
+    // locks (dead pid) belong to the recovery sweep / tryLock reclaim.
+    if (!isAgentActive(hub, slug, config.lockLeaseSecs)) continue;
+    const killed = killLockProcessGroup(hub, lock) || killLeftoverAgentCli(hub, slug);
+    try { fs.rmSync(lock, { recursive: true, force: true }); } catch (_err) { /* ignore */ }
+    const prev = readWatchdogState(hub, slug);
+    const consecutive = Number(prev.consecutive || 0) + 1;
+    writeWatchdogState(hub, slug, {
+      slug,
+      consecutive,
+      last_stop_at: Math.floor(Date.now() / 1000),
+      last_age_secs: ageSecs,
+      t: nowIso(),
+    });
+    const mins = Math.max(1, Math.round(ageSecs / 60));
+    const limitMins = Math.round(timeoutSecs / 60);
+    let requeued = false;
+    if (consecutive >= 3) {
+      // Same turn hung three times in a row — hold and ask the operator
+      // instead of burning dispatch slots on a guaranteed hang.
+      setRepeatLoopHold(hub, slug, `watchdog:${consecutive}`);
+    } else {
+      requeued = requeueDispatchMarkers(hub, slug, dispatchRetrySecs(config));
+    }
+    try {
+      recordRecentError(hub, {
+        ts: Date.now(),
+        slug,
+        kind: 'watchdog_stop',
+        title: `Turn stopped automatically after ${mins} min`,
+        summary: `The ${slug} turn ran ${mins} minutes without finishing — over the ${limitMins} min watchdog limit — so it was stopped.`,
+        fix: requeued
+          ? 'The pending mail was re-queued and runs again on the next dispatch tick.'
+          : 'The pending mail is held — use Skip / Retry on the repeat card.',
+        conversationId: '',
+      });
+    } catch (_err) { /* ignore */ }
+    try {
+      logEvent(hub, {
+        event: 'turn_watchdog_stop',
+        slug,
+        age_secs: ageSecs,
+        timeout_secs: timeoutSecs,
+        killed: !!killed,
+        requeued,
+        consecutive,
+        t: nowIso(),
+      });
+    } catch (_err) { /* ignore */ }
+    stopped.push({ slug, age_secs: ageSecs, killed: !!killed, requeued, consecutive });
+  }
+  return stopped;
+}
+
+// --- Repeat-loop detection ----------------------------------------------------
+// An agent that exits cleanly but repeats the same useless turn forever is not
+// caught by any exit-code logic. After 3 consecutive clean turns over the same
+// still-unarchived pending mail, dispatch is held and the operator is asked:
+// Skip / Retry / Leave pending.
+
+function repeatLoopStatePath(hub, slug) {
+  return path.join(appDir(hub), 'repeat-loop', `${slug}.json`);
+}
+
+function readRepeatLoopState(hub, slug) {
+  try {
+    const s = JSON.parse(fs.readFileSync(repeatLoopStatePath(hub, slug), 'utf8'));
+    return s && typeof s === 'object' ? s : null;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function writeRepeatLoopState(hub, slug, state) {
+  try {
+    fs.mkdirSync(path.dirname(repeatLoopStatePath(hub, slug)), { recursive: true });
+    writeJsonAtomic(repeatLoopStatePath(hub, slug), state);
+  } catch (_err) { /* best-effort */ }
+}
+
+function clearRepeatLoopState(hub, slug) {
+  try {
+    fs.rmSync(repeatLoopStatePath(hub, slug), { force: true });
+  } catch (_err) { /* ignore */ }
+}
+
+/** Set/refresh a repeat-loop hold (also used by the watchdog after 3 hangs). */
+function setRepeatLoopHold(hub, slug, reason) {
+  const prev = readRepeatLoopState(hub, slug) || {};
+  const state = {
+    slug,
+    key: prev.key || reason || 'repeat',
+    count: Math.max(Number(prev.count || 0), 3),
+    reason: reason || prev.reason || 'repeat',
+    held: true,
+    acknowledged: false,
+    updatedAt: nowIso(),
+  };
+  writeRepeatLoopState(hub, slug, state);
+  try {
+    recordRecentError(hub, {
+      ts: Date.now(),
+      slug,
+      kind: 'repeat_loop',
+      title: `Agent ${slug} is repeating the same turn`,
+      summary: `${Math.max(3, Number(prev.count || 0))} consecutive turns over the same pending mail finished without archiving it — dispatch is held so it stops looping.`,
+      fix: 'Choose an action on this card: Skip (archive the mail), Retry (run it once more), or Leave pending.',
+      conversationId: '',
+    });
+  } catch (_err) { /* ignore */ }
+  try {
+    logEvent(hub, { event: 'repeat_loop_hold', slug, reason: state.reason, t: nowIso() });
+  } catch (_err) { /* ignore */ }
+  return state;
+}
+
+/**
+ * Called after a CLEAN exit (code 0). When the slug's pending inbox mail is
+ * exactly the set that was dispatched (still unarchived), the turn produced
+ * no observable progress — count consecutive no-op turns and hold at 3.
+ */
+function noteCleanTurnExit(hub, slug) {
+  let pending = [];
+  try { pending = pendingMail(hub, slug); } catch (_err) { return null; }
+  if (!pending.length) {
+    clearRepeatLoopState(hub, slug);
+    return null;
+  }
+  const handled = readDispatchState(hub, slug);
+  const allDispatched = pending.every((file) => {
+    try {
+      const fp = dispatchFingerprint(file);
+      return handled.some((item) => sameFingerprint(item, fp));
+    } catch (_err) {
+      return false;
+    }
+  });
+  if (!allDispatched) {
+    // Fresh/changed mail — not a repeat of the same turn.
+    clearRepeatLoopState(hub, slug);
+    return null;
+  }
+  const key = pending.map((f) => path.basename(f)).sort().join('|');
+  const prev = readRepeatLoopState(hub, slug);
+  if (prev && prev.held) {
+    // Already held — keep the hold, just note the continued repetition.
+    const state = { ...prev, count: Number(prev.count || 0) + 1, updatedAt: nowIso() };
+    writeRepeatLoopState(hub, slug, state);
+    return state;
+  }
+  const count = prev && prev.key === key ? Number(prev.count || 0) + 1 : 1;
+  if (count >= 3) {
+    return setRepeatLoopHold(hub, slug, key);
+  }
+  const state = { slug, key, count, held: false, acknowledged: false, updatedAt: nowIso() };
+  writeRepeatLoopState(hub, slug, state);
+  return state;
+}
+
+/**
+ * Operator resolution for a repeat-loop hold:
+ *   skip  — archive the pending mail (the loop stops; work is discarded)
+ *   retry — clear the hold + markers so the mail re-dispatches once more
+ *   leave — keep the mail pending and dispatch held (acknowledged)
+ */
+function resolveRepeatLoop(hub, slug, action) {
+  const state = readRepeatLoopState(hub, slug);
+  if (action === 'skip') {
+    const inboxDir = slug === 'hub' ? path.join(hub, 'inbox') : path.join(hub, 'agents', slug, 'inbox');
+    const archiveDir = path.join(inboxDir, 'archive');
+    let moved = 0;
+    for (const file of pendingMail(hub, slug)) {
+      try {
+        fs.mkdirSync(archiveDir, { recursive: true });
+        const dest = path.join(archiveDir, path.basename(file));
+        try { fs.renameSync(file, dest); } catch (_err) {
+          fs.copyFileSync(file, dest);
+          fs.unlinkSync(file);
+        }
+        moved += 1;
+      } catch (_err) { /* best-effort */ }
+    }
+    clearRepeatLoopState(hub, slug);
+    clearDispatchState(hub, slug);
+    try { logEvent(hub, { event: 'repeat_loop_resolved', slug, action, moved, t: nowIso() }); } catch (_err) { /* ignore */ }
+    return { ok: true, action, moved };
+  }
+  if (action === 'retry') {
+    clearRepeatLoopState(hub, slug);
+    clearDispatchState(hub, slug);
+    try { logEvent(hub, { event: 'repeat_loop_resolved', slug, action, t: nowIso() }); } catch (_err) { /* ignore */ }
+    return { ok: true, action };
+  }
+  // 'leave' (default): keep the hold, mark acknowledged so the card quiets down.
+  if (state) {
+    writeRepeatLoopState(hub, slug, { ...state, acknowledged: true, updatedAt: nowIso() });
+  }
+  try { logEvent(hub, { event: 'repeat_loop_resolved', slug, action: 'leave', t: nowIso() }); } catch (_err) { /* ignore */ }
+  return { ok: true, action: 'leave' };
+}
+
+/** Age of the slug's current agent lock in seconds (0 when no lock is held). */
+function turnAgeSecs(hub, slug) {
+  const lock = lockDir(hub, slug);
+  if (!fs.existsSync(lock)) return 0;
+  return lockAgeSecs(lock);
+}
+
+// --- Stale-lock surfacing (card-resolvable, no SSH) ---------------------------
+// tryLock refuses to reclaim a lock whose wrapper pid is dead while an
+// orphaned bizagent-agent CLI child still exists — exactly the state that left
+// a hub.lock stuck in the incident. Surface those so the console card can
+// clear them with one click.
+
+function staleLockList(hub) {
+  const out = [];
+  const check = (slug) => {
+    const lock = lockDir(hub, slug);
+    if (!fs.existsSync(lock)) return;
+    let pid = '';
+    try { pid = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim(); } catch (_err) { /* none */ }
+    if (pidAlive(pid)) return; // live owner — the watchdog's domain
+    if (!findAgentCliPid(hub, slug)) return; // plain stale — tryLock reclaims it
+    out.push({ slug, age_secs: lockAgeSecs(lock) });
+  };
+  check('hub');
+  try {
+    const agentsDir = path.join(hub, 'agents');
+    for (const slug of fs.existsSync(agentsDir) ? fs.readdirSync(agentsDir) : []) {
+      if (slug === 'hub') continue;
+      check(slug);
+    }
+  } catch (_err) { /* best-effort */ }
+  return out;
+}
+
+/**
+ * One-click stale-lock clear (console card): kill the orphaned CLI child and
+ * drop the lock so dispatch can proceed. Returns true when something was cleared.
+ */
+function forceClearStaleLock(hub, slug) {
+  const lock = lockDir(hub, slug);
+  const killed = killLeftoverAgentCli(hub, slug);
+  let cleared = false;
+  try {
+    if (fs.existsSync(lock)) {
+      fs.rmSync(lock, { recursive: true, force: true });
+      cleared = true;
+    }
+  } catch (_err) { /* ignore */ }
+  try { logEvent(hub, { event: 'stale_lock_cleared', slug, killed: !!killed, t: nowIso() }); } catch (_err) { /* ignore */ }
+  return killed || cleared;
+}
+
+// --- Quarantined-mail surfacing ------------------------------------------------
+// Operator stops quarantine pending inbox mail (2026-11-21); until now the
+// only discovery path was the PTL notice mail. Surface counts in the console.
+
+function quarantinedMailSummary(hub) {
+  const out = [];
+  const check = (slug) => {
+    const inboxDir = slug === 'hub' ? path.join(hub, 'inbox') : path.join(hub, 'agents', slug, 'inbox');
+    const dir = path.join(inboxDir, 'quarantine');
+    let files = [];
+    try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.md')); } catch (_err) { return; }
+    if (!files.length) return;
+    let subject = '';
+    try {
+      const m = fs.readFileSync(path.join(dir, files[files.length - 1]), 'utf8').match(/^subject:\s*(.+?)\s*$/m);
+      if (m) subject = m[1].trim();
+    } catch (_err) { /* ignore */ }
+    out.push({ slug, count: files.length, newest_subject: subject });
+  };
+  check('hub');
+  try {
+    const agentsDir = path.join(hub, 'agents');
+    for (const slug of fs.existsSync(agentsDir) ? fs.readdirSync(agentsDir) : []) {
+      if (slug === 'hub') continue;
+      check(slug);
+    }
+  } catch (_err) { /* best-effort */ }
+  return out;
+}
+
+/**
+ * Operator-stop follow-up actions from the console card:
+ *   redispatch — move quarantined mail back to the inbox and clear markers
+ *   discard    — archive the quarantined mail (work is dropped)
+ */
+function resolveQuarantinedMail(hub, slug, action) {
+  const inboxDir = slug === 'hub' ? path.join(hub, 'inbox') : path.join(hub, 'agents', slug, 'inbox');
+  const quarantineDir = path.join(inboxDir, 'quarantine');
+  const destDir = action === 'discard' ? path.join(inboxDir, 'archive') : inboxDir;
+  let moved = 0;
+  let files = [];
+  try { files = fs.readdirSync(quarantineDir).filter((f) => f.endsWith('.md')); } catch (_err) { /* none */ }
+  for (const name of files) {
+    try {
+      fs.mkdirSync(destDir, { recursive: true });
+      const dest = path.join(destDir, name);
+      try { fs.renameSync(path.join(quarantineDir, name), dest); } catch (_err) {
+        fs.copyFileSync(path.join(quarantineDir, name), dest);
+        fs.unlinkSync(path.join(quarantineDir, name));
+      }
+      moved += 1;
+    } catch (_err) { /* best-effort */ }
+  }
+  if (action === 'redispatch') {
+    clearDispatchState(hub, slug);
+  }
+  try { logEvent(hub, { event: 'quarantine_resolved', slug, action, moved, t: nowIso() }); } catch (_err) { /* ignore */ }
+  return { ok: true, action, moved };
+}
+
+// --- Provider rotation (transient provider flakiness) --------------------------
+// After 2 consecutive transient failures (rate limit / network / parse) on an
+// agent's provider, its next launch is overridden onto the next configured
+// provider (cli.json order) that has a usable key. The override expires after
+// 30 minutes and clears on the next clean exit, so the agent falls home.
+
+function providerRotationFile(hub, slug) {
+  return path.join(appDir(hub), 'provider-rotation', `${slug}.json`);
+}
+
+function providerRotationOverride(hub, slug) {
+  try {
+    const s = JSON.parse(fs.readFileSync(providerRotationFile(hub, slug), 'utf8'));
+    if (!s || !s.provider) return null;
+    if (Date.now() - Number(s.setAtMs || 0) > 30 * 60 * 1000) return null;
+    return s;
+  } catch (_err) {
+    return null;
+  }
+}
+
+function clearProviderRotation(hub, slug) {
+  try { fs.rmSync(providerRotationFile(hub, slug), { force: true }); } catch (_err) { /* ignore */ }
+}
+
+/**
+ * Pick the next rotation provider after `failingProvider` in cli.json order
+ * that has a usable key (or is keyless by design). Returns {provider, model}
+ * or null when there is nothing to rotate to.
+ */
+function nextRotationProvider(hub, cliJson, failingProvider) {
+  let entries;
+  try { entries = providerEntries(cliJson || {}); } catch (_err) { return null; }
+  const keys = Object.keys(entries || {});
+  if (keys.length < 2) return null;
+  const fail = String(failingProvider || '').toLowerCase();
+  let idx = keys.indexOf(fail);
+  if (idx === -1) idx = -1; // start from the beginning
+  for (let i = 1; i <= keys.length; i += 1) {
+    const key = keys[(idx + i + keys.length) % keys.length];
+    if (key === fail) continue;
+    const entry = entries[key];
+    if (!entry) continue;
+    try {
+      const keyEnv = String(entry.keyEnv || '').trim();
+      if (keyEnv && !entry.optionalKey && !providerApiKey(hub, entry)) continue;
+    } catch (_err) { /* assume usable */ }
+    const model = String(entry.model || (Array.isArray(entry.models) && entry.models[0]) || '').trim();
+    return { provider: key, model };
+  }
+  return null;
+}
+
+/**
+ * Record a transient provider failure and arm a rotation override for the
+ * slug's next launch (after 2 consecutive failures on the same provider).
+ */
+function maybeArmProviderRotation(hub, slug, provider, consecutive) {
+  if (Number(consecutive || 0) < 2) return null;
+  const existing = providerRotationOverride(hub, slug);
+  if (existing && existing.provider && existing.provider !== String(provider || '').toLowerCase()) return existing;
+  let cliJson = {};
+  try { cliJson = JSON.parse(fs.readFileSync(path.join(hub, 'cli.json'), 'utf8')); } catch (_err) { /* none */ }
+  const next = nextRotationProvider(hub, cliJson, provider);
+  if (!next) return null;
+  const state = {
+    slug,
+    from_provider: provider || '',
+    provider: next.provider,
+    model: next.model,
+    setAtMs: Date.now(),
+    t: nowIso(),
+  };
+  try {
+    fs.mkdirSync(path.dirname(providerRotationFile(hub, slug)), { recursive: true });
+    writeJsonAtomic(providerRotationFile(hub, slug), state);
+  } catch (_err) { /* best-effort */ }
+  try {
+    logEvent(hub, {
+      event: 'provider_rotation_armed',
+      slug,
+      from_provider: provider || '',
+      to_provider: next.provider,
+      model: next.model,
+      t: nowIso(),
+    });
+  } catch (_err) { /* ignore */ }
+  return state;
+}
+
+// --- Auth failure loops ---------------------------------------------------------
+// On an auth failure the turn must not retry-loop (it burns dispatch slots and
+// can lock the account). Hold the mail (non-transient path) and ask the
+// operator for a fresh key via a DGen form-request — once per slug per day.
+
+function authFormRequestStatePath(hub, slug) {
+  return path.join(appDir(hub), 'auth-form-request', `${slug}.json`);
+}
+
+function maybeEmitAuthFormRequest(hub, slug, provider) {
+  const statePath = authFormRequestStatePath(hub, slug);
+  try {
+    const prev = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    if (prev && prev.slug === slug && Date.now() - Number(prev.ts || 0) < 24 * 60 * 60 * 1000) {
+      return false;
+    }
+  } catch (_err) { /* first request */ }
+  try {
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    writeJsonAtomic(statePath, { slug, ts: Date.now(), t: nowIso() });
+  } catch (_err) { /* best-effort */ }
+  const prov = provider || 'the provider';
+  try {
+    writeOutboxMessage(hub, {
+      from: slug,
+      to: 'hub',
+      kind: 'form-request',
+      subject: `API key needed for ${prov} (${slug})`,
+      body: [
+        `<{Update the ${prov} API key for ${slug}}`,
+        `  ${prov} API key [P:api_key,256]`,
+        `  <{[B:cancel,Cancel][B:submit,Save key]}>`,
+      ].join('\n'),
+    });
+  } catch (_err) { /* best-effort */ }
+  try {
+    logEvent(hub, { event: 'auth_form_request', slug, provider: prov, t: nowIso() });
+  } catch (_err) { /* ignore */ }
+  return true;
+}
+
+// --- Context-overflow auto-compact + single retry (hub turns) -------------------
+
+function contextOverflowRetryPath(hub) {
+  return path.join(appDir(hub), 'context-overflow-retry.json');
+}
+
+/**
+ * Hub turn hit a context overflow: compact the conversation's session history
+ * and allow exactly one re-dispatch (guarded for 1 h per conversation).
+ * Returns true when a retry was armed.
+ */
+function armContextOverflowRetry(hub, conversationId) {
+  if (!conversationId) return false;
+  let retries = {};
+  try { retries = JSON.parse(fs.readFileSync(contextOverflowRetryPath(hub), 'utf8')); } catch (_err) { /* none */ }
+  const prev = Number((retries && retries[conversationId]) || 0);
+  if (prev && Date.now() - prev < 60 * 60 * 1000) return false; // already retried once recently
+  try {
+    compactHubSession(hub, getConversation(hub, conversationId));
+  } catch (_err) { /* best-effort */ }
+  try {
+    retries = retries && typeof retries === 'object' ? retries : {};
+    retries[conversationId] = Date.now();
+    fs.mkdirSync(path.dirname(contextOverflowRetryPath(hub)), { recursive: true });
+    writeJsonAtomic(contextOverflowRetryPath(hub), retries);
+  } catch (_err) { /* best-effort */ }
+  try {
+    clearDispatchState(hub, 'hub');
+    logEvent(hub, {
+      event: 'context_overflow_compact_retry',
+      conversation_id: conversationId,
+      t: nowIso(),
+    });
+  } catch (_err) { /* best-effort */ }
+  return true;
+}
+
+/** Run-now (console button): clear everything that idles an agent's dispatch. */
+function runAgentNow(hub, slug) {
+  clearDispatchState(hub, slug);
+  clearRepeatLoopState(hub, slug);
+  writeWatchdogState(hub, slug, { slug, consecutive: 0, recoveredAt: nowIso() });
+  try { fs.rmSync(operatorStopStampPath(hub, slug), { force: true }); } catch (_err) { /* ignore */ }
+  try { logEvent(hub, { event: 'agent_run_now', slug, t: nowIso() }); } catch (_err) { /* ignore */ }
+}
+
+/** All repeat-loop holds (held or recently active) for the console banner. */
+function listRepeatLoopHolds(hub) {
+  const out = [];
+  const check = (slug) => {
+    const s = readRepeatLoopState(hub, slug);
+    if (s && (s.held || s.count >= 2)) {
+      out.push({
+        slug,
+        count: Number(s.count || 0),
+        held: !!s.held,
+        acknowledged: !!s.acknowledged,
+        reason: String(s.reason || 'repeat').startsWith('watchdog') ? 'watchdog' : 'repeat',
+        updated_at: s.updatedAt || '',
+      });
+    }
+  };
+  check('hub');
+  try {
+    const agentsDir = path.join(hub, 'agents');
+    for (const slug of fs.existsSync(agentsDir) ? fs.readdirSync(agentsDir) : []) {
+      if (slug === 'hub') continue;
+      check(slug);
+    }
+  } catch (_err) { /* best-effort */ }
+  return out;
+}
+
 
 module.exports = {
   dispatchPendingAgents,
@@ -2367,4 +3086,24 @@ module.exports = {
   suppressRedispatchAfterStop,
   tryLock,
   wasOperatorStopped,
+  turnTimeoutSecs,
+  watchdogSweep,
+  noteWatchdogRecovery,
+  requeueDispatchMarkers,
+  readRepeatLoopState,
+  setRepeatLoopHold,
+  noteCleanTurnExit,
+  resolveRepeatLoop,
+  staleLockList,
+  forceClearStaleLock,
+  turnAgeSecs,
+  quarantinedMailSummary,
+  resolveQuarantinedMail,
+  providerRotationOverride,
+  clearProviderRotation,
+  maybeArmProviderRotation,
+  maybeEmitAuthFormRequest,
+  armContextOverflowRetry,
+  runAgentNow,
+  listRepeatLoopHolds,
 };
