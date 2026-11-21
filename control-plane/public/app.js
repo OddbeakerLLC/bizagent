@@ -594,19 +594,59 @@ function renderAgentProjects(detail, projects) {
   detail.appendChild(list);
 }
 
-// Turn-age label for running agent lights (2026-11-21 incident review):
-// "running 52m — auto-stop at 45m" so a hung turn is visible before the
-// watchdog fires. Uses the live lock age from /api/state and the configured
-// watchdog timeout from /api/health.
-function turnAgeLabel(agent) {
+// Turn-age display for running agent lights (2026-11-21 rework): line 2 of the
+// agent card reads "Agent X running 12:34" — live elapsed mm:ss, tiered so a
+// long turn is visible at a glance: default color, amber from 25 min, bold
+// bright red from 40 min (the 45-min watchdog approaches). Age comes from the
+// live lock age in /api/state; the 1s ticker below advances the label between
+// state pushes. The auto-stop limit stays in the light's tooltip.
+const TURN_AGE_WARN_SECS = 25 * 60;
+const TURN_AGE_CRIT_SECS = 40 * 60;
+
+function turnAgeSecsOf(agent) {
   const secs = Number(agent && agent.turn_age_secs || 0);
-  if (!agent || !agent.active || secs <= 0) return '';
-  const mins = Math.max(1, Math.round(secs / 60));
+  if (!agent || !agent.active || !Number.isFinite(secs) || secs <= 0) return 0;
+  // Belt-and-suspenders (2026-11-21 incident): a stale server could still send
+  // an epoch-sized value — never render it as minutes.
+  if (secs > 24 * 3600) return 0;
+  return secs;
+}
+
+function turnAgeMmSs(secs) {
+  const s = Math.max(0, Math.floor(Number(secs) || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function turnAgeTier(secs) {
+  if (secs >= TURN_AGE_CRIT_SECS) return 'crit';
+  if (secs >= TURN_AGE_WARN_SECS) return 'warn';
+  return '';
+}
+
+function turnAgeTitle(agent) {
+  const secs = turnAgeSecsOf(agent);
+  if (!secs) return '';
   const limit = lastHealthData && Number(lastHealthData.turn_timeout_secs) > 0
     ? Math.round(Number(lastHealthData.turn_timeout_secs) / 60)
     : 0;
-  return limit > 0 ? `${mins}m — auto-stop at ${limit}m` : `${mins}m`;
+  return `${turnAgeMmSs(secs)}${limit > 0 ? ` — auto-stop at ${limit}m` : ''}`;
 }
+
+// Live elapsed between state pushes: every rendered age span carries its base
+// age and the sampling time; the ticker recomputes mm:ss + tier each second.
+function tickTurnAges() {
+  document.querySelectorAll('[data-turn-age]').forEach((el) => {
+    const base = Number(el.dataset.turnAge || 0);
+    const at = Number(el.dataset.turnAgeAt || 0);
+    if (!(base > 0) || !(at > 0)) return;
+    const secs = base + (Date.now() - at) / 1000;
+    el.textContent = turnAgeMmSs(secs);
+    const tier = turnAgeTier(secs);
+    el.classList.toggle('warn', tier === 'warn');
+    el.classList.toggle('crit', tier === 'crit');
+  });
+}
+setInterval(tickTurnAges, 1000);
 
 function renderAgents(agents) {
   const root = document.getElementById('agents');
@@ -631,7 +671,7 @@ function renderAgents(agents) {
 
     const light = document.createElement('span');
     light.className = `status-light ${agent.hasMail ? 'on' : ''} ${agent.active ? 'running' : ''}`;
-    const turnAge = turnAgeLabel(agent);
+    const turnAge = turnAgeTitle(agent);
     light.title = agent.active
       ? `Stop ${agent.agentName || agent.slug} (running${turnAge ? ` — ${turnAge}` : ''})`
       : (agent.hasMail ? 'Inbox has mail' : 'Inbox empty');
@@ -659,10 +699,22 @@ function renderAgents(agents) {
     // Line 2: agent name (+ live turn age on running lights, 2026-11-21).
     const name = document.createElement('span');
     name.className = 'agent-name';
-    const runningAge = agent.active ? turnAgeLabel(agent) : '';
-    name.textContent = agent.active
-      ? `${agent.agentName} running${runningAge ? ` — ${runningAge}` : ''}`
-      : agent.agentName;
+    if (agent.active) {
+      name.textContent = `${agent.agentName} running `;
+      const ageSecs = turnAgeSecsOf(agent);
+      if (ageSecs > 0) {
+        const age = document.createElement('span');
+        age.className = 'agent-turn-age';
+        const tier = turnAgeTier(ageSecs);
+        if (tier) age.classList.add(tier);
+        age.dataset.turnAge = String(Math.round(ageSecs));
+        age.dataset.turnAgeAt = String(Date.now());
+        age.textContent = turnAgeMmSs(ageSecs);
+        name.appendChild(age);
+      }
+    } else {
+      name.textContent = agent.agentName;
+    }
     labels.appendChild(name);
 
     const chevron = document.createElement('span');
@@ -4301,7 +4353,21 @@ function bannerEscape(s) {
 }
 
 function bannerTimeAgo(ts) {
-  const secs = Math.max(1, Math.floor((Date.now() - Number(ts || 0)) / 1000));
+  // Accepts epoch millis (recent-error cards) and ISO strings (cross-chat
+  // alerts store `new Date().toISOString()`). 2026-11-21 "NaNd ago" bug:
+  // Number('2026-…T…') is NaN and NaN propagated straight into the label —
+  // parse strings properly and fall back to '' (callers omit the segment)
+  // instead of ever printing NaN.
+  let ms = Number(ts);
+  if (!Number.isFinite(ms) || ms <= 0) {
+    const parsed = typeof ts === 'string' ? Date.parse(ts) : NaN;
+    if (!Number.isFinite(parsed) || parsed <= 0) return '';
+    ms = parsed;
+  }
+  if (ms < 1e11) ms *= 1000; // epoch seconds passed instead of millis
+  const diff = Date.now() - ms;
+  if (!Number.isFinite(diff) || diff < 0) return 'just now'; // clock skew guard
+  const secs = Math.max(1, Math.floor(diff / 1000));
   if (secs < 60) return `${secs}s ago`;
   const mins = Math.floor(secs / 60);
   if (mins < 60) return `${mins}m ago`;
@@ -4491,10 +4557,11 @@ function renderHealthBanner(h) {
   // treatment as error cards; the view button reuses the cross-chat jump.
   const attentionHtml = attention.slice(0, BANNER_ERROR_CARD_CAP).map((a) => {
     const name = bannerEscape(a.conversation_name || 'another conversation');
+    const when = bannerTimeAgo(a.ts);
     return (
       `<div class="health-banner-error">` +
       `<strong>Response needs your attention</strong> ` +
-      `<span class="health-banner-detail">in “${name}” · ${bannerEscape(bannerTimeAgo(a.ts))}</span>` +
+      `<span class="health-banner-detail">in “${name}”${when ? ` · ${bannerEscape(when)}` : ''}</span>` +
       `<button type="button" class="cross-chat-alert-link" data-conv-id="${bannerEscape(a.conversationId)}" title="Open that conversation">view</button>` +
       `</div>`
     );

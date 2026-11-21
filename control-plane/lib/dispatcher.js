@@ -1305,13 +1305,24 @@ function lockAgeSecs(lock) {
   try {
     start = Number(fs.readFileSync(startFile, 'utf8').trim());
   } catch (_err) {
+    start = 0;
+  }
+  // 2026-11-21 incident: the dispatch wrapper writes the start file with
+  // `date +%s > start` (truncate-then-fork-exec), so a concurrent reader can
+  // see an empty file — Number('') === 0 made the age `now - 0` = the epoch
+  // itself, which the console rendered as "running 29921391m" (~57 years).
+  // Treat any implausible start (0 / negative / garbage / in the future) as
+  // unknown and fall back to the lock dir mtime; if that is implausible too,
+  // report 0 (unknown) instead of the epoch.
+  if (!Number.isFinite(start) || start <= 0 || start > now) {
     try {
       start = Math.floor(fs.statSync(lock).mtimeMs / 1000);
     } catch (_statErr) {
-      start = now;
+      start = 0;
     }
   }
-  return now - start;
+  if (!Number.isFinite(start) || start <= 0 || start > now) return 0;
+  return Math.max(0, now - start);
 }
 
 function tryLock(hub, slug, leaseSecs) {
@@ -1705,8 +1716,11 @@ function launchAgent(config, slug, model = '', cliName = '') {
     'ts() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ; }',
     // Source hub env so CLI always sees XAI_API_KEY even if parent missed it.
     'if [ -f "$HUB/.bizagent/env" ]; then set -a; . "$HUB/.bizagent/env" 2>/dev/null || true; set +a; fi',
-    'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
-    'date +%s > "$lockdir/start" 2>/dev/null',
+    'printf "%s\\n" "$$" > "$lockdir/.pid.tmp" 2>/dev/null && mv "$lockdir/.pid.tmp" "$lockdir/pid" 2>/dev/null',
+    // Atomic write (tmp+mv): the plain `> start` truncate left an empty-file
+    // window that a concurrent /api/state read rendered as the epoch
+    // (2026-11-21 "running 29921391m" incident).
+    'date +%s > "$lockdir/.start.tmp" 2>/dev/null && mv "$lockdir/.start.tmp" "$lockdir/start" 2>/dev/null',
     'trap \'rm -rf "$lockdir"; rm -f "$pfile"\' EXIT',
     'cd "$HUB" || exit 1',
     'mkdir -p "$(dirname "$agentlog")" "$(dirname "$stderrlog")" 2>/dev/null || true',
@@ -2073,8 +2087,11 @@ function launchHubCold(config, ctx) {
     'mkdir -p "$HUB/.bizagent" "$HUB/logs"',
     // Source hub env so CLI always sees XAI_API_KEY even if parent missed it.
     'if [ -f "$HUB/.bizagent/env" ]; then set -a; . "$HUB/.bizagent/env" 2>/dev/null || true; set +a; fi',
-    'printf "%s\\n" "$$" > "$lockdir/pid" 2>/dev/null',
-    'date +%s > "$lockdir/start" 2>/dev/null',
+    'printf "%s\\n" "$$" > "$lockdir/.pid.tmp" 2>/dev/null && mv "$lockdir/.pid.tmp" "$lockdir/pid" 2>/dev/null',
+    // Atomic write (tmp+mv): the plain `> start` truncate left an empty-file
+    // window that a concurrent /api/state read rendered as the epoch
+    // (2026-11-21 "running 29921391m" incident).
+    'date +%s > "$lockdir/.start.tmp" 2>/dev/null && mv "$lockdir/.start.tmp" "$lockdir/start" 2>/dev/null',
     'code=0',
     // On exit: drop lock + ephemeral prompt, then outbox safety net (if console turn).
     'cleanup() {',
@@ -2734,7 +2751,18 @@ function resolveRepeatLoop(hub, slug, action) {
 function turnAgeSecs(hub, slug) {
   const lock = lockDir(hub, slug);
   if (!fs.existsSync(lock)) return 0;
-  return lockAgeSecs(lock);
+  const age = lockAgeSecs(lock);
+  // Server-side sanity clamp (2026-11-21 incident): a live turn can never
+  // outlive the hung-turn watchdog (settings.dispatch.turn_timeout_secs) by
+  // more than the kill grace, so anything beyond that bound is bogus data —
+  // e.g. an epoch leaking through a zeroed start file. Report unknown (0)
+  // instead of letting the console render "running 29921391m".
+  let bound = 45 * 60;
+  try {
+    bound = turnTimeoutSecs(loadRegistry(hub));
+  } catch (_err) { /* default bound */ }
+  if (age > bound + 300) return 0;
+  return age;
 }
 
 // --- Stale-lock surfacing (card-resolvable, no SSH) ---------------------------

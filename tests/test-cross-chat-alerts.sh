@@ -101,6 +101,10 @@ grep -q "bannerAttentionItems" "$APP" || fail "app.js missing bannerAttentionIte
 grep -q "Response needs your attention" "$APP" || fail "app.js missing attention banner card"
 grep -q "if (alert.kind === 'reply') return false;" "$APP" || fail "badge no longer excludes reply kind"
 grep -q "attentionHtml" "$APP" || fail "banner does not render attention cards"
-grep -q "20261121-resilience-cards" "$ROOT/control-plane/public/index.html" || fail "index.html cache-bust missing"
+# 2026-11-21 "NaNd ago" fix: the attention card parses the alert's ISO ts via
+# bannerTimeAgo and omits the segment entirely when it is unparseable.
+grep -q "const when = bannerTimeAgo(a.ts)" "$APP" || fail "attention card does not route ts through bannerTimeAgo"
+grep -q 'when ? ` · ${bannerEscape(when)}` : '"''" "$APP" || fail "attention card does not omit an unparseable timestamp"
+grep -q "20261121-agent-status-tiers" "$ROOT/control-plane/public/index.html" || fail "index.html cache-bust missing"
 
 echo "  ok: cross-chat-alerts static"

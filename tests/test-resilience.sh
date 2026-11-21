@@ -58,13 +58,17 @@ grep -q 'data-action="model"' "$ROOT/control-plane/public/app.js" \
   || fail "console missing Switch-model button"
 grep -q "This week's incidents" "$ROOT/control-plane/public/app.js" \
   || fail "console missing weekly incident-digest card"
-grep -q "turnAgeLabel" "$ROOT/control-plane/public/app.js" \
+grep -q "turnAgeSecsOf" "$ROOT/control-plane/public/app.js" \
   || fail "console missing turn-age label on agent lights"
+grep -q "tickTurnAges" "$ROOT/control-plane/public/app.js" \
+  || fail "console missing live turn-age ticker"
+grep -q "agent-turn-age" "$ROOT/control-plane/public/styles.css" \
+  || fail "styles missing agent-turn-age tier classes"
 grep -q "e.detail" "$ROOT/control-plane/public/app.js" \
   || fail "console error cards do not render captured stderr detail"
 grep -q "agent-run-now" "$ROOT/control-plane/public/app.js" \
   || fail "console missing Run-now button for idle agents"
-grep -q "20261121-resilience-cards" "$ROOT/control-plane/public/index.html" \
+grep -q "20261121-agent-status-tiers" "$ROOT/control-plane/public/index.html" \
   || fail "index.html missing cache-bust for the resilience UI"
 grep -q "health-banner-action" "$ROOT/control-plane/public/styles.css" \
   || fail "styles missing health-banner-action"
@@ -217,6 +221,28 @@ fs.writeFileSync(path.join(lockDir, "pid"), "999999999");
 assert.deepEqual(d.staleLockList(hub), [], "dead-pid lock without a CLI child is not card-stale");
 fs.rmSync(lockDir, { recursive: true, force: true });
 
+// --- Turn-age sanity: empty/garbage start file must never read as the epoch ---
+// 2026-11-21 incident: the wrapper's `date +%s > start` truncate window let a
+// concurrent reader see an empty file → Number('') === 0 → age = now (epoch),
+// rendered by the console as "running 29921391m".
+fs.mkdirSync(lockDir, { recursive: true });
+fs.writeFileSync(path.join(lockDir, "pid"), "999999999");
+fs.writeFileSync(path.join(lockDir, "start"), ""); // empty — the truncate window
+fs.utimesSync(lockDir, new Date(Date.now() - 120000), new Date(Date.now() - 120000));
+const emptyStartAge = d.turnAgeSecs(hub, "ba");
+assert.ok(emptyStartAge >= 60 && emptyStartAge <= 300, `empty start file falls back to lock mtime (got ${emptyStartAge}s, epoch would be ~1.7e9)`);
+fs.writeFileSync(path.join(lockDir, "start"), "not-a-number");
+const garbageAge = d.turnAgeSecs(hub, "ba");
+assert.ok(garbageAge >= 60 && garbageAge <= 300, `garbage start file falls back to lock mtime (got ${garbageAge}s)`);
+fs.writeFileSync(path.join(lockDir, "start"), String(Math.floor(Date.now() / 1000) + 3600)); // future/clock skew
+const futureAge = d.turnAgeSecs(hub, "ba");
+assert.ok(futureAge >= 60 && futureAge <= 300, `future start file falls back to lock mtime (got ${futureAge}s, not negative/epoch)`);
+fs.writeFileSync(path.join(lockDir, "start"), String(Math.floor(Date.now() / 1000) - 10 * 86400)); // implausibly old
+assert.equal(d.turnAgeSecs(hub, "ba"), 0, "age beyond the watchdog bound is clamped to unknown (0)");
+fs.writeFileSync(path.join(lockDir, "start"), String(Math.floor(Date.now() / 1000) - 90));
+assert.ok(d.turnAgeSecs(hub, "ba") >= 60 && d.turnAgeSecs(hub, "ba") <= 300, "plausible start still yields the real age");
+fs.rmSync(lockDir, { recursive: true, force: true });
+
 // --- Watchdog live-pid kill path (CR 2026-11-21 test gap) -----------------------
 // A live process holding an over-age lock is SIGKILLed, the lock dropped and
 // the pending mail re-queued (first strike — no hold yet).
@@ -350,5 +376,67 @@ const dg = digest.computeDigest(hub);
 assert.equal(dg.total, 3, "digest counts only in-window errors");
 assert.deepEqual(dg.categories[0], { category: "rate_limit", count: 2 }, "bucketed by category with counts");
 NODE
+
+# --- Client turn-age + banner-time regression (2026-11-21 rework) --------------
+# app.js helpers run in a vm sandbox: mm:ss formatting, warn/crit tiers, the
+# epoch clamp, and bannerTimeAgo never printing NaN (ISO alert timestamps).
+if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const fs = require("fs");
+const vm = require("vm");
+const src = fs.readFileSync(root + "/control-plane/public/app.js", "utf8");
+const noop = () => {};
+const el = () => ({
+  addEventListener: noop, textContent: "", innerHTML: "", dataset: {}, value: "",
+  style: {}, classList: { toggle: noop, add: noop, remove: noop, contains: () => false },
+  setAttribute: noop, getAttribute: () => null, appendChild: noop, removeChild: noop,
+  querySelector: () => null, querySelectorAll: () => [], title: "", disabled: false,
+  checked: false, focus: noop, click: noop,
+});
+const sandbox = {
+  document: { getElementById: el, querySelector: () => null, querySelectorAll: () => [], createElement: el, addEventListener: noop, body: el(), documentElement: el() },
+  setInterval: () => 0, setTimeout: () => 0, clearInterval: noop, clearTimeout: noop,
+  localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  sessionStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+  navigator: { userAgent: "node-test" },
+  location: { hash: "", href: "http://localhost/", pathname: "/", search: "" },
+  history: { replaceState: noop, pushState: noop },
+  speechSynthesis: undefined, SpeechSynthesisUtterance: function () {},
+  Audio: function () { this.play = () => Promise.resolve(); this.pause = noop; },
+  URL: URL, Blob: function () {},
+  fetch: () => Promise.reject(new Error("no network in test")),
+  EventSource: function () { this.onmessage = null; this.onerror = null; this.close = noop; },
+  WebSocket: function () { this.close = noop; },
+  console, addEventListener: noop, removeEventListener: noop,
+};
+sandbox.window = sandbox; sandbox.self = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox);
+const assert = (cond, msg) => { if (!cond) { console.error("FAIL: " + msg); process.exit(1); } };
+
+// mm:ss formatting
+assert(sandbox.turnAgeMmSs(754) === "12:34", "turnAgeMmSs 754s = 12:34, got " + sandbox.turnAgeMmSs(754));
+assert(sandbox.turnAgeMmSs(65) === "1:05", "turnAgeMmSs pads seconds");
+assert(sandbox.turnAgeMmSs(0) === "0:00", "turnAgeMmSs zero");
+// tiers: default < 25 min, warn at 25 min, crit at 40 min
+assert(sandbox.turnAgeTier(60) === "", "under 25 min = default tier");
+assert(sandbox.turnAgeTier(25 * 60) === "warn", "25 min = warn tier");
+assert(sandbox.turnAgeTier(39 * 60) === "warn", "39 min still warn");
+assert(sandbox.turnAgeTier(40 * 60) === "crit", "40 min = crit tier");
+// epoch clamp: a stale server sending the lock-start epoch never renders
+assert(sandbox.turnAgeSecsOf({ active: true, turn_age_secs: 1.8e9 }) === 0, "epoch-sized age clamped to 0");
+assert(sandbox.turnAgeSecsOf({ active: false, turn_age_secs: 120 }) === 0, "idle agent has no age");
+assert(sandbox.turnAgeSecsOf({ active: true, turn_age_secs: 90 }) === 90, "plausible age passes through");
+// bannerTimeAgo: ISO strings (cross-chat alerts) parse; garbage never NaN
+assert(/s ago$/.test(sandbox.bannerTimeAgo(new Date().toISOString())), "ISO ts parses: " + sandbox.bannerTimeAgo(new Date().toISOString()));
+assert(sandbox.bannerTimeAgo(Date.now() - 90 * 1000) === "1m ago", "epoch ms parses");
+assert(sandbox.bannerTimeAgo("not-a-date") === "", "garbage ts falls back to empty, got " + sandbox.bannerTimeAgo("not-a-date"));
+assert(sandbox.bannerTimeAgo(undefined) === "", "undefined ts falls back to empty");
+assert(sandbox.bannerTimeAgo(Math.floor(Date.now() / 1000)).endsWith("s ago"), "epoch seconds tolerated");
+console.log("ok: client turn-age/banner-time helpers");
+NODE
+then
+  fail "client turn-age/banner-time regression failed"
+fi
 
 echo "ok: test-resilience"

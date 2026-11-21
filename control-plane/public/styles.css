@@ -91,6 +91,20 @@ body {
   color: #cbd5e1;
   margin-top: 1px;
 }
+/* Live turn age on running agent lights (2026-11-21): tiered so a long turn
+   is visible at a glance — default, amber from 25 min, bold bright red from
+   40 min (the 45-min watchdog approaches). */
+.agent-turn-age {
+  font-variant-numeric: tabular-nums;
+}
+.agent-turn-age.warn {
+  color: #f59e0b;
+  font-weight: 600;
+}
+.agent-turn-age.crit {
+  color: #ff4d4f;
+  font-weight: 700;
+}
 .agent-product {
   font-size: 15px;
   font-weight: 700;
