@@ -856,7 +856,7 @@ async function handleApi(config, req, res) {
     let killed = false;
     if (slug) {
       try {
-        killed = !!(await stopAgentTurn(config.hub, slug));
+        killed = !!(await stopAgentTurn(config.hub, slug, { quarantineInbox: true }));
       } catch (_err) {
         killed = false;
       }
@@ -893,7 +893,7 @@ async function handleApi(config, req, res) {
     if (!slug) return send(res, 400, { error: "missing agent slug" });
     let killed = false;
     try {
-      killed = !!(await stopAgentTurn(config.hub, slug));
+      killed = !!(await stopAgentTurn(config.hub, slug, { quarantineInbox: true }));
     } catch (_err) {
       killed = false;
     }

@@ -12,7 +12,7 @@ const {
   ensureHubRuntimePrompt,
   pickPendingConversationId,
 } = require('./hub-memory');
-const { pendingMail, writeOutboxMessage } = require('./mail');
+const { pendingMail, quarantineInboxMail, writeOutboxMessage } = require('./mail');
 const safeMode = require('./safe-mode');
 const { logEvent, logLatency, logError, appendLog } = require('./log');
 const {
@@ -1470,14 +1470,58 @@ function clearDispatchStateUnlessOperatorStop(hub, slug) {
 }
 
 /**
+ * Operator-stop follow-up (2026-11-20 hub dispatch): move every pending inbox
+ * message into the slug's inbox quarantine so the next dispatch cannot re-run
+ * the same task and the inbox ends up empty. For product agents, notify the
+ * hub PTL by mail — that notice is what makes quarantined items discoverable:
+ * the hub reviews them to diagnose what went wrong and either raises it with
+ * the operator or archives the files. No self-addressed notice for `hub`
+ * (an Escape stop happens with the operator present in the hub chat).
+ * Returns the quarantined destination paths.
+ */
+function quarantineInboxAfterOperatorStop(hub, slug) {
+  const moved = quarantineInboxMail(hub, slug, 'operator_stop');
+  if (!moved.length) return [];
+  if (slug !== 'hub') {
+    try {
+      writeOutboxMessage(hub, {
+        from: slug,
+        to: 'hub',
+        subject: `inbox quarantined: ${slug} stopped by operator`,
+        body: [
+          `The operator stopped \`${slug}\` while a turn was in flight. Its pending inbox mail was quarantined (not archived, not re-dispatched):`,
+          '',
+          ...moved.map((p) => `- ${path.relative(hub, p)}`),
+          '',
+          'Review the quarantined message(s) to diagnose what went wrong, then either raise it with the operator or archive the file(s) (mv into the matching inbox/archive/). Do not re-dispatch the quarantined mail as new work.',
+        ].join('\n'),
+      });
+    } catch (_err) { /* best-effort */ }
+  }
+  try {
+    logEvent(hub, {
+      event: 'operator_stop_quarantine',
+      slug,
+      quarantined: moved.length,
+      t: nowIso(),
+    });
+  } catch (_err) { /* ignore */ }
+  return moved;
+}
+
+/**
  * Hard-stop an in-flight turn (operator Escape or running status light).
  * - Product agents / cold hub: SIGKILL detached process group from lock pid.
  * - Warm hub: cancel the daemon's in-flight CLI (do not kill CP or daemon).
  * Always drops the lock and holds dispatch markers so mail is not re-fired.
+ * `opts.quarantineInbox` (operator stop routes only) additionally moves the
+ * pending inbox mail into `<inbox>/quarantine/` — the roster provider-change
+ * stop path must NOT quarantine (its pending mail is re-dispatched on the
+ * next tick with the new provider/model).
  * Async: await from API handlers. Returns true if a live process was targeted
  * or warm cancel reported an in-flight kill.
  */
-async function stopAgentTurn(hub, slug) {
+async function stopAgentTurn(hub, slug, opts = {}) {
   const lock = lockDir(hub, slug);
   let killed = false;
 
@@ -1510,6 +1554,12 @@ async function stopAgentTurn(hub, slug) {
 
   // Hold markers so the same inbox mail is not immediately re-dispatched.
   suppressRedispatchAfterStop(hub, slug);
+
+  // Operator stop (light click / Escape): quarantine the pending inbox mail
+  // so the next dispatch cannot re-run the same task; the inbox ends empty.
+  if (opts.quarantineInbox) {
+    try { quarantineInboxAfterOperatorStop(hub, slug); } catch (_err) { /* best-effort */ }
+  }
 
   try {
     logEvent(hub, {
@@ -2313,6 +2363,7 @@ module.exports = {
   requestWarmHubTurn,
   shouldNotifyIterationCap,
   stopAgentTurn,
+  quarantineInboxAfterOperatorStop,
   suppressRedispatchAfterStop,
   tryLock,
   wasOperatorStopped,

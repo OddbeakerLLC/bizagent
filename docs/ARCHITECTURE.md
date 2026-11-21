@@ -100,6 +100,15 @@ The server does not replace the hub filesystem with a database:
   non-slug `to:` values are moved once to `.bizagent/quarantine/` so they do
   not WARN every poll tick. Unknown but well-formed single slugs still WARN
   (operator may add the product).
+- **Operator stop quarantines inbox mail.** Stopping a running agent (console
+  status-light click, or Escape for the hub) moves its pending `inbox/*.md`
+  messages into `inbox/quarantine/` (sibling of `archive/`, full original files
+  with frontmatter preserved) so the next dispatch cannot re-run the same task
+  and the inbox ends up empty. `pendingMail` is non-recursive, so quarantined
+  mail is never re-picked. For product agents the control plane mails the hub
+  PTL a notice listing the quarantined files; the PTL reviews them to diagnose
+  what went wrong and either raises it with the operator or archives them.
+  Mail handled normally still goes to `inbox/archive/` unchanged.
 - `settings.dispatch.poll_seconds` is honored (default 2, clamped 1–30).
 - Product-agent launches get an **ephemeral turn prompt** (like the hub) under
   `.bizagent/prompts/turns/` that inlines pending inbox bodies so agents need

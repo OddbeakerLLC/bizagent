@@ -215,6 +215,59 @@ function quarantineOutboxFile(hub, file, reason) {
   return dest;
 }
 
+function inboxQuarantineDir(hub, slug) {
+  return path.join(inboxFor(hub, slug), 'quarantine');
+}
+
+/**
+ * Move every pending inbox message for `slug` into `<inbox>/quarantine/`
+ * (sibling of the existing `archive/` subdir). Used when the operator stops a
+ * running agent: the in-flight message must not be re-dispatched on the next
+ * tick, and the inbox ends up empty. Full original files (frontmatter
+ * included) are preserved for later analysis; `pendingMail` is non-recursive,
+ * so quarantined mail is never picked up by the dispatcher or inlined into a
+ * turn prompt. Normal handled mail still goes to `inbox/archive/` unchanged.
+ * Returns the absolute destination paths of the moved files.
+ */
+function quarantineInboxMail(hub, slug, reason) {
+  const files = pendingMail(hub, slug);
+  if (!files.length) return [];
+  const destDir = inboxQuarantineDir(hub, slug);
+  fs.mkdirSync(destDir, { recursive: true });
+  const moved = [];
+  for (const file of files) {
+    const base = path.basename(file);
+    let dest = path.join(destDir, base);
+    if (fs.existsSync(dest)) dest = path.join(destDir, `${Date.now()}-${base}`);
+    try {
+      fs.renameSync(file, dest);
+    } catch (_err) {
+      try {
+        fs.copyFileSync(file, dest);
+        fs.unlinkSync(file);
+      } catch (copyErr) {
+        logEvent(hub, {
+          event: 'inbox_quarantine_failed',
+          slug,
+          file: base,
+          reason: 'copy_error',
+          error: copyErr.message,
+        });
+        continue;
+      }
+    }
+    moved.push(dest);
+    logEvent(hub, {
+      event: 'inbox_quarantine',
+      slug,
+      file: base,
+      reason: reason || 'operator_stop',
+      dest: path.relative(hub, dest),
+    });
+  }
+  return moved;
+}
+
 function isMultiRecipient(to) {
   if (!to) return false;
   // Single slug only: letters, digits, underscore, hyphen.
@@ -549,12 +602,14 @@ module.exports = {
   canRouteToUser,
   frontmatterValue,
   inboxFor,
+  inboxQuarantineDir,
   isMultiRecipient,
   isValidSingleRecipient,
   maybeStampUserConversationId,
   outboxFor,
   pendingMail,
   quarantineDir,
+  quarantineInboxMail,
   quarantineOutboxFile,
   recipientSlugs,
   routeOutboxes,

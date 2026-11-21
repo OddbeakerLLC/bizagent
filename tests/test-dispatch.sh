@@ -180,6 +180,89 @@ then
   fail "lock-lease live-owner / leftover-kill unit checks failed"
 fi
 
+# --- Operator stop quarantines inbox mail (2026-11-20) ---
+# Light click / Escape: pending inbox mail moves to <inbox>/quarantine/ (full
+# file preserved), inbox ends empty, dispatch cannot re-pick it, and the hub
+# PTL gets a review notice (product agents only). The roster provider-change
+# stop path (no opts) must NOT quarantine — its pending mail is re-dispatched.
+if ! node - "$ROOT" "$TMP" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.argv[2];
+const tmp = process.argv[3];
+const { stopAgentTurn, quarantineInboxAfterOperatorStop } = require(path.join(root, 'control-plane/lib/dispatcher'));
+const { pendingMail, inboxQuarantineDir } = require(path.join(root, 'control-plane/lib/mail'));
+
+const fail = (code, msg) => { console.error(msg); process.exit(code); };
+
+function makeHub(name) {
+  const hub = path.join(tmp, name);
+  for (const dir of [
+    path.join(hub, 'agents', 'alpha', 'inbox'),
+    path.join(hub, 'agents', 'alpha', 'outbox'),
+    path.join(hub, 'inbox'),
+    path.join(hub, 'outbox'),
+    path.join(hub, 'logs'),
+  ]) fs.mkdirSync(dir, { recursive: true });
+  return hub;
+}
+
+function writeMail(inbox, name, to) {
+  const file = path.join(inbox, name);
+  fs.writeFileSync(file, `---\nfrom: hub\nto: ${to}\ndate: 2026-11-20\nsubject: quarantine-test\n---\nbody-${name}\n`);
+  return file;
+}
+
+(async () => {
+  // (1) Product agent stop: inbox emptied into quarantine, notice mailed to hub.
+  const hub = makeHub('quarantine-hub');
+  const inbox = path.join(hub, 'agents', 'alpha', 'inbox');
+  writeMail(inbox, '2026-11-20-task.md', 'alpha');
+  await stopAgentTurn(hub, 'alpha', { quarantineInbox: true });
+  const qdir = inboxQuarantineDir(hub, 'alpha');
+  const qfiles = fs.existsSync(qdir) ? fs.readdirSync(qdir).filter((f) => f.endsWith('.md')) : [];
+  if (qfiles.length !== 1 || qfiles[0] !== '2026-11-20-task.md') fail(1, `quarantine must hold the original file (got: ${qfiles.join(',')})`);
+  const qcontent = fs.readFileSync(path.join(qdir, '2026-11-20-task.md'), 'utf8');
+  if (!qcontent.startsWith('---\nfrom: hub') || !qcontent.includes('body-2026-11-20-task.md')) fail(2, 'quarantined file must keep full frontmatter + body');
+  if (pendingMail(hub, 'alpha').length !== 0) fail(3, 'inbox must be empty after operator stop');
+  const noticeDir = path.join(hub, 'agents', 'alpha', 'outbox');
+  const notices = fs.readdirSync(noticeDir).filter((f) => f.endsWith('.md'));
+  if (notices.length !== 1) fail(4, `hub PTL must get exactly one quarantine notice (got ${notices.length})`);
+  const notice = fs.readFileSync(path.join(noticeDir, notices[0]), 'utf8');
+  if (!notice.includes('agents/alpha/inbox/quarantine/2026-11-20-task.md')) fail(5, 'notice must list the quarantined path');
+  if (!notice.includes('Do not re-dispatch')) fail(6, 'notice must tell the PTL not to re-dispatch');
+
+  // (2) Quarantined mail is invisible to the dispatcher/pendingMail scan.
+  if (pendingMail(hub, 'alpha').some((f) => f.includes('quarantine'))) fail(7, 'pendingMail must not see quarantine subdir');
+
+  // (3) Hub Escape stop: hub inbox mail quarantined, no self-addressed notice.
+  writeMail(path.join(hub, 'inbox'), '2026-11-20-hub-task.md', 'hub');
+  await stopAgentTurn(hub, 'hub', { quarantineInbox: true });
+  const hubQ = path.join(hub, 'inbox', 'quarantine');
+  if (!fs.existsSync(path.join(hubQ, '2026-11-20-hub-task.md'))) fail(8, 'hub inbox mail must be quarantined on Escape stop');
+  if (pendingMail(hub, 'hub').length !== 0) fail(9, 'hub inbox must be empty after Escape stop');
+  const hubOutboxNotices = fs.readdirSync(path.join(hub, 'outbox')).filter((f) => f.endsWith('.md'));
+  if (hubOutboxNotices.length !== 0) fail(10, 'hub stop must not write a self-addressed notice');
+
+  // (4) Default stop (roster provider-change path) must NOT quarantine.
+  const hub2 = makeHub('roster-stop-hub');
+  const inbox2 = path.join(hub2, 'agents', 'alpha', 'inbox');
+  writeMail(inbox2, '2026-11-20-keep.md', 'alpha');
+  await stopAgentTurn(hub2, 'alpha');
+  if (pendingMail(hub2, 'alpha').length !== 1) fail(11, 'stop without quarantineInbox must leave pending mail in place');
+  if (fs.existsSync(inboxQuarantineDir(hub2, 'alpha'))) fail(12, 'stop without quarantineInbox must not create quarantine dir');
+
+  // (5) Empty inbox: no quarantine dir churn, no notice.
+  const hub3 = makeHub('empty-stop-hub');
+  const moved = quarantineInboxAfterOperatorStop(hub3, 'alpha');
+  if (moved.length !== 0) fail(13, 'empty inbox must quarantine nothing');
+  if (fs.readdirSync(path.join(hub3, 'agents', 'alpha', 'outbox')).length !== 0) fail(14, 'empty inbox must not mail a notice');
+})().catch((err) => { console.error('unexpected throw:', err); process.exit(99); });
+NODE
+then
+  fail "operator-stop inbox quarantine checks failed"
+fi
+
 # allow_concurrency=false serializes hub + product agents (at most one live turn).
 if ! node - "$ROOT" <<'NODE'
 const fs = require('fs');
