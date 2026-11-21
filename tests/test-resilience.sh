@@ -111,8 +111,13 @@ assert.equal(d.turnTimeoutSecs({ settings: { dispatch: { turn_timeout_secs: 600 
 
 // --- Repeat-loop detection ----------------------------------------------------
 const inbox = path.join(hub, "agents", "ba", "inbox");
+// Clean exits over mail younger than the 30-min grace window are exempt
+// (multi-turn tasks / defer-wake), so age the fixture mail out of the grace
+// window before counting no-op turns.
+const ageMail = (f) => { const t = new Date(Date.now() - 2 * 3600 * 1000); fs.utimesSync(f, t, t); };
 const mail = path.join(inbox, "2026-11-21-test.md");
 fs.writeFileSync(mail, "---\nfrom: hub\nto: ba\nsubject: test\n---\nbody\n");
+ageMail(mail);
 d.markMailDispatched(hub, "ba", [mail], 3600, 60);
 // Clean exit over still-pending, already-dispatched mail = a no-op turn.
 let s = d.noteCleanTurnExit(hub, "ba");
@@ -124,12 +129,41 @@ assert.ok(s && s.held, "third identical no-op turn holds dispatch");
 const holds = d.listRepeatLoopHolds(hub);
 assert.ok(holds.some((h) => h.slug === "ba" && h.held), "hold listed for the banner");
 // Fresh/changed mail resets the counter.
-d.clearRepeatLoopState ? null : null;
 fs.writeFileSync(mail, "---\nfrom: hub\nto: ba\nsubject: changed\n---\nnew body\n");
+ageMail(mail);
 d.markMailDispatched(hub, "ba", [mail], 3600, 60);
 fs.rmSync(path.join(hub, ".bizagent", "repeat-loop", "ba.json"), { force: true });
 s = d.noteCleanTurnExit(hub, "ba");
 assert.ok(s && s.count === 1, "changed mail restarts the count");
+
+// --- Repeat-loop exemption (CR 2026-11-21): young mail + defer-wake -----------
+// Supported flows deliberately leave mail pending across clean turns —
+// multi-turn tasks and defer-wake reminders must not trip the hold. Run with
+// only the exempt mail pending (the aged fixture mail steps out temporarily).
+fs.rmSync(path.join(hub, ".bizagent", "repeat-loop", "ba.json"), { force: true });
+fs.renameSync(mail, path.join(inbox, "archive", "2026-11-21-test.md"));
+const youngMail = path.join(inbox, "2026-11-21-young.md");
+fs.writeFileSync(youngMail, "---\nfrom: hub\nto: ba\nsubject: multi-turn task\n---\nbody\n");
+d.markMailDispatched(hub, "ba", [youngMail], 3600, 60);
+assert.equal(d.noteCleanTurnExit(hub, "ba"), null, "young pending mail is exempt from repeat counting");
+assert.equal(d.noteCleanTurnExit(hub, "ba"), null, "still exempt on the next clean exit");
+assert.equal(d.readRepeatLoopState(hub, "ba"), null, "no repeat state written for exempt mail");
+// Grace expires: the same mail, now old, counts again.
+ageMail(youngMail);
+d.markMailDispatched(hub, "ba", [youngMail], 3600, 60);
+s = d.noteCleanTurnExit(hub, "ba");
+assert.ok(s && s.count === 1, "aged mail counts again after the grace window");
+// Explicit defer marker: exempt even when old.
+fs.rmSync(path.join(hub, ".bizagent", "repeat-loop", "ba.json"), { force: true });
+fs.renameSync(youngMail, path.join(inbox, "archive", "2026-11-21-young.md"));
+const wakeMail = path.join(inbox, "2026-11-21-wake.md");
+fs.writeFileSync(wakeMail, "---\nfrom: bizagent\nto: ba\nkind: defer-wake\nsubject: wake\n---\nbody\n");
+ageMail(wakeMail);
+d.markMailDispatched(hub, "ba", [wakeMail], 3600, 60);
+assert.equal(d.noteCleanTurnExit(hub, "ba"), null, "defer-wake mail is exempt even when old");
+fs.renameSync(wakeMail, path.join(inbox, "archive", "2026-11-21-wake.md"));
+fs.renameSync(path.join(inbox, "archive", "2026-11-21-test.md"), mail);
+fs.rmSync(path.join(hub, ".bizagent", "repeat-loop", "ba.json"), { force: true });
 
 // resolveRepeatLoop: skip archives the mail and clears the hold.
 d.setRepeatLoopHold(hub, "ba", "repeat");
@@ -183,6 +217,23 @@ fs.writeFileSync(path.join(lockDir, "pid"), "999999999");
 assert.deepEqual(d.staleLockList(hub), [], "dead-pid lock without a CLI child is not card-stale");
 fs.rmSync(lockDir, { recursive: true, force: true });
 
+// --- Watchdog live-pid kill path (CR 2026-11-21 test gap) -----------------------
+// A live process holding an over-age lock is SIGKILLed, the lock dropped and
+// the pending mail re-queued (first strike — no hold yet).
+const { spawn } = require("child_process");
+const hung = spawn("sleep", ["60"], { detached: true, stdio: "ignore" });
+fs.mkdirSync(lockDir, { recursive: true });
+fs.writeFileSync(path.join(lockDir, "pid"), String(hung.pid));
+fs.writeFileSync(path.join(lockDir, "start"), String(Math.floor(Date.now() / 1000) - 3600));
+const liveStops = d.watchdogSweep({ hub, registry: { settings: { dispatch: { turn_timeout_secs: 60 } } }, lockLeaseSecs: 60 });
+const liveStop = liveStops.find((x) => x.slug === "ba");
+assert.ok(liveStop && liveStop.killed, "watchdog stops a live hung turn");
+assert.equal(liveStop.requeued, true, "watchdog requeues the hung turn's mail");
+let hungState = "gone";
+try { hungState = fs.readFileSync(`/proc/${hung.pid}/stat`, "utf8").split(" ")[2] || ""; } catch (_err) { /* gone */ }
+assert.ok(hungState === "gone" || hungState === "Z", `hung turn process was killed (state ${hungState})`);
+assert.ok(!fs.existsSync(lockDir), "watchdog dropped the stopped turn's lock");
+
 // --- Quarantined mail surfacing + follow-ups ------------------------------------
 const quarantineDir = path.join(inbox, "quarantine");
 fs.mkdirSync(quarantineDir, { recursive: true });
@@ -204,6 +255,22 @@ d.markMailDispatched(hub, "ba", [mail, mail2], 3600, 60);
 assert.equal(d.pendingUndispatchedMail(hub, "ba", 3600, 60).length, 0, "quiet before run-now");
 d.runAgentNow(hub, "ba");
 assert.ok(d.pendingUndispatchedMail(hub, "ba", 3600, 60).length === 2, "run-now clears markers");
+
+// --- Context-overflow retry: scoped marker clear (CR 2026-11-21 minor) ----------
+// The retry must re-dispatch only the overflowed conversation's hub mail, not
+// every pending hub mail (the old clearDispatchState(hub, 'hub') behavior).
+const convs = require(path.join(libDir, "conversations.js"));
+const conv = convs.createConversation(hub, "overflow retry test");
+const hubMailA = path.join(hub, "inbox", "2026-11-21-overflow.md");
+fs.writeFileSync(hubMailA, `---\nfrom: ba\nto: hub\nsubject: overflow\nconversation_id: ${conv.id}\n---\nbody\n`);
+const hubMailB = path.join(hub, "inbox", "2026-11-21-other-conv.md");
+fs.writeFileSync(hubMailB, "---\nfrom: ba\nto: hub\nsubject: other\nconversation_id: some-other-conv\n---\nbody\n");
+d.markMailDispatched(hub, "hub", [hubMailA, hubMailB], 3600, 60);
+assert.ok(d.armContextOverflowRetry(hub, conv.id), "first overflow arms a compact+retry");
+assert.equal(d.armContextOverflowRetry(hub, conv.id), false, "retry is guarded for 1 h per conversation");
+const hubPending = d.pendingUndispatchedMail(hub, "hub", 3600, 60).map((f) => path.basename(f));
+assert.ok(hubPending.includes("2026-11-21-overflow.md"), "affected conversation's mail re-dispatches");
+assert.ok(!hubPending.includes("2026-11-21-other-conv.md"), "other conversations' mail stays held");
 
 // --- Model preflight ----------------------------------------------------------------
 assert.equal(preflight.preflightGate(hub, "venice", "m-a").block, false, "no cache → fail open");
@@ -229,7 +296,7 @@ assert.equal(d.providerRotationOverride(hub, "ba"), null, "no rotation by defaul
 // the keyless ollama entry.
 const rot = d.maybeArmProviderRotation(hub, "ba", "venice", 2);
 assert.ok(rot && rot.provider === "ollama", `rotation armed onto ollama (got ${JSON.stringify(rot)})`);
-assert.equal(d.providerRotationOverride(hub, "ba").provider, "override" === "" ? "" : "ollama", "override readable");
+assert.equal(d.providerRotationOverride(hub, "ba").provider, "ollama", "override readable");
 assert.equal(d.maybeArmProviderRotation(hub, "ba", "venice", 1), null, "single transient failure does not rotate");
 d.clearProviderRotation(hub, "ba");
 assert.equal(d.providerRotationOverride(hub, "ba"), null, "rotation cleared");
@@ -250,6 +317,22 @@ assert.equal(pe.classifyProviderError("parse error: unexpected token").kind, "pa
 assert.ok(pe.isNonTransientKind("auth") && pe.isNonTransientKind("model_missing"), "non-transient set");
 assert.ok(pe.isTransientKind("rate_limit") && pe.isTransientKind("parse"), "transient set");
 assert.ok(!pe.isTransientKind("model_missing"), "model_missing is not retried");
+
+// --- recordAgentError: dedupe returns the kind; escalateCard threshold ----------
+const rlErr = "429 too many requests — rate limit exceeded";
+fs.rmSync(path.join(hub, ".bizagent", "last-agent-error.json"), { force: true });
+assert.equal(d.recordAgentError(hub, "ba", 1, rlErr, null), "rate_limit", "kind returned on first failure");
+// Same failure double-fire (shell EXIT + Node exit) within the 45 s dedupe
+// window: recording is suppressed but the kind must still come back so the
+// caller's isNonTransientKind decision is correct (CR 2026-11-21 major 1).
+assert.equal(d.recordAgentError(hub, "ba", 1, rlErr, null), "rate_limit", "deduped duplicate still returns the kind");
+assert.equal(d.recordAgentError(hub, "ba", 2, rlErr, null), "rate_limit", "kind returned on second failure");
+const recentFile = path.join(hub, ".bizagent", "recent-errors.json");
+let recent = JSON.parse(fs.readFileSync(recentFile, "utf8"));
+assert.ok(!recent.some((e) => e.kind === "rate_limit"), "transient failures below the threshold stay log-only");
+assert.equal(d.recordAgentError(hub, "ba", 3, rlErr, null), "rate_limit", "kind returned on third failure");
+recent = JSON.parse(fs.readFileSync(recentFile, "utf8"));
+assert.ok(recent.some((e) => e.kind === "rate_limit"), "third consecutive transient failure escalates to a card");
 
 // --- Incident digest taxonomy -------------------------------------------------------------
 assert.equal(digest.categorize({ event: "provider_failure", status: "error", kind: "rate_limit" }), "rate_limit", "kind wins");

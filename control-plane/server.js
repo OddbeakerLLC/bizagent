@@ -2061,6 +2061,10 @@ function runTick(config) {
       preflight.refreshPreflightCache(config.hub, config._cliJson || {}, config.registry)
         .catch(() => {});
     } catch (_err) { /* ignore */ }
+    // CR 2026-11-21 minor: warm the incident-digest cache from the tick loop so
+    // /api/health almost never pays the 8 MB log scan synchronously (the hourly
+    // TTL expiry used to land on whatever operator opened the console first).
+    try { incidentDigest.weeklyIncidentDigest(config.hub); } catch (_err) { /* ignore */ }
   }
   // Launch-ack (and any other same-tick conv mutation) — push by disk stamp.
   // Also covers EXIT-hook child process that mutated conv JSON without broadcast.

@@ -60,7 +60,7 @@ fi
 default_model_for() {
   case "$1" in
     grok) echo "grok-4.5" ;;
-    chatgpt) echo "gpt-4o" ;;
+    chatgpt) echo "gpt-5.4" ;;
     claude) echo "claude-sonnet-4-6" ;;
     gemini) echo "gemini-2.5-flash" ;;
     venice) echo "z-ai-glm-5-3-flash" ;;

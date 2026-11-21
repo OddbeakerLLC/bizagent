@@ -477,7 +477,12 @@ function recordAgentError(hub, slug, exitCode, stderrTail, conversationId) {
   let classified = classifyProviderError(stderrTail) ||
     (stderrTail ? null : classifyProviderError(combined));
   const kind = classified ? classified.kind : 'error';
-  if (shouldSkipDuplicateAgentError(hub, slug, exitCode, kind)) return;
+  // CR 2026-11-21 major 1: the dedupe window (45 s) suppresses duplicate
+  // RECORDING (shell EXIT + Node exit double-fire), but callers still need the
+  // classified kind to decide hold-vs-backoff. Returning undefined here made
+  // isNonTransientKind(undefined) === false, so a repeating non-transient
+  // failure went back on the retry ladder — defeating the hold.
+  if (shouldSkipDuplicateAgentError(hub, slug, exitCode, kind)) return kind;
 
   // Provider queue (2026-10-23): every failed turn also feeds the
   // per-provider consecutive-failure counter (exponential backoff, then a
@@ -2569,6 +2574,10 @@ function repeatLoopStatePath(hub, slug) {
   return path.join(appDir(hub), 'repeat-loop', `${slug}.json`);
 }
 
+// Clean exits over pending mail younger than this are not "no-op turns" —
+// multi-turn tasks legitimately leave mail pending across turns.
+const REPEAT_LOOP_GRACE_MSECS = 30 * 60 * 1000;
+
 function readRepeatLoopState(hub, slug) {
   try {
     const s = JSON.parse(fs.readFileSync(repeatLoopStatePath(hub, slug), 'utf8'));
@@ -2647,6 +2656,21 @@ function noteCleanTurnExit(hub, slug) {
     clearRepeatLoopState(hub, slug);
     return null;
   }
+  // CR 2026-11-21 exemption: supported flows deliberately leave mail pending
+  // across clean turns — multi-turn tasks and defer-wake reminders. Don't
+  // count a clean exit as a repeat while every pending mail is still young
+  // (default 30 min) or explicitly carries a defer marker; a genuinely stuck
+  // loop on older, non-deferred mail still trips after 3 turns.
+  const allExempt = pending.every((file) => {
+    try {
+      const kindLine = fs.readFileSync(file, 'utf8').match(/^kind:\s*(.+?)\s*$/m);
+      if (kindLine && kindLine[1].trim() === 'defer-wake') return true;
+      return Date.now() - fs.statSync(file).mtimeMs < REPEAT_LOOP_GRACE_MSECS;
+    } catch (_err) {
+      return false;
+    }
+  });
+  if (allExempt) return null;
   const key = pending.map((f) => path.basename(f)).sort().join('|');
   const prev = readRepeatLoopState(hub, slug);
   if (prev && prev.held) {
@@ -2855,8 +2879,7 @@ function nextRotationProvider(hub, cliJson, failingProvider) {
   const keys = Object.keys(entries || {});
   if (keys.length < 2) return null;
   const fail = String(failingProvider || '').toLowerCase();
-  let idx = keys.indexOf(fail);
-  if (idx === -1) idx = -1; // start from the beginning
+  const idx = keys.indexOf(fail); // -1 → rotation starts from the beginning
   for (let i = 1; i <= keys.length; i += 1) {
     const key = keys[(idx + i + keys.length) % keys.length];
     if (key === fail) continue;
@@ -2977,7 +3000,11 @@ function armContextOverflowRetry(hub, conversationId) {
     writeJsonAtomic(contextOverflowRetryPath(hub), retries);
   } catch (_err) { /* best-effort */ }
   try {
-    clearDispatchState(hub, 'hub');
+    // CR 2026-11-21 minor: clearDispatchState(hub, 'hub') dropped EVERY hub
+    // dispatch marker, re-dispatching all pending hub mail — not just the
+    // conversation that overflowed. Clear only markers for mail bound to the
+    // affected conversation (mail without a conversation_id stays held).
+    clearDispatchStateForConversation(hub, 'hub', conversationId);
     logEvent(hub, {
       event: 'context_overflow_compact_retry',
       conversation_id: conversationId,
@@ -2985,6 +3012,26 @@ function armContextOverflowRetry(hub, conversationId) {
     });
   } catch (_err) { /* best-effort */ }
   return true;
+}
+
+/** Drop dispatch markers only for pending mail stamped with `conversationId`. */
+function clearDispatchStateForConversation(hub, slug, conversationId) {
+  if (!conversationId) return;
+  const target = dispatchStateFile(hub, slug);
+  try {
+    const handled = readDispatchState(hub, slug);
+    const mailDir = slug === 'hub' ? path.join(hub, 'inbox') : path.join(hub, 'agents', slug, 'inbox');
+    const kept = handled.filter((item) => {
+      let cid = '';
+      try {
+        cid = (fs.readFileSync(path.join(mailDir, item.file), 'utf8')
+          .match(/^conversation_id:\s*(.+?)\s*$/m) || [])[1] || '';
+      } catch (_err) { /* mail gone — keep the marker */ }
+      return cid !== conversationId;
+    });
+    if (kept.length === handled.length) return; // nothing bound to this conversation
+    writeJsonAtomic(target, { handled: kept.slice(-200) });
+  } catch (_err) { /* best-effort */ }
 }
 
 /** Run-now (console button): clear everything that idles an agent's dispatch. */

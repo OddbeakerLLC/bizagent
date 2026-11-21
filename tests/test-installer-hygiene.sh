@@ -203,6 +203,24 @@ if not m:
 else:
     model_defaults = ast.literal_eval("{" + m.group(1) + "}")
 
+# CR 2026-11-21 minor: the standalone installers drift too — parse their
+# per-provider default-model dicts and require the same first-model default.
+install_install_sh = open(f"{root}/install/install.sh").read()
+m = re.search(r"default_model_for\(\) \{\n(.*?)\n\}", install_install_sh, re.S)
+install_sh_case_defaults = {}
+if not m:
+    failures.append("install/install.sh: default_model_for() not found")
+else:
+    for prov, model in re.findall(r'(\w+)\) echo "([^"]+)" ;;', m.group(1)):
+        install_sh_case_defaults[prov] = model
+enterprise_sh = open(f"{root}/install/install-enterprise.sh").read()
+m = re.search(r"PROVIDER_DEFAULT_MODEL = \{(.*?)\}", enterprise_sh, re.S)
+enterprise_model_defaults = {}
+if not m:
+    failures.append("install/install-enterprise.sh: PROVIDER_DEFAULT_MODEL dict not found")
+else:
+    enterprise_model_defaults = ast.literal_eval("{" + m.group(1) + "}")
+
 for provider, ex in example.items():
     if provider.startswith("_"):
         continue
@@ -217,6 +235,10 @@ for provider, ex in example.items():
     first = (ex.get("models") or [""])[0]
     if model_defaults.get(provider) != first:
         failures.append(f"{provider}: registry-seed default model {model_defaults.get(provider)!r} != first cli.json.example model {first!r}")
+    if provider in install_sh_case_defaults and install_sh_case_defaults[provider] != first:
+        failures.append(f"{provider}: install/install.sh default_model_for {install_sh_case_defaults[provider]!r} != first cli.json.example model {first!r}")
+    if enterprise_model_defaults.get(provider) != first:
+        failures.append(f"{provider}: install-enterprise.sh default model {enterprise_model_defaults.get(provider)!r} != first cli.json.example model {first!r}")
 
 if failures:
     print("\n".join(failures))

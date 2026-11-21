@@ -116,8 +116,13 @@ command -v git >/dev/null 2>&1 || die "git is required"
 
 if [ "$SKIP_NPM" -ne 1 ]; then
   (cd "$HUB" && npm install --silent) || die "hub npm install failed — run it manually and re-run"
-  [ -f "$HUB/agent-runtime/package.json" ] && \
-    (cd "$HUB/agent-runtime" && npm install --silent) || true
+  # CR 2026-11-21 major 3: a swallowed agent-runtime install failure used to end
+  # the installer with "✓ npm dependencies installed" while every agent turn
+  # would later fail on missing runtime deps. Fail loudly instead.
+  if [ -f "$HUB/agent-runtime/package.json" ]; then
+    (cd "$HUB/agent-runtime" && npm install --silent) \
+      || die "agent-runtime npm install failed — agent turns will not run; install it manually and re-run"
+  fi
   ok "npm dependencies installed"
 else
   ok "npm install skipped (--skip-npm)"
@@ -260,8 +265,10 @@ else
     read -r -s ADMIN_PASSWORD </dev/tty; printf "\n"
     [ -n "$ADMIN_PASSWORD" ] || die "empty password"
   fi
-  node "$HUB/scripts/bizagent-control-plane.js" auth-init \
-    --hub "$HUB" --username "$ADMIN_USER" --password "$ADMIN_PASSWORD"
+  # Password via env (read by auth-init) — never on the child argv, where it
+  # would be world-readable via /proc/<pid>/cmdline on multi-user servers.
+  BIZAGENT_ADMIN_PASSWORD="$ADMIN_PASSWORD" node "$HUB/scripts/bizagent-control-plane.js" auth-init \
+    --hub "$HUB" --username "$ADMIN_USER"
   unset ADMIN_PASSWORD
   chmod 600 "$HUB/.bizagent/auth.json" 2>/dev/null || true
   ok "console auth initialized for '$ADMIN_USER'"

@@ -11,7 +11,7 @@ function usage() {
   console.error([
     'usage: bizagent-control-plane.js {serve|route-once|dispatch-once|ensure-prompts|append-hub-turn|write-message|auth-init}',
     '  common: --hub PATH',
-    '  auth-init: --username USER --password PASS',
+    '  auth-init: --username USER (password via BIZAGENT_ADMIN_PASSWORD env or stdin; --password legacy)',
     '  append-hub-turn: --conversation ID --content TEXT|--content-file PATH',
     '  write-message: --to SLUG --subject TEXT [--from SLUG] [--conversation ID]',
     '                 [--kind KIND] [--content TEXT|--content-file PATH]  (body also via stdin)',
@@ -178,7 +178,17 @@ async function main() {
     return null;
   }
   if (opts.command === 'auth-init') {
-    initAuth(config.hub, opts.username, opts.password);
+    // Password sources, safest first (CR 2026-11-21 major 2): BIZAGENT_ADMIN_PASSWORD
+    // env, stdin (pipe), then --password (legacy; lands on the child argv, visible
+    // in /proc/<pid>/cmdline to every local user — avoid on multi-user servers).
+    const password = opts.password
+      || process.env.BIZAGENT_ADMIN_PASSWORD
+      || (await readStdin()).trim();
+    if (!password) {
+      console.error('auth-init: no password — set BIZAGENT_ADMIN_PASSWORD, pipe it via stdin, or pass --password (argv-visible; avoid on shared hosts)');
+      process.exit(1);
+    }
+    initAuth(config.hub, opts.username, password);
     console.log('auth initialized');
     return null;
   }

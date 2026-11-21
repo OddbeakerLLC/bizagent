@@ -90,6 +90,14 @@ if [ "$MODE" = "export" ]; then
   OUT="${OUT:-$PARENT/bizagent-migration-$STAMP.tar.gz}"
   [ "$(dirname "$OUT")" != "$HUB" ] || { echo "migrate: --out must live outside the hub" >&2; exit 1; }
 
+  # CR 2026-11-21 minor: a running control plane keeps writing mail, dispatch
+  # state and conversations during the tar pass — warn so the operator can stop
+  # it first for a consistent snapshot (export stays allowed; it is read-only).
+  if pgrep -f "control-plane/server.js" >/dev/null 2>&1; then
+    note "WARNING: the control plane is running — mail/state may change during export."
+    note "  For a consistent snapshot stop it first: scripts/control-plane.sh stop"
+  fi
+
   # Manifest travels inside the archive; restore reads it for re-binding.
   python3 - "$HUB" <<'PY'
 import json, os, socket, sys
@@ -250,7 +258,10 @@ if [ "$MODE" = "restore" ]; then
   [ -n "$ARCHIVE" ] || { echo "restore: --archive FILE is required" >&2; exit 2; }
   [ -f "$ARCHIVE" ] || { echo "restore: archive not found: $ARCHIVE" >&2; exit 1; }
   if [ -d "$HUB" ] && [ -n "$(ls -A "$HUB" 2>/dev/null)" ]; then
-    if [ "$FORCE" -ne 1 ] && [ ! -f "$HUB/registry.json" ]; then
+    # CR 2026-11-21 minor: ANY non-empty target needs --force — a hub without a
+    # registry.json (partial/failed install) is exactly the target you least
+    # want to silently merge an archive into.
+    if [ "$FORCE" -ne 1 ]; then
       echo "restore: target $HUB is not empty — pass --force to merge into it" >&2
       exit 1
     fi

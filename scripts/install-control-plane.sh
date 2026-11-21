@@ -163,4 +163,4 @@ echo "  systemctl --user enable --now $SERVICE_NAME"
 echo "  loginctl enable-linger \$USER   # optional: keep running after logout"
 echo
 echo "Initialize login before first use:"
-echo "  node scripts/bizagent-control-plane.js auth-init --username <user> --password <password>"
+echo "  BIZAGENT_ADMIN_PASSWORD='…' node scripts/bizagent-control-plane.js auth-init --username <user>"
