@@ -594,6 +594,20 @@ function renderAgentProjects(detail, projects) {
   detail.appendChild(list);
 }
 
+// Turn-age label for running agent lights (2026-11-21 incident review):
+// "running 52m — auto-stop at 45m" so a hung turn is visible before the
+// watchdog fires. Uses the live lock age from /api/state and the configured
+// watchdog timeout from /api/health.
+function turnAgeLabel(agent) {
+  const secs = Number(agent && agent.turn_age_secs || 0);
+  if (!agent || !agent.active || secs <= 0) return '';
+  const mins = Math.max(1, Math.round(secs / 60));
+  const limit = lastHealthData && Number(lastHealthData.turn_timeout_secs) > 0
+    ? Math.round(Number(lastHealthData.turn_timeout_secs) / 60)
+    : 0;
+  return limit > 0 ? `${mins}m — auto-stop at ${limit}m` : `${mins}m`;
+}
+
 function renderAgents(agents) {
   const root = document.getElementById('agents');
   root.innerHTML = '';
@@ -617,8 +631,9 @@ function renderAgents(agents) {
 
     const light = document.createElement('span');
     light.className = `status-light ${agent.hasMail ? 'on' : ''} ${agent.active ? 'running' : ''}`;
+    const turnAge = turnAgeLabel(agent);
     light.title = agent.active
-      ? `Stop ${agent.agentName || agent.slug} (running)`
+      ? `Stop ${agent.agentName || agent.slug} (running${turnAge ? ` — ${turnAge}` : ''})`
       : (agent.hasMail ? 'Inbox has mail' : 'Inbox empty');
     light.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -641,10 +656,13 @@ function renderAgents(agents) {
     product.textContent = agent.name || agent.agentName || agent.slug;
     labels.appendChild(product);
 
-    // Line 2: agent name.
+    // Line 2: agent name (+ live turn age on running lights, 2026-11-21).
     const name = document.createElement('span');
     name.className = 'agent-name';
-    name.textContent = agent.active ? `${agent.agentName} running` : agent.agentName;
+    const runningAge = agent.active ? turnAgeLabel(agent) : '';
+    name.textContent = agent.active
+      ? `${agent.agentName} running${runningAge ? ` — ${runningAge}` : ''}`
+      : agent.agentName;
     labels.appendChild(name);
 
     const chevron = document.createElement('span');
@@ -676,6 +694,29 @@ function renderAgents(agents) {
       showAgentConfigModal(agent);
     });
     detail.appendChild(cliLine);
+
+    // Run now (2026-11-21): one-click launch for an idle agent with pending
+    // work — clears dispatch markers/holds so the next tick runs immediately.
+    if (!agent.active && agent.hasMail) {
+      const runNow = document.createElement('button');
+      runNow.type = 'button';
+      runNow.className = 'agent-run-now';
+      runNow.textContent = 'Run now';
+      runNow.title = 'Run this agent\'s pending mail immediately';
+      runNow.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        runNow.disabled = true;
+        try {
+          await api(`/api/agent/${encodeURIComponent(agent.slug)}/run`, { method: 'POST' });
+        } catch (_err) {
+          runNow.disabled = false;
+          return;
+        }
+        runNow.textContent = 'Queued';
+      });
+      detail.appendChild(runNow);
+    }
 
     if (typeof renderAgentProjects === 'function') {
       renderAgentProjects(detail, agent.projects);
@@ -4316,10 +4357,16 @@ function bannerDisplayState(h) {
   // Held provider queues (2026-11-14): each shows in the banner with a
   // one-click Resume; a hold also auto-resumes after its cooldown.
   const queueHolds = h && Array.isArray(h.provider_queue_holds) ? h.provider_queue_holds : [];
+  // Incident-driven resilience cards (2026-11-21): stale locks clearable from
+  // the console, quarantined mail after an operator stop, repeat-loop holds.
+  const staleLocks = h && Array.isArray(h.stale_locks) ? h.stale_locks : [];
+  const quarantinedMail = h && Array.isArray(h.quarantined_mail) ? h.quarantined_mail : [];
+  const repeatHolds = h && Array.isArray(h.repeat_loop_holds) ? h.repeat_loop_holds : [];
   const red = safeMode || level === 'critical' || level === 'emergency';
   const yellow = !red && (level === 'warn' || fallback || level === 'unknown' ||
-    visibleErrors.length > 0 || cooldown > 0 || queueHolds.length > 0);
-  return { level, safeMode, fallback, bad, visibleErrors, cooldown, queueHolds, red, yellow, shown: red || yellow };
+    visibleErrors.length > 0 || cooldown > 0 || queueHolds.length > 0 ||
+    staleLocks.length > 0 || quarantinedMail.length > 0 || repeatHolds.some((r) => r && r.held && !r.acknowledged));
+  return { level, safeMode, fallback, bad, visibleErrors, cooldown, queueHolds, staleLocks, quarantinedMail, repeatHolds, red, yellow, shown: red || yellow };
 }
 
 let connectionLostShown = false;
@@ -4386,6 +4433,10 @@ function renderHealthBanner(h) {
   const visibleErrors = state.visibleErrors;
   const cooldown = state.cooldown;
   const queueHolds = state.queueHolds || [];
+  const staleLocks = state.staleLocks || [];
+  const quarantinedMail = state.quarantinedMail || [];
+  const repeatHolds = state.repeatHolds || [];
+  const digest = h && h.incident_digest && Number(h.incident_digest.total) > 0 ? h.incident_digest : null;
   const red = state.red;
   const yellow = state.yellow;
   const attention = bannerAttentionItems();
@@ -4409,7 +4460,11 @@ function renderHealthBanner(h) {
           ? `Provider queue held (${queueHolds.length})`
           : visibleErrors.length
             ? `Recent agent errors (${visibleErrors.length})`
-            : cooldown
+            : staleLocks.length
+              ? `Stale agent locks (${staleLocks.length})`
+              : quarantinedMail.length
+                ? `Stopped agents — mail quarantined (${quarantinedMail.length})`
+                : cooldown
               ? 'Dispatches paused — rate-limit cooldown'
               : attention.length
                 ? `Response needs your attention (${attention.length})`
@@ -4447,14 +4502,69 @@ function renderHealthBanner(h) {
   const errorsHtml = visibleErrors.slice(0, BANNER_ERROR_CARD_CAP).map((e) => {
     const agent = e.slug ? ` — ${bannerEscape(e.slug)}` : '';
     const fix = e.fix ? ` Fix: ${bannerEscape(e.fix)}` : '';
+    // One-click actions per card kind (2026-11-21 incident review). Plain
+    // verbs only; every action hits an authenticated API and re-polls health.
+    let actions = '';
+    if (e.kind === 'repeat_loop' && e.slug) {
+      actions =
+        `<button type="button" class="health-banner-action" data-action="repeat" data-slug="${bannerEscape(e.slug)}" data-opt="skip" title="Archive the pending mail — the loop stops and the work is discarded">Skip</button>` +
+        `<button type="button" class="health-banner-action" data-action="repeat" data-slug="${bannerEscape(e.slug)}" data-opt="retry" title="Clear the hold and run the mail once more">Retry</button>` +
+        `<button type="button" class="health-banner-action" data-action="repeat" data-slug="${bannerEscape(e.slug)}" data-opt="leave" title="Keep the mail pending; dispatch stays held">Leave pending</button>`;
+    } else if (e.kind === 'watchdog_stop' && e.slug) {
+      actions = `<button type="button" class="health-banner-action" data-action="run" data-slug="${bannerEscape(e.slug)}" title="Re-run the agent's pending mail now">Run now</button>`;
+    } else if (e.kind === 'hub_turn_failed') {
+      actions = `<button type="button" class="health-banner-action" data-action="run" data-slug="hub" title="Re-dispatch the pending hub mail once more">Retry this turn</button>`;
+    } else if ((e.kind === 'model_missing' || e.kind === 'model_load') && e.slug) {
+      actions = `<button type="button" class="health-banner-action" data-action="model" data-slug="${bannerEscape(e.slug)}" title="Open the model picker for this agent">Switch model</button>`;
+    }
+    const authNote = e.kind === 'auth'
+      ? ' A key form was sent to the hub inbox — submit it there to resume; dispatch will not retry until then.'
+      : '';
+    // Captured stderr / diagnostic detail (e.g. hub hard-fail last stderr lines).
+    const detailText = e.detail ? ` — ${bannerEscape(String(e.detail).slice(0, 240))}` : '';
     return (
       `<div class="health-banner-error">` +
       `<strong>${bannerEscape(e.title || 'Agent error')}</strong>${agent} ` +
-      `<span class="health-banner-detail">${bannerEscape(bannerTimeAgo(e.ts))}${fix}</span>` +
+      `<span class="health-banner-detail">${bannerEscape(bannerTimeAgo(e.ts))}${detailText}${fix}${authNote}</span>` +
+      actions +
       `<button type="button" class="health-banner-error-dismiss" data-key="${bannerEscape(bannerErrorKey(e))}" title="Dismiss this error card">dismiss</button>` +
       `</div>`
     );
   }).join('');
+  // Stale locks (2026-11-21): a dead wrapper left a lock an orphaned CLI child
+  // still holds — clearable here, no SSH.
+  const staleLocksHtml = staleLocks.slice(0, BANNER_ERROR_CARD_CAP).map((s) => {
+    const mins = Math.max(1, Math.round(Number(s.age_secs || 0) / 60));
+    return (
+      `<div class="health-banner-error">` +
+      `<strong>Stale lock — ${bannerEscape(s.slug)}</strong> ` +
+      `<span class="health-banner-detail">held ${mins}m by a dead process while an agent process is still lingering — dispatch cannot start this agent.</span>` +
+      `<button type="button" class="health-banner-action" data-action="clear-lock" data-slug="${bannerEscape(s.slug)}" title="Stop the leftover process and drop the lock">Clear lock</button>` +
+      `</div>`
+    );
+  }).join('');
+  // Quarantined mail (2026-11-21): an operator stop moved pending mail aside so
+  // it would not re-fire — offer re-dispatch / discard right here.
+  const quarantinedHtml = quarantinedMail.slice(0, BANNER_ERROR_CARD_CAP).map((q) => (
+    `<div class="health-banner-error">` +
+    `<strong>${bannerEscape(q.slug)} was stopped — ${q.count} mail quarantined</strong> ` +
+    `<span class="health-banner-detail">${bannerEscape(q.newest_subject || 'pending mail was moved aside when the agent was stopped')} — choose what to do with it.</span>` +
+    `<button type="button" class="health-banner-action" data-action="quarantine" data-slug="${bannerEscape(q.slug)}" data-opt="redispatch" title="Put the mail back in the inbox and run it">Re-dispatch</button>` +
+    `<button type="button" class="health-banner-action" data-action="quarantine" data-slug="${bannerEscape(q.slug)}" data-opt="discard" title="Archive the quarantined mail without running it">Discard</button>` +
+    `</div>`
+  )).join('');
+  // Weekly incident digest (2026-11-21): the week's errors bucketed by
+  // category with counts — shown whenever the banner is up for any reason.
+  const digestHtml = digest
+    ? (
+      `<div class="health-banner-error">` +
+      `<strong>This week's incidents (${digest.total})</strong> ` +
+      `<span class="health-banner-detail">${bannerEscape(
+        (digest.categories || []).map((c) => `${c.category} ×${c.count}`).join(' · ') || 'no categorized errors',
+      )} · last 7 days</span>` +
+      `</div>`
+    )
+    : '';
   el.innerHTML =
     `<strong>${title}</strong>` +
     (details ? `<span class="health-banner-detail">${details}</span>` : '') +
@@ -4462,6 +4572,9 @@ function renderHealthBanner(h) {
     holdsHtml +
     attentionHtml +
     errorsHtml +
+    staleLocksHtml +
+    quarantinedHtml +
+    digestHtml +
     (safeMode ? `<span class="health-banner-detail">Current health: ${bannerEscape(level)}. The hub will exit safe mode automatically once health is back to ok.</span>` : '') +
     (fallback && !safeMode ? '<span class="health-banner-detail">Fix the paid provider (top up / new key) to restore normal turns.</span>' : '');
   syncChatBannerDedupe();
@@ -4525,6 +4638,53 @@ document.addEventListener('click', async (ev) => {
   } catch (_err) {
     // 401 handled inside api(); other failures just fall through to the
     // health re-poll, which re-renders the hold if it is still there.
+  }
+  pollHealthBanner();
+});
+
+// One-click actions on the incident-resilience banner cards (2026-11-21):
+//   repeat  — resolve a repeat-loop hold (skip / retry / leave pending)
+//   run     — re-run an agent's pending mail now (also "Retry this turn")
+//   model   — open the model picker for the failing agent
+//   clear-lock — kill the leftover CLI process and drop a stale lock
+//   quarantine — re-dispatch or discard mail quarantined by an operator stop
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest && ev.target.closest('.health-banner-action');
+  if (!btn || btn.disabled) return;
+  const action = btn.getAttribute('data-action');
+  const slug = btn.getAttribute('data-slug') || '';
+  const opt = btn.getAttribute('data-opt') || '';
+  if (!action) return;
+  btn.disabled = true;
+  try {
+    if (action === 'repeat') {
+      await api('/api/dispatch/repeat-loop', {
+        method: 'POST',
+        body: JSON.stringify({ slug, action: opt }),
+      });
+    } else if (action === 'run') {
+      await api(`/api/agent/${encodeURIComponent(slug)}/run`, { method: 'POST' });
+    } else if (action === 'clear-lock') {
+      await api('/api/dispatch/clear-stale-lock', {
+        method: 'POST',
+        body: JSON.stringify({ slug }),
+      });
+    } else if (action === 'quarantine') {
+      await api(`/api/agent/${encodeURIComponent(slug)}/quarantine`, {
+        method: 'POST',
+        body: JSON.stringify({ action: opt }),
+      });
+    } else if (action === 'model') {
+      const agent = (lastAgentsList || []).find((a) => a && a.slug === slug);
+      if (agent) {
+        showAgentConfigModal(agent);
+      } else {
+        btn.disabled = false; // nothing to open — leave the button usable
+      }
+    }
+  } catch (_err) {
+    btn.disabled = false; // 401 handled inside api(); keep the action available
+    return;
   }
   pollHealthBanner();
 });

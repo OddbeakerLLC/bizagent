@@ -101,6 +101,6 @@ grep -q "bannerAttentionItems" "$APP" || fail "app.js missing bannerAttentionIte
 grep -q "Response needs your attention" "$APP" || fail "app.js missing attention banner card"
 grep -q "if (alert.kind === 'reply') return false;" "$APP" || fail "badge no longer excludes reply kind"
 grep -q "attentionHtml" "$APP" || fail "banner does not render attention cards"
-grep -q "20261119-attention-banner" "$ROOT/control-plane/public/index.html" || fail "index.html cache-bust missing"
+grep -q "20261121-resilience-cards" "$ROOT/control-plane/public/index.html" || fail "index.html cache-bust missing"
 
 echo "  ok: cross-chat-alerts static"
