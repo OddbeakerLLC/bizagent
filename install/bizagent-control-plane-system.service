@@ -1,0 +1,22 @@
+[Unit]
+Description=BizAgent control plane (enterprise server)
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__HUB__
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
+Environment=BIZAGENT_HOST=__HOST__
+Environment=BIZAGENT_PORT=__PORT__
+EnvironmentFile=-__HUB__/.bizagent/env
+ExecStart=__NODE__ __HUB__/scripts/bizagent-control-plane.js serve --hub __HUB__
+Restart=on-failure
+RestartSec=3
+# Enterprise hardening: keep serving (chat stays available) if the process
+# grows; the control plane's own safe-mode + log caps handle the rest.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

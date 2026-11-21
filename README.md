@@ -484,6 +484,20 @@ Ask PTL anytime to check/apply updates.
 timestamped backup lands under `.bizagent/backups/`. Prefer a private hub remote
 and recent backup before large jumps. Hard-reload the browser after upgrade.
 
+### Moving an installation to another computer
+
+`scripts/migrate.sh` exports the full hub state (registry, agents + mailboxes,
+knowledge stack, company, journals, auth, env) into a single archive and
+restores it on the target with path/host/port re-binding and a post-move
+verification. See `docs/MIGRATION.md` for what is copied verbatim vs
+regenerated.
+
+### Enterprise server (hosted) installs
+
+`install/install-enterprise.sh` installs BizAgent as an always-on Enterprise
+server: systemd system service, TLS (self-signed or your own cert), console
+auth init, and an enterprise settings profile. See `docs/ENTERPRISE-INSTALL.md`.
+
 ---
 
 ## What PTL asks during setup
