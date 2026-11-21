@@ -63,7 +63,7 @@ default_model_for() {
     chatgpt) echo "gpt-4o" ;;
     claude) echo "claude-sonnet-4-6" ;;
     gemini) echo "gemini-2.5-flash" ;;
-    venice) echo "llama-3.3-70b" ;;
+    venice) echo "z-ai-glm-5-3-flash" ;;
     ollama) echo "llama3.2" ;;
     *) echo "" ;;
   esac

@@ -38,7 +38,7 @@ const PROVIDERS = {
   venice: {
     baseURL: "https://api.venice.ai/api/v1",
     keyEnv: "VENICE_API_KEY",
-    defaultModel: "llama-3.3-70b",
+    defaultModel: "z-ai-glm-5-3-flash",
   },
   openrouter: {
     baseURL: "https://openrouter.ai/api/v1",

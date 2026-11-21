@@ -59,7 +59,7 @@ const PROVIDER_CATALOG = {
     label: "Venice",
     baseURL: "https://api.venice.ai/api/v1",
     keyEnv: "VENICE_API_KEY",
-    models: ["llama-3.3-70b", "kimi-k2-7-code"],
+    models: ["z-ai-glm-5-3-flash", "llama-3.3-70b", "kimi-k2-7-code"],
   },
   ollama: {
     label: "Ollama (local)",

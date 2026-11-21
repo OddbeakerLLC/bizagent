@@ -1172,7 +1172,7 @@ write_cli_json() {
     "label": "Venice",
     "baseURL": "https://api.venice.ai/api/v1",
     "keyEnv": "VENICE_API_KEY",
-    "models": ["llama-3.3-70b"]
+    "models": ["z-ai-glm-5-3-flash"]
   }
 }
 EOF
@@ -1202,7 +1202,7 @@ if provider not in d or not isinstance(d.get(provider), dict):
         "chatgpt": {"label": "ChatGPT", "baseURL": "https://api.openai.com/v1", "keyEnv": "OPENAI_API_KEY", "models": ["gpt-5.4", "gpt-5.4-mini", "gpt-4o"]},
         "claude": {"label": "Claude", "baseURL": "https://api.anthropic.com/v1/", "keyEnv": "ANTHROPIC_API_KEY", "models": ["claude-sonnet-4-6", "claude-opus-5", "claude-sonnet-4"]},
         "gemini": {"label": "Gemini", "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai/", "keyEnv": "GEMINI_API_KEY", "models": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]},
-        "venice": {"label": "Venice", "baseURL": "https://api.venice.ai/api/v1", "keyEnv": "VENICE_API_KEY", "models": ["llama-3.3-70b", "kimi-k2-7-code"]},
+        "venice": {"label": "Venice", "baseURL": "https://api.venice.ai/api/v1", "keyEnv": "VENICE_API_KEY", "models": ["z-ai-glm-5-3-flash", "llama-3.3-70b", "kimi-k2-7-code"]},
         "ollama": {"label": "Ollama (local)", "baseURL": "http://127.0.0.1:11434/v1", "keyEnv": "OLLAMA_API_KEY", "optionalKey": True, "models": ["llama3.2"]},
         "openrouter": {"label": "OpenRouter", "baseURL": "https://openrouter.ai/api/v1", "keyEnv": "OPENROUTER_API_KEY", "models": ["anthropic/claude-sonnet-4"]},
     }
@@ -1338,7 +1338,7 @@ PROVIDER_DEFAULT_MODEL = {
     "openai": "gpt-4o",
     "claude": "claude-sonnet-4-6",
     "gemini": "gemini-2.5-flash",
-    "venice": "llama-3.3-70b",
+    "venice": "z-ai-glm-5-3-flash",
     "ollama": "llama3.2",
     "openrouter": "anthropic/claude-sonnet-4",
 }
@@ -1395,7 +1395,7 @@ PROVIDER_DEFAULT_MODEL = {
     "openai": "gpt-4o",
     "claude": "claude-sonnet-4-6",
     "gemini": "gemini-2.5-flash",
-    "venice": "llama-3.3-70b",
+    "venice": "z-ai-glm-5-3-flash",
     "ollama": "llama3.2",
     "openrouter": "anthropic/claude-sonnet-4",
 }
