@@ -97,18 +97,32 @@ const {
   clearDispatchState,
   dispatchPendingAgents,
   drainHubTurnSafety,
+  forceClearStaleLock,
   isAgentActive,
   listHeldProviderQueues,
+  listRepeatLoopHolds,
   maxRateLimitCooldownRemaining,
+  quarantinedMailSummary,
   readRecentErrors,
+  readRepeatLoopState,
   recentErrorTtlSecs,
+  resolveQuarantinedMail,
+  resolveRepeatLoop,
   resumeProviderQueue,
+  runAgentNow,
+  staleLockList,
   stopAgentTurn,
+  turnAgeSecs,
+  turnTimeoutSecs,
+  watchdogSweep,
 } = require("./lib/dispatcher");
 const {
   registerCrashHandlers,
+  runRecoverySweep,
   runStartupRecovery,
 } = require("./lib/startup-recovery");
+const preflight = require("./lib/preflight");
+const incidentDigest = require("./lib/incident-digest");
 const {
   listCompanyFiles,
   parseMultipart,
@@ -461,6 +475,11 @@ function currentState(config, session) {
       model,
       projects: Array.isArray(agent.projects) ? agent.projects : [],
       active: isAgentActive(config.hub, agent.slug, config.lockLeaseSecs),
+      // Turn age for the agent lights (2026-11-21 incident review):
+      // "running 52m — auto-stop at 45m" needs the live lock age.
+      turn_age_secs: isAgentActive(config.hub, agent.slug, config.lockLeaseSecs)
+        ? turnAgeSecs(config.hub, agent.slug)
+        : 0,
     };
   });
   // OSS sole-op: full board.
@@ -680,6 +699,12 @@ async function handleApi(config, req, res) {
       // holds (cooldown elapsed) are auto-resumed inside this call so the
       // banner clears itself.
       provider_queue_holds: listHeldProviderQueues(config.hub, config.registry),
+      // Incident-driven resilience (2026-11-21): actionable cards data.
+      turn_timeout_secs: turnTimeoutSecs(config.registry),
+      stale_locks: staleLockList(config.hub),
+      quarantined_mail: quarantinedMailSummary(config.hub),
+      repeat_loop_holds: listRepeatLoopHolds(config.hub),
+      incident_digest: incidentDigest.weeklyIncidentDigest(config.hub),
     });
   }
 
@@ -1037,6 +1062,64 @@ async function handleApi(config, req, res) {
     resumeProviderQueue(config.hub, provider);
     didChangeState();
     return send(res, 200, { ok: true, provider });
+  }
+
+  // --- Incident-driven resilience endpoints (2026-11-21 work order) ---------
+
+  // One-click stale-lock clear from the console card (no SSH): kill the
+  // orphaned CLI child holding the lock and drop the lock dir.
+  if (url.pathname === "/api/dispatch/clear-stale-lock" && req.method === "POST") {
+    const body = await parseBody(req);
+    const slug = String(body.slug || "").trim();
+    if (!slug || !/^[A-Za-z0-9_-]+$/.test(slug)) {
+      return send(res, 400, { error: "valid slug required" });
+    }
+    const cleared = forceClearStaleLock(config.hub, slug);
+    didChangeState();
+    return send(res, 200, { ok: true, slug, cleared });
+  }
+
+  // Repeat-loop hold resolution: skip (archive the mail) / retry (re-dispatch
+  // once more) / leave (keep pending, dispatch stays held).
+  if (url.pathname === "/api/dispatch/repeat-loop" && req.method === "POST") {
+    const body = await parseBody(req);
+    const slug = String(body.slug || "").trim();
+    const action = String(body.action || "").trim();
+    if (!slug || !/^[A-Za-z0-9_-]+$/.test(slug) || !["skip", "retry", "leave"].includes(action)) {
+      return send(res, 400, { error: "valid slug and action (skip|retry|leave) required" });
+    }
+    const result = resolveRepeatLoop(config.hub, slug, action);
+    didChangeState();
+    return send(res, 200, result);
+  }
+
+  // Run now: clear everything that idles a stopped agent's dispatch (markers,
+  // repeat hold, watchdog strikes, operator-stop stamp) so the next tick
+  // launches its pending mail immediately.
+  const agentRunMatch = url.pathname.match(/^\/api\/agent\/([^/]+)\/run$/);
+  if (agentRunMatch && req.method === "POST") {
+    const slug = decodeURIComponent(agentRunMatch[1]).trim();
+    if (!slug || !/^[A-Za-z0-9_-]+$/.test(slug)) {
+      return send(res, 400, { error: "valid slug required" });
+    }
+    runAgentNow(config.hub, slug);
+    didChangeState();
+    return send(res, 200, { ok: true, slug });
+  }
+
+  // Operator-stop follow-up (2026-11-21): re-dispatch (quarantine → inbox,
+  // markers cleared) or discard (quarantine → archive) the interrupted turn.
+  const agentQuarantineMatch = url.pathname.match(/^\/api\/agent\/([^/]+)\/quarantine$/);
+  if (agentQuarantineMatch && req.method === "POST") {
+    const slug = decodeURIComponent(agentQuarantineMatch[1]).trim();
+    const body = await parseBody(req);
+    const action = String(body.action || "").trim();
+    if (!slug || !/^[A-Za-z0-9_-]+$/.test(slug) || !["redispatch", "discard"].includes(action)) {
+      return send(res, 400, { error: "valid slug and action (redispatch|discard) required" });
+    }
+    const result = resolveQuarantinedMail(config.hub, slug, action);
+    didChangeState();
+    return send(res, 200, result);
   }
 
   if (url.pathname === "/api/profile" && req.method === "GET") {
@@ -1932,6 +2015,9 @@ function activeSlugKey(config) {
   return out.sort().join(",");
 }
 
+// Tick counter for the periodic recovery sweep / preflight refresh cadence.
+let tickCount = 0;
+
 function runTick(config) {
   const start = Date.now();
   refreshRuntimeConfig(config);
@@ -1961,6 +2047,21 @@ function runTick(config) {
   }
   const dispatched = dispatchPendingAgents(config) || {};
   const launched = Number(dispatched.launched || 0);
+  // Hung-turn watchdog (2026-11-21 incident review): every tick, stop any turn
+  // whose lock age exceeds settings.dispatch.turn_timeout_secs (default 45
+  // min) and re-queue its mail — a hung CLI used to hold the agent lock forever.
+  try { watchdogSweep(config); } catch (_err) { /* never kill the tick loop */ }
+  // Periodic recovery sweep (2026-11-21): crash recovery used to run only at
+  // boot; a killed wrapper left a phantom running lock until restart. Every
+  // ~10 ticks, re-run the recovery core + refresh the model-preflight cache.
+  tickCount += 1;
+  if (tickCount % 10 === 0) {
+    try { runRecoverySweep(config, require("./lib/dispatcher")); } catch (_err) { /* ignore */ }
+    try {
+      preflight.refreshPreflightCache(config.hub, config._cliJson || {}, config.registry)
+        .catch(() => {});
+    } catch (_err) { /* ignore */ }
+  }
   // Launch-ack (and any other same-tick conv mutation) — push by disk stamp.
   // Also covers EXIT-hook child process that mutated conv JSON without broadcast.
   const stampPushed = pushConversationsChangedOnDisk(config);
@@ -2439,17 +2540,50 @@ function start(hubInput) {
   // uncaughtException crash handler, which only writes a structured-log event —
   // the console/server log stayed empty and a fresh install looked broken with
   // no diagnosable reason. Surface the common cases directly.
+  //
+  // Event taxonomy (2026-11-21 incident review): a keep-alive loop retrying a
+  // busy port logged a full `status:"error"` control_plane_start event every
+  // attempt — ~15.4k false errors in one week drowned the real incidents in
+  // /api/observability. The FIRST failure still logs as an error; repeats of
+  // the same code within an hour log as `control_plane_start_retry` with
+  // status "retry" (never counted as errors).
   server.on('error', (err) => {
     const detail = (err && (err.stack || err.message)) || String(err);
+    const code = (err && err.code) || 'listen_error';
+    const dedupeFile = path.join(config.hub, ".bizagent", "start-error-dedupe.json");
+    let repeat = false;
     try {
-      logEvent(config.hub, {
-        event: 'control_plane_start',
-        status: 'error',
-        error: (err && err.code) || 'listen_error',
-        message: String(err && err.message || detail).slice(0, 300),
-        host: config.host,
-        port: config.port,
-      });
+      let prev = {};
+      try { prev = JSON.parse(fs.readFileSync(dedupeFile, "utf8")); } catch (_e) { /* first */ }
+      const now = Date.now();
+      if (prev && prev.code === code && now - Number(prev.ts || 0) < 60 * 60 * 1000) {
+        repeat = true;
+        prev.count = Number(prev.count || 0) + 1;
+        prev.ts = now;
+      } else {
+        prev = { code, ts: now, count: 1 };
+      }
+      fs.mkdirSync(path.dirname(dedupeFile), { recursive: true });
+      fs.writeFileSync(dedupeFile, JSON.stringify(prev), "utf8");
+    } catch (_err) { /* best-effort */ }
+    try {
+      logEvent(config.hub, repeat
+        ? {
+          event: 'control_plane_start_retry',
+          status: 'retry',
+          error: code,
+          message: String(err && err.message || detail).slice(0, 300),
+          host: config.host,
+          port: config.port,
+        }
+        : {
+          event: 'control_plane_start',
+          status: 'error',
+          error: code,
+          message: String(err && err.message || detail).slice(0, 300),
+          host: config.host,
+          port: config.port,
+        });
     } catch (_err) { /* never block the error report on logging */ }
     if (err && err.code === 'EADDRINUSE') {
       console.error(`${new Date().toISOString()} bizagent-control-plane: cannot listen on ${config.host}:${config.port} — port already in use.`);
