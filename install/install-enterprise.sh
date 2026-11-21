@@ -130,7 +130,7 @@ if [ ! -f "$HUB/cli.json" ] && [ -f "$HUB/cli.json.example" ]; then
   ok "cli.json seeded from example"
 fi
 if [ ! -f "$HUB/registry.json" ] && [ -f "$HUB/registry.example.json" ]; then
-  PROVIDER="${BIZAGENT_PROVIDER:-grok}"
+  PROVIDER="${BIZAGENT_PROVIDER:-venice}"
   python3 - "$HUB/registry.example.json" "$HUB/registry.json" "$PROVIDER" <<'PY'
 import json, sys
 src, dest, provider = sys.argv[1:4]
@@ -141,6 +141,23 @@ d["cross_product_edges"] = []
 ha = d.setdefault("settings", {}).setdefault("hub_agent", {})
 ha["provider"] = provider
 ha["cliName"] = provider
+# Example ships the venice default model — replace it with the selected
+# provider's default so non-venice installs don't inherit it.
+PROVIDER_DEFAULT_MODEL = {
+    "grok": "grok-4.5",
+    "chatgpt": "gpt-5.4",
+    "claude": "claude-sonnet-4-6",
+    "gemini": "gemini-2.5-flash",
+    "venice": "z-ai-glm-5-3-flash",
+    "ollama": "llama3.2",
+}
+if provider in PROVIDER_DEFAULT_MODEL:
+    ha["model"] = PROVIDER_DEFAULT_MODEL[provider]
+else:
+    ha.pop("model", None)
+models = d.setdefault("settings", {}).setdefault("models", {})
+if provider in PROVIDER_DEFAULT_MODEL:
+    models["agent_default"] = PROVIDER_DEFAULT_MODEL[provider]
 json.dump(d, open(dest, "w"), indent=2)
 open(dest, "a").write("\n")
 PY

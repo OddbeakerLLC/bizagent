@@ -965,24 +965,24 @@ select_default_provider() {
         ;;
     esac
   else
-    # Interactive: let the user pick a provider (default grok).
+    # Interactive: let the user pick a provider (default venice).
     # Prefer /dev/tty so piping the installer still works when a real terminal exists.
     printf "\nChoose an LLM provider for the hub:\n"
-    printf "  1) grok\n  2) chatgpt\n  3) claude\n  4) gemini\n  5) venice\n  6) ollama\n"
+    printf "  1) venice\n  2) grok\n  3) chatgpt\n  4) claude\n  5) gemini\n  6) ollama\n"
     _provider_choice=""
     if [[ -r /dev/tty ]]; then
-      read -r -p "  Select provider [1-6, default 1 (grok)]: " _provider_choice </dev/tty || true
+      read -r -p "  Select provider [1-6, default 1 (venice)]: " _provider_choice </dev/tty || true
     else
-      # No TTY (fully non-interactive pipe without BIZAGENT_PROVIDER): default grok.
+      # No TTY (fully non-interactive pipe without BIZAGENT_PROVIDER): default venice.
       _provider_choice="1"
     fi
     case "${_provider_choice:-1}" in
-      2|chatgpt) SELECTED_PROVIDER="chatgpt" ;;
-      3|claude)  SELECTED_PROVIDER="claude" ;;
-      4|gemini)  SELECTED_PROVIDER="gemini" ;;
-      5|venice)  SELECTED_PROVIDER="venice" ;;
+      2|grok)    SELECTED_PROVIDER="grok" ;;
+      3|chatgpt) SELECTED_PROVIDER="chatgpt" ;;
+      4|claude)  SELECTED_PROVIDER="claude" ;;
+      5|gemini)  SELECTED_PROVIDER="gemini" ;;
       6|ollama)  SELECTED_PROVIDER="ollama" ;;
-      *)         SELECTED_PROVIDER="grok" ;;
+      *)         SELECTED_PROVIDER="venice" ;;
     esac
   fi
   # Legacy vars still set for older install paths that reference SELECTED_CLI
@@ -994,7 +994,7 @@ select_default_provider() {
   # If the user doesn't already have their API key, now is the time to grab it:
   # the install will NOT complete until a valid key is entered at the next step.
   if [[ -z "${BIZAGENT_API_KEY:-}" ]]; then
-    note "If you don't already have an API key for ${SELECTED_PROVIDER:-grok}, grab it now —"
+    note "If you don't already have an API key for ${SELECTED_PROVIDER:-venice}, grab it now —"
     note "the next step requires it and the install will not finish until a valid key is entered."
   fi
 }
@@ -1051,7 +1051,7 @@ validate_api_key() {
 }
 
 prompt_api_key() {
-  SELECTED_API_KEY_VAR="$(api_key_var_for_cli "${SELECTED_PROVIDER:-grok}")"
+  SELECTED_API_KEY_VAR="$(api_key_var_for_cli "${SELECTED_PROVIDER:-venice}")"
   SELECTED_API_KEY=""
 
   # Keyless providers (local Ollama) need no API key — the runtime falls back.
@@ -1113,7 +1113,7 @@ running the installer. Note: 'BIZAGENT_API_KEY=... curl ... | bash' does NOT
 work — the variable prefix applies to curl, not to the installer."
   fi
 
-  printf "\n${BOLD}API key for provider %s${NC}\n" "${SELECTED_PROVIDER:-grok}"
+  printf "\n${BOLD}API key for provider %s${NC}\n" "${SELECTED_PROVIDER:-venice}"
   warn "An incorrectly entered API key will prevent completing the installation."
   note "Hub turns need $SELECTED_API_KEY_VAR in .bizagent/env (sourced by control-plane + hub-daemon)."
   note "Paste the key (input hidden). It is required — installation cannot finish without it."
@@ -1142,7 +1142,7 @@ work — the variable prefix applies to curl, not to the installer."
 write_cli_json() {
   local dest="$INSTALL_DIR/cli.json"
   local src="$INSTALL_DIR/cli.json.example"
-  local provider="${SELECTED_PROVIDER:-grok}"
+  local provider="${SELECTED_PROVIDER:-venice}"
 
   if [[ ! -f "$dest" ]]; then
     if [[ -f "$src" ]]; then
@@ -1156,6 +1156,12 @@ write_cli_json() {
     "promptFlag": "-f",
     "flags": { "extra": "-y" }
   },
+  "venice": {
+    "label": "Venice",
+    "baseURL": "https://api.venice.ai/api/v1",
+    "keyEnv": "VENICE_API_KEY",
+    "models": ["z-ai-glm-5-3-flash"]
+  },
   "grok": {
     "label": "Grok (xAI)",
     "baseURL": "https://api.x.ai/v1",
@@ -1167,12 +1173,6 @@ write_cli_json() {
     "baseURL": "https://api.openai.com/v1",
     "keyEnv": "OPENAI_API_KEY",
     "models": ["gpt-4o"]
-  },
-  "venice": {
-    "label": "Venice",
-    "baseURL": "https://api.venice.ai/api/v1",
-    "keyEnv": "VENICE_API_KEY",
-    "models": ["z-ai-glm-5-3-flash"]
   }
 }
 EOF
@@ -1202,7 +1202,7 @@ if provider not in d or not isinstance(d.get(provider), dict):
         "chatgpt": {"label": "ChatGPT", "baseURL": "https://api.openai.com/v1", "keyEnv": "OPENAI_API_KEY", "models": ["gpt-5.4", "gpt-5.4-mini", "gpt-4o"]},
         "claude": {"label": "Claude", "baseURL": "https://api.anthropic.com/v1/", "keyEnv": "ANTHROPIC_API_KEY", "models": ["claude-sonnet-4-6", "claude-opus-5", "claude-sonnet-4"]},
         "gemini": {"label": "Gemini", "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai/", "keyEnv": "GEMINI_API_KEY", "models": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]},
-        "venice": {"label": "Venice", "baseURL": "https://api.venice.ai/api/v1", "keyEnv": "VENICE_API_KEY", "models": ["z-ai-glm-5-3-flash", "llama-3.3-70b", "kimi-k2-7-code"]},
+        "venice": {"label": "Venice", "baseURL": "https://api.venice.ai/api/v1", "keyEnv": "VENICE_API_KEY", "models": ["z-ai-glm-5-3-flash", "z-ai-glm-5-3", "zai-org-glm-5-2", "zai-org-glm-5-1", "zai-org-glm-5", "kimi-k3", "kimi-k3-fast-api", "kimi-k2-7-code", "kimi-k2-6", "kimi-k2-5", "deepseek-v3.2", "deepseek-v4-flash-0731", "deepseek-v4-pro-0813", "qwen-3-8-27b", "qwen-3-8-2-4t-a95b", "qwen3-5-9b", "google-gemma-4-31b-it"]},
         "ollama": {"label": "Ollama (local)", "baseURL": "http://127.0.0.1:11434/v1", "keyEnv": "OLLAMA_API_KEY", "optionalKey": True, "models": ["llama3.2"]},
         "openrouter": {"label": "OpenRouter", "baseURL": "https://openrouter.ai/api/v1", "keyEnv": "OPENROUTER_API_KEY", "models": ["anthropic/claude-sonnet-4"]},
     }
@@ -1304,7 +1304,7 @@ prompt_auto_update() {
 write_registry_seed() {
   local dest="$INSTALL_DIR/registry.json"
   local src="$INSTALL_DIR/registry.example.json"
-  local provider="${SELECTED_PROVIDER:-grok}"
+  local provider="${SELECTED_PROVIDER:-venice}"
   local auto_update="${SELECTED_AUTO_UPDATE:-false}"
 
   if [[ ! -f "$dest" ]]; then
@@ -1343,17 +1343,18 @@ PROVIDER_DEFAULT_MODEL = {
     "openrouter": "anthropic/claude-sonnet-4",
 }
 default_model = PROVIDER_DEFAULT_MODEL.get(provider, "")
-if provider == "grok":
-    hub_agent.setdefault("model", "grok-4.5")
-elif str(hub_agent.get("model", "")).startswith("grok"):
-    # example ships grok-4.5 — drop the stale grok model so the runtime
-    # uses the selected provider's default
-    del hub_agent["model"]
-if default_model and not str(hub_agent.get("model") or "").strip():
+# The example ships a provider-default model (z-ai-glm-5-3-flash) — replace it
+# (or fill the gap) with the selected provider's default so installs don't
+# inherit another provider's model.
+if default_model and (not str(hub_agent.get("model") or "").strip()
+                      or hub_agent.get("model") in ("grok-4.5", "z-ai-glm-5-3-flash")):
     hub_agent["model"] = default_model
 # Product agents need an explicit default too (no silent runtime fallback).
+# Replace example-default artifacts (grok-4.5 / z-ai-glm-5-3-flash) with the
+# selected provider's default; keep any other operator value.
 models = settings.setdefault("models", {})
-if default_model and not str(models.get("agent_default") or "").strip():
+cur_default = str(models.get("agent_default") or "").strip()
+if default_model and (not cur_default or cur_default in ("grok-4.5", "z-ai-glm-5-3-flash")):
     models["agent_default"] = default_model
 json.dump(d, open(dest, "w"), indent=2)
 open(dest, "a").write("\n")
@@ -1400,17 +1401,16 @@ PROVIDER_DEFAULT_MODEL = {
     "openrouter": "anthropic/claude-sonnet-4",
 }
 default_model = PROVIDER_DEFAULT_MODEL.get(final_provider, "")
-if final_provider == "grok":
-    hub_agent.setdefault("model", "grok-4.5")
-elif str(hub_agent.get("model", "")).startswith("grok"):
-    # stale grok model (e.g. from a previous install) — drop it so the
-    # runtime uses the selected provider's default
-    del hub_agent["model"]
-if default_model and not str(hub_agent.get("model") or "").strip():
+# Replace (or fill) the hub model when it is empty or still an example-default
+# artifact (grok-4.5 / z-ai-glm-5-3-flash); keep any other operator value.
+if default_model and (not str(hub_agent.get("model") or "").strip()
+                      or hub_agent.get("model") in ("grok-4.5", "z-ai-glm-5-3-flash")):
     hub_agent["model"] = default_model
-# Only seed agent_default when missing/empty — never clobber operator choice.
+# Seed agent_default when missing/empty or still an example-default artifact
+# (grok-4.5 / z-ai-glm-5-3-flash); never clobber any other operator choice.
 models = settings.setdefault("models", {})
-if default_model and not str(models.get("agent_default") or "").strip():
+cur_default = str(models.get("agent_default") or "").strip()
+if default_model and (not cur_default or cur_default in ("grok-4.5", "z-ai-glm-5-3-flash")):
     models["agent_default"] = default_model
 json.dump(d, open(path, "w"), indent=2)
 open(path, "a").write("\n")

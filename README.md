@@ -4,7 +4,7 @@
 
 Clone this repo, run the installer, and open the web UI. BizAgent runs a built-in
 OpenAI-compatible agent runtime (**bizagent-agent**) against the LLM provider you
-choose (Grok, ChatGPT, Claude, Gemini, Venice, Ollama, …). One product agent per
+choose (Venice, Grok, ChatGPT, Claude, Gemini, Ollama, …). One product agent per
 product, plain-file messaging, and a local control plane that dispatches work in
 real time.
 
@@ -74,8 +74,8 @@ Three steps — one command does the work.
 > with a tiny "hello" request before proceeding). So grab your key now and have
 > it ready at install time to keep the flow friction-free.
 >
-> The default provider is **Grok (xAI)** — get a key at
-> [console.x.ai](https://console.x.ai/). For other providers see the
+> The default provider is **Venice** — get a key at
+> [venice.ai](https://venice.ai/). For other providers see the
 > [provider table](#llm-providers) below. You can also hand the key off
 > non-interactively so the installer never pauses:
 > `curl -fsSL https://raw.githubusercontent.com/OddbeakerLLC/bizagent/main/install.sh | BIZAGENT_API_KEY=... bash`
@@ -105,7 +105,7 @@ smoothest path.
 
 > **Headless server (VPS, SSH-only)?** Prefer non-interactive key handoff:
 > `curl -fsSL ... | BIZAGENT_API_KEY=... bash` (writes `.bizagent/env` for the
-> default LLM provider, Grok / `XAI_API_KEY` unless `BIZAGENT_PROVIDER` is set).
+> default LLM provider, Venice / `VENICE_API_KEY` unless `BIZAGENT_PROVIDER` is set).
 > Or export the provider key (`XAI_API_KEY` / `OPENAI_API_KEY` /
 > `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `VENICE_API_KEY`) before install.
 > Browser-only login is not enough for hub turns.

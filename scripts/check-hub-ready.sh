@@ -23,7 +23,7 @@ else
   MODEL="$(node -e 'const r=require(process.argv[1]);const ha=(r.settings&&r.settings.hub_agent)||{};const m=ha.model||(r.settings&&r.settings.models&&r.settings.models.orchestrator)||"";process.stdout.write(String(m).trim())' "$HUB/registry.json" 2>/dev/null || true)"
   if [[ -z "$PROVIDER" ]]; then
     bad "hub_agent.provider not set in registry.json"
-    note "Set settings.hub_agent.provider (e.g. grok, chatgpt, claude, gemini)"
+    note "Set settings.hub_agent.provider (e.g. venice, grok, chatgpt, claude, gemini)"
   else
     ok "provider=$PROVIDER"
   fi

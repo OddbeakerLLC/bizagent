@@ -43,17 +43,17 @@ if [[ -n "${BIZAGENT_PROVIDER:-}" ]]; then
     *) die "Unknown BIZAGENT_PROVIDER=$PROVIDER — valid values: grok, chatgpt, claude, gemini, venice, ollama (aliases: xai, openai, codex, agy)." ;;
   esac
 else
-  # Interactive: let the user pick a provider (default grok).
+  # Interactive: let the user pick a provider (default venice).
   printf "\nChoose an LLM provider for the hub:\n"
-  printf "  1) grok\n  2) chatgpt\n  3) claude\n  4) gemini\n  5) venice\n  6) ollama\n"
-  read -r -p "  Select provider [1-6, default 1 (grok)]: " _provider_choice </dev/tty
+  printf "  1) venice\n  2) grok\n  3) chatgpt\n  4) claude\n  5) gemini\n  6) ollama\n"
+  read -r -p "  Select provider [1-6, default 1 (venice)]: " _provider_choice </dev/tty
   case "${_provider_choice:-1}" in
-    2|chatgpt) PROVIDER="chatgpt" ;;
-    3|claude)  PROVIDER="claude" ;;
-    4|gemini)  PROVIDER="gemini" ;;
-    5|venice)  PROVIDER="venice" ;;
+    2|grok)    PROVIDER="grok" ;;
+    3|chatgpt) PROVIDER="chatgpt" ;;
+    4|claude)  PROVIDER="claude" ;;
+    5|gemini)  PROVIDER="gemini" ;;
     6|ollama)  PROVIDER="ollama" ;;
-    *)         PROVIDER="grok" ;;
+    *)         PROVIDER="venice" ;;
   esac
 fi
 # Default model per provider (overridable via BIZAGENT_MODEL)

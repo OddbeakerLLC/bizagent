@@ -7,6 +7,30 @@
       "extra": "-y"
     }
   },
+  "venice": {
+    "label": "Venice",
+    "baseURL": "https://api.venice.ai/api/v1",
+    "keyEnv": "VENICE_API_KEY",
+    "models": [
+      "z-ai-glm-5-3-flash",
+      "z-ai-glm-5-3",
+      "zai-org-glm-5-2",
+      "zai-org-glm-5-1",
+      "zai-org-glm-5",
+      "kimi-k3",
+      "kimi-k3-fast-api",
+      "kimi-k2-7-code",
+      "kimi-k2-6",
+      "kimi-k2-5",
+      "deepseek-v3.2",
+      "deepseek-v4-flash-0731",
+      "deepseek-v4-pro-0813",
+      "qwen-3-8-27b",
+      "qwen-3-8-2-4t-a95b",
+      "qwen3-5-9b",
+      "google-gemma-4-31b-it"
+    ]
+  },
   "grok": {
     "label": "Grok",
     "baseURL": "https://api.x.ai/v1",
@@ -43,16 +67,6 @@
       "gemini-2.5-flash",
       "gemini-2.5-pro",
       "gemini-2.0-flash"
-    ]
-  },
-  "venice": {
-    "label": "Venice",
-    "baseURL": "https://api.venice.ai/api/v1",
-    "keyEnv": "VENICE_API_KEY",
-    "models": [
-      "z-ai-glm-5-3-flash",
-      "llama-3.3-70b",
-      "kimi-k2-7-code"
     ]
   },
   "ollama": {
