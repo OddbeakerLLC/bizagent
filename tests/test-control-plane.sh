@@ -354,6 +354,12 @@ grep -q "conversationMenu" "$ROOT/control-plane/public/index.html" \
   || fail "UI missing clear conversation selector"
 grep -q "authStatus" "$ROOT/control-plane/public/index.html" \
   || fail "UI missing visible auth status"
+# 2026-11-23 login-form normalization: both submit paths trim fields and
+# lowercase the username before POSTing.
+grep -q "getElementById('username').value.trim().toLowerCase()" "$ROOT/control-plane/public/app.js" \
+  || fail "login form does not trim+lowercase the username on submit"
+[ "$(grep -c "getElementById('username').value.trim().toLowerCase()" "$ROOT/control-plane/public/app.js")" -ge 2 ] \
+  || fail "setup path missing the username trim+lowercase normalization"
 ! grep -q "activityLog\\|Activity" "$ROOT/control-plane/public/index.html" \
   || fail "UI still exposes the removed Activity field"
 grep -q "status-light" "$ROOT/control-plane/public/app.js" \
@@ -768,6 +774,18 @@ initAuth(hub, 'operator', 's3cret-pass');
 if (!hasAuth(hub)) { console.error('hasAuth false after init'); process.exit(1); }
 if (!verifyLogin(hub, 'operator', 's3cret-pass')) { console.error('verify failed'); process.exit(2); }
 if (verifyLogin(hub, 'operator', 'wrong')) { console.error('bad password accepted'); process.exit(3); }
+// 2026-11-23 login-form normalization: stored username is trimmed+lowercased,
+// verifyLogin trims both fields and compares the username case-insensitively,
+// and the password is trimmed but never case-folded.
+const normHub = path.join(process.argv[3], 'auth-hub-norm');
+fs.mkdirSync(normHub, { recursive: true });
+initAuth(normHub, '  Operator  ', '  s3cret-pass  ');
+const normData = JSON.parse(fs.readFileSync(path.join(normHub, '.bizagent', 'auth.json'), 'utf8'));
+if (normData.username !== 'operator') { console.error('initAuth did not normalize username: ' + normData.username); process.exit(13); }
+if (!verifyLogin(normHub, '  OPERATOR  ', '  s3cret-pass  ')) { console.error('trimmed/case-insensitive login failed'); process.exit(14); }
+if (!verifyLogin(normHub, 'operator', ' s3cret-pass ')) { console.error('trimmed password rejected'); process.exit(15); }
+if (verifyLogin(normHub, 'operator', 'S3CRET-PASS')) { console.error('password was case-folded'); process.exit(16); }
+if (verifyLogin(normHub, 'operator', 's3cret-passx')) { console.error('wrong password accepted'); process.exit(17); }
 let id;
 try {
   id = createSession(hub, 'operator');

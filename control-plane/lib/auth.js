@@ -47,7 +47,16 @@ function hashPassword(password, salt) {
   return crypto.pbkdf2Sync(password, salt, 210000, 32, 'sha256').toString('hex');
 }
 
+function normalizeUsername(username) {
+  return String(username || '').trim().toLowerCase();
+}
+
 function initAuth(hub, username, password) {
+  // Store the credential the way the login form submits it (2026-11-23):
+  // trimmed fields, lowercased username — otherwise a mixed-case or
+  // whitespace-padded setup value could never be matched at login.
+  username = normalizeUsername(username);
+  password = String(password || '').trim();
   if (!username || !password) throw new Error('username and password are required');
   ensureDir(appDir(hub));
   const salt = createSalt();
@@ -72,9 +81,14 @@ function hasAuth(hub) {
 function verifyLogin(hub, username, password) {
   const data = readJson(authPath(hub), null);
   if (!data) return false;
+  // Trim both fields and compare the username case-insensitively so logins
+  // created before the 2026-11-23 normalization (mixed-case stored username)
+  // keep working alongside the trimmed/lowercased form submissions.
+  username = normalizeUsername(username);
+  password = String(password || '').trim();
   const expected = Buffer.from(data.password_hash || '', 'hex');
-  const actual = Buffer.from(hashPassword(password || '', data.salt || ''), 'hex');
-  return username === data.username && expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  const actual = Buffer.from(hashPassword(password, data.salt || ''), 'hex');
+  return normalizeUsername(data.username) === username && expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
 function loadSessions(hub) {
@@ -150,6 +164,7 @@ module.exports = {
   hasAuth,
   hashPassword,
   initAuth,
+  normalizeUsername,
   parseCookies,
   verifyLogin,
 };

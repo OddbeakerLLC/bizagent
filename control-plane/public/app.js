@@ -3480,8 +3480,10 @@ function applyConversation(id, conv) {
 }
 
 async function login() {
-  const username = document.getElementById('username').value;
-  const password = document.getElementById('password').value;
+  // Operator rule (2026-11-23): trim both fields, lowercase the username
+  // before submit so stray whitespace or caps never fail a login.
+  const username = document.getElementById('username').value.trim().toLowerCase();
+  const password = document.getElementById('password').value.trim();
   setAuthStatus('Checking credentials...', 'pending');
   try {
     await api('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) });
@@ -3493,8 +3495,10 @@ async function login() {
 }
 
 async function setup() {
-  const username = document.getElementById('username').value;
-  const password = document.getElementById('password').value;
+  // Same normalization as login(): trimmed fields, lowercased username —
+  // the stored credential must match what login() will later submit.
+  const username = document.getElementById('username').value.trim().toLowerCase();
+  const password = document.getElementById('password').value.trim();
   if (!username || !password) {
     setAuthStatus('Username and password required', 'warn');
     return;

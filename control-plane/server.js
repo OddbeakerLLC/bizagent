@@ -72,6 +72,7 @@ const {
   getSession,
   hasAuth,
   initAuth,
+  normalizeUsername,
   parseCookies,
   verifyLogin,
 } = require("./lib/auth");
@@ -720,7 +721,7 @@ async function handleApi(config, req, res) {
     const body = await parseBody(req);
     if (!verifyLogin(config.hub, body.username, body.password))
       return send(res, 401, { error: "invalid login" });
-    const sessionId = createSession(config.hub, body.username);
+    const sessionId = createSession(config.hub, normalizeUsername(body.username));
     return send(
       res,
       200,
