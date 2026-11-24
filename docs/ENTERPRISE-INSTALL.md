@@ -36,32 +36,18 @@ hidden password instead.
 
 ## What it sets up
 
-1. **Dependencies** — Node.js v22+ (auto-installs the latest LTS when missing),
-   `npm install` for the hub and `agent-runtime`.
+1. **Dependencies** — Node.js v22+ (auto-installs the latest LTS when missing), `npm install` for the hub and `agent-runtime`.
 2. **Enterprise settings profile** (written into `registry.json`):
    - `control_plane.host` / `port` — LAN-reachable bind.
    - `control_plane.tls.enabled` — when `--tls` or cert/key paths are given.
-   - `dispatch.allow_concurrency: true`, `agent_slots: 2` — concurrent agent
-     turns with a per-provider cap of 2.
-   - `dispatch.api_min_interval_ms: 500`, `rate_limit_cooldown_secs: 300`,
-     `hold_cooldown_secs: 1800` — gentle handling for shared provider keys.
-3. **TLS** — self-signed (auto-generated, `~10y`, key `0600`) or your own
-   cert/key via env. Behind a reverse proxy instead? Skip `--tls` and set
-   `BIZAGENT_PUBLIC_URL=https://biz.example.com` in `.bizagent/env`.
-4. **Auth init** — creates the console login via
-   `node scripts/bizagent-control-plane.js auth-init` (skipped when
-   `.bizagent/auth.json` already exists).
-5. **Service** — a systemd **system** unit
-   (`install/bizagent-control-plane-system.service`, `WantedBy=multi-user.target`,
-   `Restart=on-failure`, `NoNewPrivileges`, `PrivateTmp`) running as a
-   non-root user. `--service user` delegates to `scripts/install-control-plane.sh`
-   (user unit, for hosts without root); `--service none` skips service setup.
-6. **Log profile** — `BIZAGENT_LOG_MAX_BYTES=10485760` (10 MB) and
-   `BIZAGENT_LOG_KEEP_GENERATIONS=3` in `.bizagent/env`, so a busy server
-   rotates instead of growing unbounded.
+   - `dispatch.allow_concurrency: true`, `agent_slots: 2` — concurrent agent turns with a per-provider cap of 2.
+   - `dispatch.api_min_interval_ms: 500`, `rate_limit_cooldown_secs: 300`, `hold_cooldown_secs: 1800` — gentle handling for shared provider keys.
+3. **TLS** — self-signed (auto-generated, `~10y`, key `0600`) or your own cert/key via env. Behind a reverse proxy instead? Skip `--tls` and set `BIZAGENT_PUBLIC_URL=https://biz.example.com` in `.bizagent/env`.
+4. **Auth init** — creates the console login via `node scripts/bizagent-control-plane.js auth-init` (skipped when `.bizagent/auth.json` already exists).
+5. **Service** — a systemd **system** unit (`install/bizagent-control-plane-system.service`, `WantedBy=multi-user.target`, `Restart=on-failure`, `NoNewPrivileges`, `PrivateTmp`) running as a non-root user. `--service user` delegates to `scripts/install-control-plane.sh` (user unit, for hosts without root); `--service none` skips service setup.
+6. **Log profile** — `BIZAGENT_LOG_MAX_BYTES=10485760` (10 MB) and `BIZAGENT_LOG_KEEP_GENERATIONS=3` in `.bizagent/env`, so a busy server rotates instead of growing unbounded.
 7. **Health watchdog** — `scripts/install-health-timer.sh` (best effort).
-8. **Verify** — waits for the port, probes `/api/health`, then runs
-   `scripts/check-hub-ready.sh`.
+8. **Verify** — waits for the port, probes `/api/health`, then runs `scripts/check-hub-ready.sh`.
 
 ## Day-2 operations
 

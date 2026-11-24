@@ -147,10 +147,7 @@ your project repo(s), new specs or papers, sitemap changes — and reply with
 one of:
 
 - `no update` if nothing meaningful has changed since the given date, or
-- An overview body (markdown, ≤ ~500 words, no padding) followed by a
-  `Source docs:` list of paths in your project repo(s) to publish into the
-  stack. PTL byte-copies each listed file with a `<slug>-<basename>.<ext>`
-  filename.
+- An overview body (markdown, ≤ ~500 words, no padding) followed by a `Source docs:` list of paths in your project repo(s) to publish into the stack. PTL byte-copies each listed file with a `<slug>-<basename>.<ext>` filename.
 
 Reply is the shortest content that fulfills the request (Brevity rule).
 

@@ -7,14 +7,8 @@ alerts even when the LLM / control plane is already wedged.
 
 ## Two watchdog layers
 
-1. **In-process** (`control-plane/server.js`, every ~45s): cheap `statfs` / `os`
-   checks via `control-plane/lib/health.js`. Dies with the control plane, so it
-   is not enough alone.
-2. **Out-of-process** (`scripts/health-probe.sh` → `control-plane/lib/health-probe.js`,
-   systemd **user** timer or cron every 2 min): a few-KB probe that only needs
-   to write one small status file (`logs/health.json` overwrite + one-line
-   `logs/health.status`). Works when the control plane cannot start; systemd
-   `OnFailure=` still fires.
+1. **In-process** (`control-plane/server.js`, every ~45s): cheap `statfs` / `os` checks via `control-plane/lib/health.js`. Dies with the control plane, so it is not enough alone.
+2. **Out-of-process** (`scripts/health-probe.sh` → `control-plane/lib/health-probe.js`, systemd **user** timer or cron every 2 min): a few-KB probe that only needs to write one small status file (`logs/health.json` overwrite + one-line `logs/health.status`). Works when the control plane cannot start; systemd `OnFailure=` still fires.
 
 Install the timer: `scripts/install-health-timer.sh [hub-path]`
 (optional `BIZAGENT_HEALTH_WEBHOOK` for out-of-band Slack/ntfy/email alerts via
@@ -103,23 +97,10 @@ probes cannot flap the flag.
 
 ## Alerts (none depend on a successful hub turn)
 
-1. **UI banner** on every console page (`/api/health`, polled every 30s):
-   red = safe mode / critical / emergency; yellow = warn or
-   `provider_fallback_active`. Persisted server-side — stays until green.
-   Health levels (warn / emergency) are **banner-only** — the watchdog never
-   posts a health line into chat (operator rule 2026-11-08). The health detail
-   stays in `logs/health.json` + `logs/health.status` and in the banner card.
-2. **Console chat** carries everything that pertains to the chat session itself:
-   agent/model/API failures, file-not-found, dispatch problems. An error bubble
-   is skipped while the same error is showing as a card in the banner — both use
-   the same key (`slug|ts|title`; the dispatcher stamps it on the message as
-   `error_key`). The chat is the fallback whenever the banner is not actually
-   showing that item: hidden banner, dismissed card, connection-lost banner, cap
-   overflow, or a message with no key.
-3. **Out-of-band:** systemd `OnFailure=` → `health-alert-failure.sh` writes
-   `HEALTH-ALERT.md` and posts the optional webhook — works with port 8787 down.
-4. **Local last-resort:** `HEALTH-ALERT.md` in the hub root (Library can show
-   it); removed automatically when the next check is green.
+1. **UI banner** on every console page (`/api/health`, polled every 30s): red = safe mode / critical / emergency; yellow = warn or `provider_fallback_active`. Persisted server-side — stays until green. Health levels (warn / emergency) are **banner-only** — the watchdog never posts a health line into chat (operator rule 2026-11-08). The health detail stays in `logs/health.json` + `logs/health.status` and in the banner card.
+2. **Console chat** carries everything that pertains to the chat session itself: agent/model/API failures, file-not-found, dispatch problems. An error bubble is skipped while the same error is showing as a card in the banner — both use the same key (`slug|ts|title`; the dispatcher stamps it on the message as `error_key`). The chat is the fallback whenever the banner is not actually showing that item: hidden banner, dismissed card, connection-lost banner, cap overflow, or a message with no key.
+3. **Out-of-band:** systemd `OnFailure=` → `health-alert-failure.sh` writes `HEALTH-ALERT.md` and posts the optional webhook — works with port 8787 down.
+4. **Local last-resort:** `HEALTH-ALERT.md` in the hub root (Library can show it); removed automatically when the next check is green.
 
 ## Hub-only Ollama fallback (provider reachable, request refused)
 
@@ -130,17 +111,10 @@ or bad prompts, and **never for product agents** (they stay paused; hub turns
 only).
 
 1. Classify the hub LLM error.
-2. If Ollama is installed and `127.0.0.1:11434` is up, pull `qwen3:4b` if
-   missing (`BIZAGENT_OLLAMA_FALLBACK_MODEL` to override). The pull is
-   **skipped** when the disk is already in the emergency zone.
-3. The next hub turn (cold dispatcher or warm daemon) launches with a
-   **launch-time override** — `registry.json` / `cli.json` are never rewritten.
-4. The operator is told in console chat what failed and what to fix (top up,
-   new key, switch provider). If Ollama is missing/unavailable, the existing
-   provider-failure message + health alert stand — no silent death.
-5. Health flag + banner `provider_fallback_active` until a paid-provider probe
-   (cheap authenticated `GET /models`) succeeds again; the in-process health
-   tick probes while the flag is active.
+2. If Ollama is installed and `127.0.0.1:11434` is up, pull `qwen3:4b` if missing (`BIZAGENT_OLLAMA_FALLBACK_MODEL` to override). The pull is **skipped** when the disk is already in the emergency zone.
+3. The next hub turn (cold dispatcher or warm daemon) launches with a **launch-time override** — `registry.json` / `cli.json` are never rewritten.
+4. The operator is told in console chat what failed and what to fix (top up, new key, switch provider). If Ollama is missing/unavailable, the existing provider-failure message + health alert stand — no silent death.
+5. Health flag + banner `provider_fallback_active` until a paid-provider probe (cheap authenticated `GET /models`) succeeds again; the in-process health tick probes while the flag is active.
 
 ## Tests
 

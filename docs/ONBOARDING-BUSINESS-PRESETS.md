@@ -46,14 +46,9 @@ Static, shipped in the repo. Each entry:
 }
 ```
 
-- `agent_roles` — roles the product agents act as by default (rendered as
-  guidance into `agent.md`; BizAgent keeps one agent per product, so "roles"
-  are hats, not extra agents).
-- `approval_gates` — enforcement rendered into `agent.md`:
-  `code_review` (software dev), `document_review` (law/accounting),
-  `qa_shipment` (manufacturing), `client_approval` (agency/consultant).
-- `features_off` — features left off by default for this type (e.g. direct
-  client messaging for law/accounting).
+- `agent_roles` — roles the product agents act as by default (rendered as guidance into `agent.md`; BizAgent keeps one agent per product, so "roles" are hats, not extra agents).
+- `approval_gates` — enforcement rendered into `agent.md`: `code_review` (software dev), `document_review` (law/accounting), `qa_shipment` (manufacturing), `client_approval` (agency/consultant).
+- `features_off` — features left off by default for this type (e.g. direct client messaging for law/accounting).
 
 `other` (free text) maps to the `generic` preset: no gates, no roles — the
 operator configures what they want later.
@@ -73,10 +68,7 @@ operator configures what they want later.
 
 - Written during § 2 generate (step 1) from the § 1 answer.
 - `custom: true` + `slug: "other"` for free-text answers (`label` = their text).
-- **Starting point, not a cage:** post-setup overrides are plain registry edits
-  — change `defaults`, or set `overrides` to add/remove gates; re-render agent
-  files with `scripts/business-preset.sh section`. Absent block = no preset
-  (backward compatible with existing hubs).
+- **Starting point, not a cage:** post-setup overrides are plain registry edits — change `defaults`, or set `overrides` to add/remove gates; re-render agent files with `scripts/business-preset.sh section`. Absent block = no preset (backward compatible with existing hubs).
 
 ### 4. Conditional agent-template rendering
 
@@ -86,12 +78,9 @@ placeholder. `scripts/business-preset.sh section` reads the hub's
 `settings.business_type` is absent, so existing hubs and the industry-template
 path are unaffected). Rendered gates:
 
-- `code_review` → never merge/push unreviewed changes; produce a review
-  summary for the owner.
-- `document_review` → drafts (filings, letters, returns) are never
-  filed/sent without owner review.
-- `qa_shipment` → production/shipment changes require a completed QA
-  checklist.
+- `code_review` → never merge/push unreviewed changes; produce a review summary for the owner.
+- `document_review` → drafts (filings, letters, returns) are never filed/sent without owner review.
+- `qa_shipment` → production/shipment changes require a completed QA checklist.
 - `client_approval` → anything sent to a client needs owner sign-off.
 
 Agents spawned after setup inherit the section because it is baked into
@@ -112,10 +101,8 @@ defaults).
 - `AGENT.md` — § 1 beat 2 + "do not ask" note; § 2 steps 1/3 wiring.
 - `templates/agent.md.template` — `{{BUSINESS_PRESET_SECTION}}` placeholder.
 - `registry.example.json` — `settings.business_type` example + comment.
-- `control-plane/lib/hub-memory.js` — minimal-state beat list mentions
-  business type (keeps the slim first-run prompt in sync with § 1).
-- `tests/test-business-presets.sh` (new), `tests/test-agent-md.sh` (beat
-  renumbering; also fixes its stale pre-existing numbering failure).
+- `control-plane/lib/hub-memory.js` — minimal-state beat list mentions business type (keeps the slim first-run prompt in sync with § 1).
+- `tests/test-business-presets.sh` (new), `tests/test-agent-md.sh` (beat renumbering; also fixes its stale pre-existing numbering failure).
 
 ## Non-goals
 

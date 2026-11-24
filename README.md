@@ -249,41 +249,18 @@ Then run `bash install.sh` to complete setup — equivalent to the one-liner abo
 After installation, open `http://localhost:8787` (or the port in
 your `registry.json`).
 
-- **Login-protected** — on first visit the browser shows a setup form to create credentials; afterwards, standard login
-  (inputs are trimmed and the username is case-insensitive)
+- **Login-protected** — on first visit the browser shows a setup form to create credentials; afterwards, standard login (inputs are trimmed and the username is case-insensitive)
 - **Dark-themed chat** — named conversations; create new ones with a button or pick from the dropdown
-- **Agent rail** — left sidebar: each agent with a status light, **`provider >> model`**
-  (click to change LLM), expand for inbox / last dispatch / journal
+- **Agent rail** — left sidebar: each agent with a status light, **`provider >> model`** (click to change LLM), expand for inbox / last dispatch / journal
 - **Agent detail panel** — expand a row for inbox count, last-dispatched time, journal snippet
-- **Model picker** — providers gated on saved API keys; live model lists fetched
-  server-side (OpenAI-style and Anthropic `/v1/models`), with pricing when reported
-- **Vision paste** — paste clipboard images into chat (Ctrl/Cmd+V); agents receive
-  them as `image_url` content when the model supports it
-- **Voice** — replies are spoken via the optional local oddbeaker-tts service
-  (browser `speechSynthesis` fallback), and the composer's mic button dictates
-  via oddbeaker-stt (transcribed text is inserted into the input, never
-  auto-sent). See [`docs/TTS-CONSOLE.md`](docs/TTS-CONSOLE.md).
-- **DGen forms** — agents can request secrets or structured input as a modal form
-  (`kind: form-request` mail with a ` ```dgen ` block); values bypass chat history
-  entirely and the answer file is deleted on claim. See
-  [`docs/2026-10-18-dgen-form-requests.md`](docs/2026-10-18-dgen-form-requests.md).
-- **Health banner** — recent agent errors, fleet rate-limit cooldowns, unread
-  replies waiting in conversations you are not viewing ("Response needs your
-  attention" cards with a jump-to-chat button), and a
-  connection-lost indicator surface in the UI; an out-of-process watchdog
-  (`scripts/health-probe.sh`, systemd user timer or cron every 2 min) watches
-  disk and service health even when the control plane is wedged. See
-  [`docs/HEALTH-SURVIVAL.md`](docs/HEALTH-SURVIVAL.md).
-- **Library** — topbar **Library** opens a named-tab accordion: **Hub**
-  (`docs/`, `company/`, `reports/` only) plus each registry project repo.
-  Markdown and PlantUML/SVG diagrams render in-browser (no `library/manifest.json`).
-  `GET /api/library/repos`, `GET /api/library/tree?repo=…`,
-  `GET /api/library/file?repo=&path=` (`?raw=1`, `?download=1`, `?source=1`, `?render=1`)
-- **Playbooks / consult** — cross-agent proven how-tos under `knowledge-stack/playbooks/`
-  (+ `INDEX.md`). Agents mail hub `consult: …` / `playbook candidate` (no fleet broadcast).
-  Design: [`docs/PLAYBOOKS-AND-CONSULT.md`](docs/PLAYBOOKS-AND-CONSULT.md).
-- **Company files** — topbar **Company** uploads into hub `company/` (Knowledge Stack
-  inputs) when you cannot reach the hub disk; `GET/POST /api/company/files`
+- **Model picker** — providers gated on saved API keys; live model lists fetched server-side (OpenAI-style and Anthropic `/v1/models`), with pricing when reported
+- **Vision paste** — paste clipboard images into chat (Ctrl/Cmd+V); agents receive them as `image_url` content when the model supports it
+- **Voice** — replies are spoken via the optional local oddbeaker-tts service (browser `speechSynthesis` fallback), and the composer's mic button dictates via oddbeaker-stt (transcribed text is inserted into the input, never auto-sent). See [`docs/TTS-CONSOLE.md`](docs/TTS-CONSOLE.md).
+- **DGen forms** — agents can request secrets or structured input as a modal form (`kind: form-request` mail with a ` ```dgen ` block); values bypass chat history entirely and the answer file is deleted on claim. See [`docs/2026-10-18-dgen-form-requests.md`](docs/2026-10-18-dgen-form-requests.md).
+- **Health banner** — recent agent errors, fleet rate-limit cooldowns, unread replies waiting in conversations you are not viewing ("Response needs your attention" cards with a jump-to-chat button), and a connection-lost indicator surface in the UI; an out-of-process watchdog (`scripts/health-probe.sh`, systemd user timer or cron every 2 min) watches disk and service health even when the control plane is wedged. See [`docs/HEALTH-SURVIVAL.md`](docs/HEALTH-SURVIVAL.md).
+- **Library** — topbar **Library** opens a named-tab accordion: **Hub** (`docs/`, `company/`, `reports/` only) plus each registry project repo. Markdown and PlantUML/SVG diagrams render in-browser (no `library/manifest.json`). `GET /api/library/repos`, `GET /api/library/tree?repo=…`, `GET /api/library/file?repo=&path=` (`?raw=1`, `?download=1`, `?source=1`, `?render=1`)
+- **Playbooks / consult** — cross-agent proven how-tos under `knowledge-stack/playbooks/` (+ `INDEX.md`). Agents mail hub `consult: …` / `playbook candidate` (no fleet broadcast). Design: [`docs/PLAYBOOKS-AND-CONSULT.md`](docs/PLAYBOOKS-AND-CONSULT.md).
+- **Company files** — topbar **Company** uploads into hub `company/` (Knowledge Stack inputs) when you cannot reach the hub disk; `GET/POST /api/company/files`
 - **Dynamic page title** — browser tab reads `BizAgent — {org name}` from `registry.json`
 - **Push updates** — WebSocket feeds preferred; optional poll via `?poll=1`
 - **Hub session memory** — compact rolling markdown; older turns are summarized, not accumulated
@@ -510,8 +487,7 @@ and begins setup in the web UI. It only asks for the things that are genuinely y
 - where your project repositories live (a folder to scan, or a list)
 - how repos group into products, and a short slug for each
 - which products' agents need to message each other
-- nightly run time _(default 23:00; PTL installs the nightly cron line during setup —
-  the installer itself does not schedule anything)_
+- nightly run time _(default 23:00; PTL installs the nightly cron line during setup — the installer itself does not schedule anything)_
 - how long an unactioned message waits before being archived _(default 30 days)_
 - agent autonomy: maintenance-only, +monitoring, or +light-dev _(default maintenance-only)_
 - framework auto-update vs manual-only _(installer default: manual-only; `settings.auto_update`)_
@@ -539,18 +515,8 @@ writing them. The installer itself does not add these lines.
 
 Two ways to pre-configure a fresh hub instead of starting from a blank interview:
 
-- **Business-type presets** — PTL asks what kind of business you run; the answer
-  maps to a preset (`templates/business-presets.json`, ~10 verticals) that
-  pre-sets agent roles, approval gates, and feature defaults. Everything stays
-  overridable in `registry.json` → `settings.business_type`. See
-  [`docs/ONBOARDING-BUSINESS-PRESETS.md`](docs/ONBOARDING-BUSINESS-PRESETS.md).
-- **Industry templates** — deeper vertical configuration (accounting, law,
-  fitness training, …) shipped as `templates/industries/<slug>.json`: agents,
-  behaviors, system prompts, routines, and privacy guardrails, with customer
-  answers substituted into `{{variables}}` at install time
-  (`install.sh --template <slug> --answers answers.json`). A new vertical is a
-  new JSON file — no code changes. See
-  [`docs/industry-templates.md`](docs/industry-templates.md).
+- **Business-type presets** — PTL asks what kind of business you run; the answer maps to a preset (`templates/business-presets.json`, ~10 verticals) that pre-sets agent roles, approval gates, and feature defaults. Everything stays overridable in `registry.json` → `settings.business_type`. See [`docs/ONBOARDING-BUSINESS-PRESETS.md`](docs/ONBOARDING-BUSINESS-PRESETS.md).
+- **Industry templates** — deeper vertical configuration (accounting, law, fitness training, …) shipped as `templates/industries/<slug>.json`: agents, behaviors, system prompts, routines, and privacy guardrails, with customer answers substituted into `{{variables}}` at install time (`install.sh --template <slug> --answers answers.json`). A new vertical is a new JSON file — no code changes. See [`docs/industry-templates.md`](docs/industry-templates.md).
 
 ---
 

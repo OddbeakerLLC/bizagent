@@ -32,8 +32,7 @@ node scripts/mcp-onboard.js --hub "$BIZAGENT_HUB" paste --stdin
 1. Operator pastes vendor MCP blob (JSON, Cursor `mcpServers`, URL + Bearer text, etc.).
 2. Hub runs `paste` (or `parse` first if the blob looks incomplete).
 3. If `status: needs_input` → ask **1–2** clarifying questions from `questions[]` (e.g. token, display name). Do **not** say “edit registry/env”.
-4. If `status: connected` → reply exactly in this spirit:  
-   **`connected: <name> → N tools`** (use `message` from JSON).
+4. If `status: connected` → reply exactly in this spirit: **`connected: <name> → N tools`** (use `message` from JSON).
 5. If `status: soft_fail` → config is saved; tell operator the server was unreachable/empty and agent turns will skip it until it responds — no manual file edits.
 6. **Reload:** none required. Next agent turn re-reads `registry.json` and sources `.bizagent/env` on launch (`loadHubEnv` + shell `. env`). No control-plane restart.
 

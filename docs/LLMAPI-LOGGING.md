@@ -6,10 +6,8 @@ truncated to 300 chars.
 
 ## Where the log lives
 
-- **Started via `scripts/llmapi.sh` (nohup fallback):** appended to
-  `logs/llmapi.log` in the hub root.
-- **Run as the systemd user unit** (`bizagent-llmapi-<instance>.service`):
-  stdout goes to the journal — tail it with:
+- **Started via `scripts/llmapi.sh` (nohup fallback):** appended to `logs/llmapi.log` in the hub root.
+- **Run as the systemd user unit** (`bizagent-llmapi-<instance>.service`): stdout goes to the journal — tail it with:
 
   ```bash
   journalctl --user -u bizagent-llmapi-<instance>.service -f

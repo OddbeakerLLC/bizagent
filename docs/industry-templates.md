@@ -6,13 +6,8 @@ pro can't yet afford. **A new vertical is a new JSON file. No code changes.**
 
 ## The two layers
 
-- **Layer 1 — industry template** (`templates/industries/<slug>.json`, shipped in
-  the repo): agents, behaviors, system prompts, MCP connections, routines,
-  privacy guardrails. Industry-generic; one template serves every customer in
-  that vertical.
-- **Layer 2 — customer answers** (collected at install): business name, owner
-  role, where client records live, working channels, credentials. These are
-  substituted into `{{variables}}` inside the template.
+- **Layer 1 — industry template** (`templates/industries/<slug>.json`, shipped in the repo): agents, behaviors, system prompts, MCP connections, routines, privacy guardrails. Industry-generic; one template serves every customer in that vertical.
+- **Layer 2 — customer answers** (collected at install): business name, owner role, where client records live, working channels, credentials. These are substituted into `{{variables}}` inside the template.
 
 ## Apply a template
 
@@ -67,37 +62,20 @@ unless you pass `--force`.
 
 ## Author a new template
 
-1. Copy `templates/industries/fitness-training.json` to
-   `templates/industries/<your-slug>.json` and set `"industry": "<your-slug>"`.
-2. Write the system prompt file(s) the products reference
-   (`industries/<your-slug>/<agent>.md`, relative to `templates/`). Cover the
-   vertical role, the guardrails, and any money/UPL/approval boundaries. Use
-   `{{variable_name}}` anywhere a customer answer belongs — every placeholder
-   must be declared in `variables`.
-3. Add seed docs under `templates/industries/<your-slug>/docs/` and list them in
-   `knowledge_stack.seed_docs` (globs must match at least one file).
+1. Copy `templates/industries/fitness-training.json` to `templates/industries/<your-slug>.json` and set `"industry": "<your-slug>"`.
+2. Write the system prompt file(s) the products reference (`industries/<your-slug>/<agent>.md`, relative to `templates/`). Cover the vertical role, the guardrails, and any money/UPL/approval boundaries. Use `{{variable_name}}` anywhere a customer answer belongs — every placeholder must be declared in `variables`.
+3. Add seed docs under `templates/industries/<your-slug>/docs/` and list them in `knowledge_stack.seed_docs` (globs must match at least one file).
 4. Done — `scripts/apply-template.sh --template <your-slug>` picks it up.
 
 ### Schema v1 rules (validated, fail loud)
 
-- Top-level: `template_version` (must be `1`), `industry` (must equal the slug),
-  `display_name`, `variables[]`, `products[]`, `mcp.servers[]`, `behaviors[]`,
-  `guardrails`, `knowledge_stack`. **Unknown fields are rejected.**
-- `variables[]`: `{key, question, required, default?}`; keys match
-  `[a-z][a-z0-9_]*`.
-- `products[]`: `{slug, name, agent_name, system_prompt_file, autonomy, model?,
-  provider?}`; `system_prompt_file` must exist; empty model/provider fall back
-  to the registry's `agent_default` / hub provider (fail if those are unset too).
-- `mcp.servers[]`: `{name, transport, command|url, args?, headers?, env?,
-  required?}`; `stdio` needs `command`, `http`/`sse` need `url`. Put customer
-  paths/numbers in `env` or `args` as `{{variables}}`.
-- `behaviors[]`: `{agent, routine, trigger, detail}`; `agent` must be a template
-  product slug; `trigger` ∈ daily | weekly | monthly | schedule | nightly.
-- `guardrails`: all three booleans required; `local_only_data` must be `true` —
-  the local-only-data guardrail is written explicitly into every generated
-  `agent.md`.
-- Every `{{variable}}` used anywhere (template JSON or prompt files) must be
-  declared in `variables`.
+- Top-level: `template_version` (must be `1`), `industry` (must equal the slug), `display_name`, `variables[]`, `products[]`, `mcp.servers[]`, `behaviors[]`, `guardrails`, `knowledge_stack`. **Unknown fields are rejected.**
+- `variables[]`: `{key, question, required, default?}`; keys match `[a-z][a-z0-9_]*`.
+- `products[]`: `{slug, name, agent_name, system_prompt_file, autonomy, model?, provider?}`; `system_prompt_file` must exist; empty model/provider fall back to the registry's `agent_default` / hub provider (fail if those are unset too).
+- `mcp.servers[]`: `{name, transport, command|url, args?, headers?, env?, required?}`; `stdio` needs `command`, `http`/`sse` need `url`. Put customer paths/numbers in `env` or `args` as `{{variables}}`.
+- `behaviors[]`: `{agent, routine, trigger, detail}`; `agent` must be a template product slug; `trigger` ∈ daily | weekly | monthly | schedule | nightly.
+- `guardrails`: all three booleans required; `local_only_data` must be `true` — the local-only-data guardrail is written explicitly into every generated `agent.md`.
+- Every `{{variable}}` used anywhere (template JSON or prompt files) must be declared in `variables`.
 
 ## Door-to-door install kit (USB stick)
 

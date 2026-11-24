@@ -18,41 +18,21 @@ and aggregates journals into a "big picture" on request.
 
 ### Hub self-modification and recovery
 
-- **Default:** the PTL coordinates. It does **not** freestyle-edit hub machinery
-  (`control-plane/`, UI, dispatch/auth, templates, installers, `cli.json`, registry
-  schema). Soft ops (mail, archive, hub journal, KS capture, delegate) are fine.
-- **User-gated:** hub/control-plane/UI code changes only when the operator
-  **explicitly** requests them — minimal scoped diffs, no drive-by refactors.
-- **SHTF:** `scripts/factory-reset.sh repair` restores framework machinery from a
-  known-good source while **keeping** registry, agents, journals, company, KS,
-  auth, and mail. Also: `restore-ops` (from private git remote) and `nuke`
-  (destructive). Runs from the CLI; does not need a healthy UI.
+- **Default:** the PTL coordinates. It does **not** freestyle-edit hub machinery (`control-plane/`, UI, dispatch/auth, templates, installers, `cli.json`, registry schema). Soft ops (mail, archive, hub journal, KS capture, delegate) are fine.
+- **User-gated:** hub/control-plane/UI code changes only when the operator **explicitly** requests them — minimal scoped diffs, no drive-by refactors.
+- **SHTF:** `scripts/factory-reset.sh repair` restores framework machinery from a known-good source while **keeping** registry, agents, journals, company, KS, auth, and mail. Also: `restore-ops` (from private git remote) and `nuke` (destructive). Runs from the CLI; does not need a healthy UI.
 
 ## Two levels of state
 
 A deliberate split:
 
-- **Mailboxes are per recipient**, and live in the hub: `inbox/` and `outbox/`
-  at the hub root for the hub itself, `user/inbox` for browser-visible replies,
-  and `agents/<slug>/inbox` + `outbox` for each product agent. Messages are
-  addressed to known recipient slugs, so the mailbox belongs with the recipient.
-  This removes any ambiguity about _where_ a message addressed to a multi-repo
-  product should land.
-- **Journals and sitemaps are per project**, and live in each project repo:
-  `.agent/journal/` and a root `sitemap.md`. These describe a specific
-  codebase, so they belong with that codebase and travel with it.
+- **Mailboxes are per recipient**, and live in the hub: `inbox/` and `outbox/` at the hub root for the hub itself, `user/inbox` for browser-visible replies, and `agents/<slug>/inbox` + `outbox` for each product agent. Messages are addressed to known recipient slugs, so the mailbox belongs with the recipient. This removes any ambiguity about _where_ a message addressed to a multi-repo product should land.
+- **Journals and sitemaps are per project**, and live in each project repo: `.agent/journal/` and a root `sitemap.md`. These describe a specific codebase, so they belong with that codebase and travel with it.
 
 ## Two tiers of work
 
-- **Real-time** is the primary path. The operator raises something; the hub
-  routes it and spawns the work immediately. Beyond operator-initiated work,
-  agent-to-agent mail is picked up in near-real-time by the **Node control
-  plane** (see below): an agent reacts to a new message in its inbox within a
-  poll or two, not at the next nightly run.
-- **Nightly / weekly** is maintenance only — journal entries, sitemap
-  refreshes, a knowledge-stack refresh, and archiving of long-stale messages. It
-  is time-based housekeeping; it never processes fresh inbox mail (that's the
-  control plane's job) and never blocks the operator.
+- **Real-time** is the primary path. The operator raises something; the hub routes it and spawns the work immediately. Beyond operator-initiated work, agent-to-agent mail is picked up in near-real-time by the **Node control plane** (see below): an agent reacts to a new message in its inbox within a poll or two, not at the next nightly run.
+- **Nightly / weekly** is maintenance only — journal entries, sitemap refreshes, a knowledge-stack refresh, and archiving of long-stale messages. It is time-based housekeeping; it never processes fresh inbox mail (that's the control plane's job) and never blocks the operator.
 
 This split exists because the original design started schedule-only and that
 felt too slow: an operator reporting a problem wants it picked up now, not at
@@ -78,92 +58,27 @@ other's service file.
 
 The server does not replace the hub filesystem with a database:
 
-- Mailboxes still live at `inbox/`, `outbox/`, `user/inbox/`, and
-  `agents/<slug>/...`.
-- The hub always-on runtime prompt lives in `.bizagent/prompts/hub.md` (slim
-  identity/limits/outbox rules; derived for runtime, not a dump of the full
-  setup manual). Each hub launch also gets an **ephemeral turn prompt** under
-  `.bizagent/prompts/turns/` that injects pending inbox bodies, `conversation_id`,
-  and a CP-compacted session excerpt. Hub CLI processes run with cwd
-  `.bizagent/runtime-cwd/` (operational symlinks, **no** root `AGENT.md`) so
-  workspace project-instructions do not re-run setup §0 “detect built”.
-  Historical note: early builds derived hub.md from `AGENT.md §§ 3-4`; the
-  always-on file is now a dedicated slim prompt with on-demand path refs.
-- Agent launch prompts live in `agents/<slug>/.dispatch.md`, generated from
-  `templates/dispatch.md.template`. Dispatch code reads this file instead of
-  embedding product-agent prompt text inline.
-- Current hub session memory lives in `.bizagent/hub-session.md` as markdown:
-  a rolling summary plus recent turns. The **control plane** compacts this file
-  on conversation updates; the hub LLM must not rewrite it. A new session file
-  starts when the operator changes topic or explicitly creates a new conversation.
-- Invalid multi-recipient outbox mail (`to: a, b`), missing `to:`, and
-  non-slug `to:` values are moved once to `.bizagent/quarantine/` so they do
-  not WARN every poll tick. Unknown but well-formed single slugs still WARN
-  (operator may add the product).
-- **Operator stop quarantines inbox mail.** Stopping a running agent (console
-  status-light click, or Escape for the hub) moves its pending `inbox/*.md`
-  messages into `inbox/quarantine/` (sibling of `archive/`, full original files
-  with frontmatter preserved) so the next dispatch cannot re-run the same task
-  and the inbox ends up empty. `pendingMail` is non-recursive, so quarantined
-  mail is never re-picked. For product agents the control plane mails the hub
-  PTL a notice listing the quarantined files; the PTL reviews them to diagnose
-  what went wrong and either raises it with the operator or archives them.
-  Mail handled normally still goes to `inbox/archive/` unchanged.
+- Mailboxes still live at `inbox/`, `outbox/`, `user/inbox/`, and `agents/<slug>/...`.
+- The hub always-on runtime prompt lives in `.bizagent/prompts/hub.md` (slim identity/limits/outbox rules; derived for runtime, not a dump of the full setup manual). Each hub launch also gets an **ephemeral turn prompt** under `.bizagent/prompts/turns/` that injects pending inbox bodies, `conversation_id`, and a CP-compacted session excerpt. Hub CLI processes run with cwd `.bizagent/runtime-cwd/` (operational symlinks, **no** root `AGENT.md`) so workspace project-instructions do not re-run setup §0 “detect built”. Historical note: early builds derived hub.md from `AGENT.md §§ 3-4`; the always-on file is now a dedicated slim prompt with on-demand path refs.
+- Agent launch prompts live in `agents/<slug>/.dispatch.md`, generated from `templates/dispatch.md.template`. Dispatch code reads this file instead of embedding product-agent prompt text inline.
+- Current hub session memory lives in `.bizagent/hub-session.md` as markdown: a rolling summary plus recent turns. The **control plane** compacts this file on conversation updates; the hub LLM must not rewrite it. A new session file starts when the operator changes topic or explicitly creates a new conversation.
+- Invalid multi-recipient outbox mail (`to: a, b`), missing `to:`, and non-slug `to:` values are moved once to `.bizagent/quarantine/` so they do not WARN every poll tick. Unknown but well-formed single slugs still WARN (operator may add the product).
+- **Operator stop quarantines inbox mail.** Stopping a running agent (console status-light click, or Escape for the hub) moves its pending `inbox/*.md` messages into `inbox/quarantine/` (sibling of `archive/`, full original files with frontmatter preserved) so the next dispatch cannot re-run the same task and the inbox ends up empty. `pendingMail` is non-recursive, so quarantined mail is never re-picked. For product agents the control plane mails the hub PTL a notice listing the quarantined files; the PTL reviews them to diagnose what went wrong and either raises it with the operator or archives them. Mail handled normally still goes to `inbox/archive/` unchanged.
 - `settings.dispatch.poll_seconds` is honored (default 2, clamped 1–30).
-- Product-agent launches get an **ephemeral turn prompt** (like the hub) under
-  `.bizagent/prompts/turns/` that inlines pending inbox bodies so agents need
-  not tool-list the inbox first. Standing rules still come from
-  `agents/<slug>/.dispatch.md`.
-- Console-originated hub inbox messages carry `conversation_id`. The launched
-  hub sends its operator-visible response or delegation summary as a markdown
-  file in `outbox/` addressed to `user` with the same `conversation_id`; the
-  router delivers it to `user/inbox/`, and the server relays it into the same
-  web conversation. Only the hub root `outbox/` may address `user`; product
-  agents still report to the hub. `scripts/bizagent-control-plane.js
-  append-hub-turn` remains available for manual repair/imports.
+- Product-agent launches get an **ephemeral turn prompt** (like the hub) under `.bizagent/prompts/turns/` that inlines pending inbox bodies so agents need not tool-list the inbox first. Standing rules still come from `agents/<slug>/.dispatch.md`.
+- Console-originated hub inbox messages carry `conversation_id`. The launched hub sends its operator-visible response or delegation summary as a markdown file in `outbox/` addressed to `user` with the same `conversation_id`; the router delivers it to `user/inbox/`, and the server relays it into the same web conversation. Only the hub root `outbox/` may address `user`; product agents still report to the hub. `scripts/bizagent-control-plane.js append-hub-turn` remains available for manual repair/imports.
 - Login config and salted password hash live in `.bizagent/auth.json`.
 - Sessions live in `.bizagent/sessions.json` and are deleted on logout.
-- **Enterprise Server connection (optional):** a hub may connect to a private
-  **BizAgent Enterprise Server** (silent company box) via
-  `control-plane/lib/enterprise-server-client.js` — connection state lives in
-  `.bizagent/enterprise-server.json` (URL + token + hub_id). When connected:
-  company KS syncs to the server (nightly + on-connect), products
-  auto-register their git remotes, new products default their LLM provider to
-  the server proxy, and an `ask-enterprise` knowledge-stack agent is
-  provisioned. Without a connection file the hub is pure single-operator OSS —
-  every enterprise entry point is a no-op. Spec:
-  `docs/2026-10-03-enterprise-server-mvp-spec.md` (superseded in part by the
-  private repo's 2026-10-30 technical spec).
-- Named conversation history lives as JSON files under `.bizagent/conversations/`.
-  That UI history is bounded: older raw turns are compressed into a JSON summary
-  and the hub runtime reads the markdown session file, not an unbounded transcript.
+- **Enterprise Server connection (optional):** a hub may connect to a private **BizAgent Enterprise Server** (silent company box) via `control-plane/lib/enterprise-server-client.js` — connection state lives in `.bizagent/enterprise-server.json` (URL + token + hub_id). When connected: company KS syncs to the server (nightly + on-connect), products auto-register their git remotes, new products default their LLM provider to the server proxy, and an `ask-enterprise` knowledge-stack agent is provisioned. Without a connection file the hub is pure single-operator OSS — every enterprise entry point is a no-op. Spec: `docs/2026-10-03-enterprise-server-mvp-spec.md` (superseded in part by the private repo's 2026-10-30 technical spec).
+- Named conversation history lives as JSON files under `.bizagent/conversations/`. That UI history is bounded: older raw turns are compressed into a JSON summary and the hub runtime reads the markdown session file, not an unbounded transcript.
 
 The design is deliberately minimal:
 
-- **The filesystem is the only ledger.** A pending message is a `.md` file in an
-  inbox; a done message is the same file `mv`'d to `inbox/archive/`. The `mv` is
-  atomic and crash-safe. There is **no checksum/seen JSON** — inbox filenames
-  are write-once and unique, so the file's presence/absence already dedupes.
-- **At-least-once delivery.** An agent archives each message _as it finishes
-  it_. If an agent crashes, its unhandled messages stay in the inbox and the
-  next tick retries them. (So agent work should be safe to re-run; archiving
-  each message right after acting on it keeps the re-run window small.)
-- **Per-agent lock = mutual exclusion** (the crux). Before launching an agent,
-  the control plane acquires `agents/<slug>/.lock` atomically with `mkdir` and
-  writes the PID + start-epoch. If the lock already exists, the control plane skips
-  that agent — _unless_ the holder PID is dead **or** the lock is older than a
-  max lease (default 30 min), in which case the stale lock is reclaimed. This is
-  what stops a long run (spanning several ticks) from being launched twice, and
-  what recovers from a crash that left a lock behind.
-- **Concurrency tiers** (Phase 2): hub and product agents use **separate** slot
-  pools so a long hub turn does not consume a product slot (and vice versa).
-  Defaults: `hub_slots=1`, `agent_slots` = `max_concurrency` (default **8**).
-  Agents over the product cap wait for the next tick. Per-agent locks still
-  ensure at most one live instance per slug.
-- **Allow concurrency** (nav drawer, default on): `settings.dispatch.allow_concurrency`
-  omit/true = concurrent turns as above. `false` serializes so at most one live
-  turn runs at a time (hub or product agent). Env `BIZAGENT_ALLOW_CONCURRENCY=0`
-  forces off. Console: GET/POST `/api/settings/dispatch` `{ allow_concurrency }`.
+- **The filesystem is the only ledger.** A pending message is a `.md` file in an inbox; a done message is the same file `mv`'d to `inbox/archive/`. The `mv` is atomic and crash-safe. There is **no checksum/seen JSON** — inbox filenames are write-once and unique, so the file's presence/absence already dedupes.
+- **At-least-once delivery.** An agent archives each message _as it finishes it_. If an agent crashes, its unhandled messages stay in the inbox and the next tick retries them. (So agent work should be safe to re-run; archiving each message right after acting on it keeps the re-run window small.)
+- **Per-agent lock = mutual exclusion** (the crux). Before launching an agent, the control plane acquires `agents/<slug>/.lock` atomically with `mkdir` and writes the PID + start-epoch. If the lock already exists, the control plane skips that agent — _unless_ the holder PID is dead **or** the lock is older than a max lease (default 30 min), in which case the stale lock is reclaimed. This is what stops a long run (spanning several ticks) from being launched twice, and what recovers from a crash that left a lock behind.
+- **Concurrency tiers** (Phase 2): hub and product agents use **separate** slot pools so a long hub turn does not consume a product slot (and vice versa). Defaults: `hub_slots=1`, `agent_slots` = `max_concurrency` (default **8**). Agents over the product cap wait for the next tick. Per-agent locks still ensure at most one live instance per slug.
+- **Allow concurrency** (nav drawer, default on): `settings.dispatch.allow_concurrency` omit/true = concurrent turns as above. `false` serializes so at most one live turn runs at a time (hub or product agent). Env `BIZAGENT_ALLOW_CONCURRENCY=0` forces off. Console: GET/POST `/api/settings/dispatch` `{ allow_concurrency }`.
 
 Lease and caps are configurable via env (`BIZAGENT_*`) or
 `settings.dispatch.{poll_seconds,max_concurrency,hub_slots,agent_slots,allow_concurrency,lock_lease_secs}`
@@ -200,26 +115,16 @@ result shape. Index lives at `<hub>/.bizagent/journal-fts.sqlite` — a
 gitignored cache that is always safe to delete; it is rebuilt incrementally
 (size/mtime) and stale-on-query, and `scripts/nightly.sh` refreshes it nightly.
 
-- **Parameters:** `query` (required), `product_slug`, `since` / `until`
-  (`YYYY-MM-DD`), `limit` (default 8, clamped 1–20). Returns short dated
-  snippets (~240 chars, ≤8k output total); `no journal hits` on zero.
-- **Scope is fail-closed:** product agents search **their own product's**
-  journals only (a model-passed other slug is ignored); the hub — or any
-  caller without a product slug — searches all sources.
-- **CLI:** `scripts/journal-search.sh` for humans/tests;
-  `scripts/journal-index.sh --rebuild` forces a full rebuild.
-- **Prompt contract:** templates tell agents to use `journal_search` for
-  "what did we decide / learn about X?" questions instead of grepping, and to
-  keep reading the latest 1–2 journal files only for *current* context.
+- **Parameters:** `query` (required), `product_slug`, `since` / `until` (`YYYY-MM-DD`), `limit` (default 8, clamped 1–20). Returns short dated snippets (~240 chars, ≤8k output total); `no journal hits` on zero.
+- **Scope is fail-closed:** product agents search **their own product's** journals only (a model-passed other slug is ignored); the hub — or any caller without a product slug — searches all sources.
+- **CLI:** `scripts/journal-search.sh` for humans/tests; `scripts/journal-index.sh --rebuild` forces a full rebuild.
+- **Prompt contract:** templates tell agents to use `journal_search` for "what did we decide / learn about X?" questions instead of grepping, and to keep reading the latest 1–2 journal files only for *current* context.
 
 LLM selection is **registry + `cli.json`** (single runtime):
 
-- **Runtime:** always `bizagent-agent` (`agent-runtime/`, launcher
-  `scripts/bizagent-agent`) — OpenAI-compatible tool loop; no vendor CLIs.
-- `cli.json` — `_runtime` launcher flags plus **provider** entries (`baseURL`,
-  `keyEnv`, `models`) e.g. `grok`, `openai`, `venice`, `openrouter`.
-- `registry.json` `settings.hub_agent.provider` / product `provider` (+ `model`) —
-  which LLM endpoint and model to use. `cliName` is a legacy alias for `provider`.
+- **Runtime:** always `bizagent-agent` (`agent-runtime/`, launcher `scripts/bizagent-agent`) — OpenAI-compatible tool loop; no vendor CLIs.
+- `cli.json` — `_runtime` launcher flags plus **provider** entries (`baseURL`, `keyEnv`, `models`) e.g. `grok`, `openai`, `venice`, `openrouter`.
+- `registry.json` `settings.hub_agent.provider` / product `provider` (+ `model`) — which LLM endpoint and model to use. `cliName` is a legacy alias for `provider`.
 - UI agent rail shows `provider >> model` (not a CLI binary name).
 
 ### MCP client (in-turn tools)
@@ -233,34 +138,15 @@ for hub PTL and every product agent — no per-agent allowlists in this slice.
     - `name` (required)
     - `transport`: `stdio` | `http` (Streamable HTTP; alias `streamable-http`)
       | `sse` (legacy HTTP+SSE from protocol 2024-11-05)
-    - **stdio:** `command`, `args`, optional `env` (values are **env-var name
-      refs**, not secrets in git), optional `cwd`
-    - **http / sse:** `url` (required), optional `headers` whose values are
-      **env-var name refs** (e.g. `"Authorization": "MCP_REMOTE_TOKEN"` →
-      resolve `process.env.MCP_REMOTE_TOKEN`; put the full header value there,
-      including any `Bearer ` prefix)
+    - **stdio:** `command`, `args`, optional `env` (values are **env-var name refs**, not secrets in git), optional `cwd`
+    - **http / sse:** `url` (required), optional `headers` whose values are **env-var name refs** (e.g. `"Authorization": "MCP_REMOTE_TOKEN"` → resolve `process.env.MCP_REMOTE_TOKEN`; put the full header value there, including any `Bearer ` prefix)
   - Additive extension points (safe to ignore): `allowlists`, `policy`, `audit`
-- **Runtime:** on each agent launch, connect configured servers, `tools/list`,
-  map each tool into the OpenAI-style function-call loop next to built-ins as
-  `mcp__<server>__<tool>`, forward `tools/call`, tear down on process exit.
-  Control plane sets `BIZAGENT_HUB` so the runtime finds the hub registry from
-  any cwd (hub runtime-cwd or product repo).
-- **Remote transports:** prefer Streamable HTTP (`transport: http`) — POST
-  JSON-RPC to the MCP endpoint; accept `application/json` or SSE response
-  bodies; honor `Mcp-Session-Id` when the server issues one. Legacy `sse`
-  opens a GET SSE stream, reads the `endpoint` event, and POSTs messages
-  there. TLS certificate verification is **on** by default
-  (`BIZAGENT_MCP_TLS_INSECURE=1` only if you must disable it).
-- **Safety:** per-server soft-fail (log + skip); connect/call timeouts so a hung
-  server cannot wedge a turn; logs tool **names** only (not argument payloads
-  or secret header values).
-- **Not the agent bus.** MCP is in-turn capability only. Multi-agent work still
-  uses filesystem mail + hub mediation. Do not invent agent-to-agent MCP.
-- **Free vs enterprise:** OSS = runtime + configured remote servers. Enterprise
-  later can add vault, org policy, curated connectors, and audit on the same
-  config shape without rewriting the client.
-- **Maintainer note:** stdio transport remains implemented for tests and
-  internal use; do not advertise it in public README / install marketing.
+- **Runtime:** on each agent launch, connect configured servers, `tools/list`, map each tool into the OpenAI-style function-call loop next to built-ins as `mcp__<server>__<tool>`, forward `tools/call`, tear down on process exit. Control plane sets `BIZAGENT_HUB` so the runtime finds the hub registry from any cwd (hub runtime-cwd or product repo).
+- **Remote transports:** prefer Streamable HTTP (`transport: http`) — POST JSON-RPC to the MCP endpoint; accept `application/json` or SSE response bodies; honor `Mcp-Session-Id` when the server issues one. Legacy `sse` opens a GET SSE stream, reads the `endpoint` event, and POSTs messages there. TLS certificate verification is **on** by default (`BIZAGENT_MCP_TLS_INSECURE=1` only if you must disable it).
+- **Safety:** per-server soft-fail (log + skip); connect/call timeouts so a hung server cannot wedge a turn; logs tool **names** only (not argument payloads or secret header values).
+- **Not the agent bus.** MCP is in-turn capability only. Multi-agent work still uses filesystem mail + hub mediation. Do not invent agent-to-agent MCP.
+- **Free vs enterprise:** OSS = runtime + configured remote servers. Enterprise later can add vault, org policy, curated connectors, and audit on the same config shape without rewriting the client.
+- **Maintainer note:** stdio transport remains implemented for tests and internal use; do not advertise it in public README / install marketing.
 
 #### Enable a remote MCP server (paste-in — preferred)
 
@@ -336,20 +222,12 @@ project's state, or ask the hub to read every journal for the whole portfolio.
 
 Small scripts do the mechanical work:
 
-- `onboard.sh <path>` — scaffold `.agent/journal/` and `sitemap.md` into a
-  project repo. Idempotent.
-- `bizagent-control-plane.js` — serve the UI/API, route mail, dispatch agents,
-  initialize auth, and generate dispatch prompt files.
-- `install-control-plane.sh` — a deliberate, manual one-time helper to write the
-  systemd user service. Never run automatically.
-- `router.sh`, `bizagent-dispatch.sh`, and `bizagent-watch.sh` — compatibility
-  wrappers around the Node control plane.
-- `detach-framework-remote.sh` — remove public framework `origin` after install;
-  ops `.gitignore` overrides; advise a private hub remote for nightly backup
-- `nightly.sh` — pull repos, route mail, archive stale inbox messages, prune
-  aged `*/archive/` files; `nightly.sh push` commits/pushes product project
-  repos and the hub ops repo when private remotes exist (refuses the public
-  framework URL)
+- `onboard.sh <path>` — scaffold `.agent/journal/` and `sitemap.md` into a project repo. Idempotent.
+- `bizagent-control-plane.js` — serve the UI/API, route mail, dispatch agents, initialize auth, and generate dispatch prompt files.
+- `install-control-plane.sh` — a deliberate, manual one-time helper to write the systemd user service. Never run automatically.
+- `router.sh`, `bizagent-dispatch.sh`, and `bizagent-watch.sh` — compatibility wrappers around the Node control plane.
+- `detach-framework-remote.sh` — remove public framework `origin` after install; ops `.gitignore` overrides; advise a private hub remote for nightly backup
+- `nightly.sh` — pull repos, route mail, archive stale inbox messages, prune aged `*/archive/` files; `nightly.sh push` commits/pushes product project repos and the hub ops repo when private remotes exist (refuses the public framework URL)
 
 Everything requiring judgment — proposing product groupings, writing journal
 prose, refreshing sitemaps, doing the actual product work — is done by the agent

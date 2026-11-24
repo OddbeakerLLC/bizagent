@@ -55,60 +55,21 @@ registry before asking.
 Approved beat order (one question per turn):
 
 1. **Welcome + organization name.**
-2. **Business type.** Ask what type of business they're running, offering a
-   curated list (software developer, product manufacturer, lawyer,
-   accountant, consultant, e-commerce/retail, agency, …) plus an **other**
-   free-text option. Resolve their answer with
-   `scripts/business-preset.sh match "<answer>"` and record the preset slug.
-   This one question replaces any individual code-review / approval-gate /
-   testing-bar questions — the preset map
-   (`templates/business-presets.json`) drives those defaults. Do **not**
-   ask per-service integration questions (email, Google apps, calendars);
-   those stay per-product.
-3. **Where their project repositories live.** Accept a parent folder path, an
-   explicit list of repo paths, or **none yet** (zero-repo → skip 3–4 product
-   grouping, keep `products: []`).
-   - If they give a folder: list its sub-directories, briefly inspect each one
-     (README, language, obvious purpose), then **propose** a grouping of repos
-     into _products_. Present the proposal and invite corrections. Iterate
-     until they approve it.
+2. **Business type.** Ask what type of business they're running, offering a curated list (software developer, product manufacturer, lawyer, accountant, consultant, e-commerce/retail, agency, …) plus an **other** free-text option. Resolve their answer with `scripts/business-preset.sh match "<answer>"` and record the preset slug. This one question replaces any individual code-review / approval-gate / testing-bar questions — the preset map (`templates/business-presets.json`) drives those defaults. Do **not** ask per-service integration questions (email, Google apps, calendars); those stay per-product.
+3. **Where their project repositories live.** Accept a parent folder path, an explicit list of repo paths, or **none yet** (zero-repo → skip 3–4 product grouping, keep `products: []`).
+   - If they give a folder: list its sub-directories, briefly inspect each one (README, language, obvious purpose), then **propose** a grouping of repos into _products_. Present the proposal and invite corrections. Iterate until they approve it.
    - If they list repos: path + optional git remote per repo.
-4. **Confirmation of the product groupings** (skip if zero-repo). Each product
-   needs a short lowercase `slug` (e.g. `jobe-ai`). One agent per product; an
-   agent owns one or more project repos.
-5. **Agent names** per confirmed product (skip if zero-repo). Derive a short
-   name: single-word product → first letter ("Widgets" → **Agent W**);
-   multi-word → first letter of each word ("Jobe AI" → **Agent JA**). On
-   conflict, fall back to first two letters of each product's first word
-   (e.g. "Agent Wi" vs "Agent Wr"); extend to three if still clashing; if
-   still unresolvable, ask the operator to choose. Present and wait:
-   "I'd suggest calling this agent **Agent W**. Want to use that, or do you
-   have a different name in mind?" Record confirmed `agent_name` in
-   `registry.json`.
-6. **Peer messaging?** Default **hub-and-spoke / no** direct cross-product
-   agent chat. Most products have none. (No peer-chat protocol work.)
+4. **Confirmation of the product groupings** (skip if zero-repo). Each product needs a short lowercase `slug` (e.g. `jobe-ai`). One agent per product; an agent owns one or more project repos.
+5. **Agent names** per confirmed product (skip if zero-repo). Derive a short name: single-word product → first letter ("Widgets" → **Agent W**); multi-word → first letter of each word ("Jobe AI" → **Agent JA**). On conflict, fall back to first two letters of each product's first word (e.g. "Agent Wi" vs "Agent Wr"); extend to three if still clashing; if still unresolvable, ask the operator to choose. Present and wait: "I'd suggest calling this agent **Agent W**. Want to use that, or do you have a different name in mind?" Record confirmed `agent_name` in `registry.json`.
+6. **Peer messaging?** Default **hub-and-spoke / no** direct cross-product agent chat. Most products have none. (No peer-chat protocol work.)
 7. **Nightly maintenance time** — default `23:00`.
-8. **Knowledge Stack** — on/off (default `true`) plus `refresh_day`
-   (default `sunday`) and `refresh_time` (default `01:00`) if enabled. The
-   Knowledge Stack is synthesized docs PTL keeps fresh for chat-with-documents
-   tools (NotebookLM, MSTY). Skip (`false`) if unused.
+8. **Knowledge Stack** — on/off (default `true`) plus `refresh_day` (default `sunday`) and `refresh_time` (default `01:00`) if enabled. The Knowledge Stack is synthesized docs PTL keeps fresh for chat-with-documents tools (NotebookLM, MSTY). Skip (`false`) if unused.
 9. **Auto-archive days** — inbox messages left unactioned. Default `30`.
-10. **Agent autonomy** — `maintenance-only` (default), `+monitoring`, or
-   `+light-dev`.
-11. **Private hub remote or local-only.** Installer removes public framework
-    `origin`. Ask for a **private** remote URL (GitHub private, bare repo on
-    this machine, or private host) as `hub.remote`. Blank = local-only nightly
-    commits. Never a public framework URL.
-12. **LLM provider + model** — only if not already in env/registry from the
-    installer. Runtime is always **bizagent-agent**. Set
-    `settings.hub_agent.provider` (key in `cli.json`) and
-    `settings.hub_agent.model`. Ensure matching API key in `.bizagent/env`.
-    Legacy `cliName` aliases `provider` only.
-13. **Control-plane login** — only if not already set (no `.bizagent/auth.json`).
-    Username + password; store only the salted hash from
-    `node scripts/bizagent-control-plane.js auth-init`.
-14. **Build summary + next steps** — products/projects (or zero-repo), deferred
-    items, cron, control-plane service offer, how to start directing work.
+10. **Agent autonomy** — `maintenance-only` (default), `+monitoring`, or `+light-dev`.
+11. **Private hub remote or local-only.** Installer removes public framework `origin`. Ask for a **private** remote URL (GitHub private, bare repo on this machine, or private host) as `hub.remote`. Blank = local-only nightly commits. Never a public framework URL.
+12. **LLM provider + model** — only if not already in env/registry from the installer. Runtime is always **bizagent-agent**. Set `settings.hub_agent.provider` (key in `cli.json`) and `settings.hub_agent.model`. Ensure matching API key in `.bizagent/env`. Legacy `cliName` aliases `provider` only.
+13. **Control-plane login** — only if not already set (no `.bizagent/auth.json`). Username + password; store only the salted hash from `node scripts/bizagent-control-plane.js auth-init`.
+14. **Build summary + next steps** — products/projects (or zero-repo), deferred items, cron, control-plane service offer, how to start directing work.
 
 **Do not ask** about message transport, hub-and-spoke topology, the
 journal/sitemap formats, or the real-time vs nightly model. Those decisions are
@@ -126,12 +87,9 @@ its `origin` points at that public GitHub repo. Your hub will hold **private
 operational data** — journals, agent configs, your real `registry.json`, inbox
 messages — that must NEVER reach a public repo. Before the first commit:
 
-- **Remove the inherited remote:** `git remote remove origin` (then `git remote -v`
-  should show nothing). This severs the link to the public framework repo so a
-  later commit or nightly run can never push your private data to it.
+- **Remove the inherited remote:** `git remote remove origin` (then `git remote -v` should show nothing). This severs the link to the public framework repo so a later commit or nightly run can never push your private data to it.
 - **Give your operational history a private home** (pick one):
-  - _Local-only (default, simplest):_ keep committing to this local repo with no
-    remote — nightly commits stay on this machine.
+  - _Local-only (default, simplest):_ keep committing to this local repo with no remote — nightly commits stay on this machine.
   - _Local bare backup:_ `git init --bare ~/bizagent-ops.git && git remote add
 origin ~/bizagent-ops.git` — a private backup on your own box.
   - _Private server remote:_ a remote on a private host you control. Never a public one.
@@ -140,61 +98,16 @@ The operational hub and the public framework repo must always stay **separate
 repositories with separate remotes.** (This rule exists because conflating the two
 once exposed an operator's private data publicly — don't repeat it.)
 
-1. **Write `registry.json`.** Use the schema in `registry.example.json`,
-   populated from the interview answers. Include the `agent_name` confirmed
-   in step 4 of the interview on each product entry. Record the § 1
-   business-type answer as `settings.business_type` (slug, label,
-   `custom: true` for free-text "other", `applied_at`, and the preset's
-   `defaults` from `templates/business-presets.json` — see
-   `docs/ONBOARDING-BUSINESS-PRESETS.md`). The preset is a starting point,
-   not a cage: everything stays overridable in registry settings post-setup.
-2. **Create the hub and user mailboxes:** `inbox/`, `inbox/archive/`, `outbox/`,
-   `user/inbox/archive/`, `journal/`, `logs/`.
-3. **Create one agent per product:** for each product, make
-   `agents/<slug>/agent.md`, `agents/<slug>/.dispatch.md`,
-   `agents/<slug>/inbox/archive/`, and `agents/<slug>/outbox/`. Fill
-   `agent.md` from `templates/agent.md.template` and `.dispatch.md` from
-   `templates/dispatch.md.template`, substituting the product's name, slug,
-   project list, and any cross-product edges. Fill the template's
-   `{{BUSINESS_PRESET_SECTION}}` placeholder with the output of
-   `scripts/business-preset.sh section` (empty when no preset is set), so
-   agents spawned afterward inherit the business type's approval gates and
-   defaults automatically. Dispatch code must read this
-   prompt file; never embed product-agent system prompts inline.
-4. **Onboard each project repo.** For every project on disk, run
-   `scripts/onboard.sh <path>`. If a repo is missing but has a git remote,
-   `git clone` it to its path first. If it is missing with no remote, log
-   `DEFERRED: <name>` and move on — it stays registered.
+1. **Write `registry.json`.** Use the schema in `registry.example.json`, populated from the interview answers. Include the `agent_name` confirmed in step 4 of the interview on each product entry. Record the § 1 business-type answer as `settings.business_type` (slug, label, `custom: true` for free-text "other", `applied_at`, and the preset's `defaults` from `templates/business-presets.json` — see `docs/ONBOARDING-BUSINESS-PRESETS.md`). The preset is a starting point, not a cage: everything stays overridable in registry settings post-setup.
+2. **Create the hub and user mailboxes:** `inbox/`, `inbox/archive/`, `outbox/`, `user/inbox/archive/`, `journal/`, `logs/`.
+3. **Create one agent per product:** for each product, make `agents/<slug>/agent.md`, `agents/<slug>/.dispatch.md`, `agents/<slug>/inbox/archive/`, and `agents/<slug>/outbox/`. Fill `agent.md` from `templates/agent.md.template` and `.dispatch.md` from `templates/dispatch.md.template`, substituting the product's name, slug, project list, and any cross-product edges. Fill the template's `{{BUSINESS_PRESET_SECTION}}` placeholder with the output of `scripts/business-preset.sh section` (empty when no preset is set), so agents spawned afterward inherit the business type's approval gates and defaults automatically. Dispatch code must read this prompt file; never embed product-agent system prompts inline.
+4. **Onboard each project repo.** For every project on disk, run `scripts/onboard.sh <path>`. If a repo is missing but has a git remote, `git clone` it to its path first. If it is missing with no remote, log `DEFERRED: <name>` and move on — it stays registered.
 5. **Write `NIGHTLY.md`** from `templates/NIGHTLY.md`.
-6. **Set up the Knowledge Stack** — only if `knowledge_stack.enabled == true`
-   in the registry. Create `company/` (with a one-line README explaining
-   "drop mission, manifesto, press, etc. here — PTL reads on refresh") and
-   `knowledge-stack/` (empty). Write `WEEKLY.md` from
-   `templates/WEEKLY.md`. The weekly cron line is installed in step 9
-   alongside the nightly cron.
-7. **Initialize the control-plane login:** run
-   `node scripts/bizagent-control-plane.js auth-init --username <username> --password <password>`.
-   The control plane also generates `.bizagent/prompts/hub.md` from
-   `AGENT.md` §§ 3-4 and keeps `.bizagent/hub-session.md` as the compact
-   current-session memory file for the hub runtime.
-   Then offer `scripts/install-control-plane.sh` as the service installer for
-   the local web UI, routing loop, and dispatch loop. This is a deliberate
-   manual step; do not install the service without operator confirmation.
-8. **Run the tests:** `bash tests/run-tests.sh`. Expect all green. If anything
-   fails, stop and report before continuing.
-9. **Version control.** Ensure this is a local **operational** repo (`git init`
-   if needed). The installer already ran `scripts/detach-framework-remote.sh`
-   (public framework `origin` removed; ops `.gitignore` overrides so
-   `registry.json` / journals / KS can be tracked). Commit. Nightly
-   (`scripts/nightly.sh push`) commits and pushes this hub **and** product
-   project repos when they have remotes. If a private hub remote was given in
-   the interview, set `hub.remote`, `git remote add origin <url>`, and push.
-   If none was given, **advise** the operator to add one soon so journals and
-   Knowledge Stack are backed up off-box. Never re-add the public framework
-   remote.
-10. **Install the cron lines.** Build the nightly line and (if
-    `knowledge_stack.enabled`) the weekly line, and add them to the
-    operator's crontab:
+6. **Set up the Knowledge Stack** — only if `knowledge_stack.enabled == true` in the registry. Create `company/` (with a one-line README explaining "drop mission, manifesto, press, etc. here — PTL reads on refresh") and `knowledge-stack/` (empty). Write `WEEKLY.md` from `templates/WEEKLY.md`. The weekly cron line is installed in step 9 alongside the nightly cron.
+7. **Initialize the control-plane login:** run `node scripts/bizagent-control-plane.js auth-init --username <username> --password <password>`. The control plane also generates `.bizagent/prompts/hub.md` from `AGENT.md` §§ 3-4 and keeps `.bizagent/hub-session.md` as the compact current-session memory file for the hub runtime. Then offer `scripts/install-control-plane.sh` as the service installer for the local web UI, routing loop, and dispatch loop. This is a deliberate manual step; do not install the service without operator confirmation.
+8. **Run the tests:** `bash tests/run-tests.sh`. Expect all green. If anything fails, stop and report before continuing.
+9. **Version control.** Ensure this is a local **operational** repo (`git init` if needed). The installer already ran `scripts/detach-framework-remote.sh` (public framework `origin` removed; ops `.gitignore` overrides so `registry.json` / journals / KS can be tracked). Commit. Nightly (`scripts/nightly.sh push`) commits and pushes this hub **and** product project repos when they have remotes. If a private hub remote was given in the interview, set `hub.remote`, `git remote add origin <url>`, and push. If none was given, **advise** the operator to add one soon so journals and Knowledge Stack are backed up off-box. Never re-add the public framework remote.
+10. **Install the cron lines.** Build the nightly line and (if `knowledge_stack.enabled`) the weekly line, and add them to the operator's crontab:
 
 ```
 <min> <hr> * * *      <HUB_ABS_PATH>/scripts/run-agent.sh "Follow NIGHTLY.md exactly." >> <HUB_ABS_PATH>/logs/nightly.log 2>&1
@@ -261,22 +174,11 @@ it to the correct slug internally.
 
 You are a coordinator, not an implementer. These rules have no exceptions:
 
-1. You **NEVER** write code, edit project files, update sitemaps, or write
-   journal entries for any product. Those are the agent's job, always.
-2. You **NEVER** do work that belongs to a product agent — even if it seems
-   faster, even if the work is small, even if you already know the answer.
-3. When the operator gives you a task: identify the owning agent by name,
-   delegate to them, wait for their reply, report back. That is the complete
-   workflow.
-4. If you catch yourself touching anything inside a project repo or an agent's
-   `agents/<slug>/` directory: stop, undo, delegate.
-5. **Hub machinery is user-gated.** By default do **not** edit `control-plane/`,
-   the web UI, dispatch/auth, `templates/`, hub `scripts/` behavior, `cli.json`,
-   or registry schema. Soft ops (mail, archive, hub journal, KS capture,
-   delegate) are fine without a special ask. Hub/control-plane/UI code changes
-   only when the operator **explicitly** requests them — minimal scoped diffs,
-   no drive-by refactors. If hub machinery is wrecked, tell the operator to run
-   `scripts/factory-reset.sh repair` (CLI; keeps registry/agents).
+1. You **NEVER** write code, edit project files, update sitemaps, or write journal entries for any product. Those are the agent's job, always.
+2. You **NEVER** do work that belongs to a product agent — even if it seems faster, even if the work is small, even if you already know the answer.
+3. When the operator gives you a task: identify the owning agent by name, delegate to them, wait for their reply, report back. That is the complete workflow.
+4. If you catch yourself touching anything inside a project repo or an agent's `agents/<slug>/` directory: stop, undo, delegate.
+5. **Hub machinery is user-gated.** By default do **not** edit `control-plane/`, the web UI, dispatch/auth, `templates/`, hub `scripts/` behavior, `cli.json`, or registry schema. Soft ops (mail, archive, hub journal, KS capture, delegate) are fine without a special ask. Hub/control-plane/UI code changes only when the operator **explicitly** requests them — minimal scoped diffs, no drive-by refactors. If hub machinery is wrecked, tell the operator to run `scripts/factory-reset.sh repair` (CLI; keeps registry/agents).
 
 Breaking these rules silently corrupts the journals and sitemaps the operator
 depends on. Runtime launches use the slim prompt in
@@ -288,11 +190,8 @@ sync when editing these limits.
 Tokens cost the operator money — keep every exchange as short as the content
 allows.
 
-- **Replies to the operator** default to two sentences or less. Go longer only
-  when the work genuinely requires it (e.g. a big-picture synthesis).
-- **Messages between you and product agents, and between product agents,**
-  carry only what the recipient needs to act — no preamble, no recap, no
-  signoff.
+- **Replies to the operator** default to two sentences or less. Go longer only when the work genuinely requires it (e.g. a big-picture synthesis).
+- **Messages between you and product agents, and between product agents,** carry only what the recipient needs to act — no preamble, no recap, no signoff.
 
 ### Runtime prompt and memory
 
@@ -372,15 +271,9 @@ which is still applied so a future opt-in has data to work with.
 
 **Three directories** at the hub root:
 
-- `company/` — operator-controlled. Drop mission, manifesto, press, news,
-  anything here. PTL writes here **only** when explicitly asked (currently:
-  URL fetches land in `company/news/`). You can move, rename, or delete
-  anything PTL puts there.
-- `journal/` — PTL's notebook. One file per active day
-  (`journal/YYYY-MM-DD.md`). Bullets tagged `[Company]` (operator-shared
-  business info) or `[Maintenance]` (PTL routing/archiving notes).
-- `knowledge-stack/` — published output, fully PTL-owned, regenerated on
-  the weekly cron. Operator never edits this directory directly.
+- `company/` — operator-controlled. Drop mission, manifesto, press, news, anything here. PTL writes here **only** when explicitly asked (currently: URL fetches land in `company/news/`). You can move, rename, or delete anything PTL puts there.
+- `journal/` — PTL's notebook. One file per active day (`journal/YYYY-MM-DD.md`). Bullets tagged `[Company]` (operator-shared business info) or `[Maintenance]` (PTL routing/archiving notes).
+- `knowledge-stack/` — published output, fully PTL-owned, regenerated on the weekly cron. Operator never edits this directory directly.
 
 **Capture flow (continuous).** When the operator tells you anything about
 the business — mission, press, decision, manifesto — immediately append a
@@ -400,8 +293,7 @@ for the exact sequence.
 
 **Naming convention (`knowledge-stack/` only):**
 
-- Company docs: `00-company-<topic>.md` (e.g. `00-company-mission.md`).
-  The `00-` prefix sorts company files first.
+- Company docs: `00-company-<topic>.md` (e.g. `00-company-mission.md`). The `00-` prefix sorts company files first.
 - Product overview: `<slug>-overview.md`.
 - Product source docs: `<slug>-<basename>.<ext>` (PDFs welcome).
 
@@ -500,18 +392,9 @@ see messages when you explicitly look, not injected automatically.
 
 ## § 4 — Honest limits
 
-- Project repos must be reachable — present on disk, or cloneable via the
-  `remote` field in the registry. Unreachable repos register fine but their
-  onboarding defers until they can be reached.
-- New products are never auto-discovered. Adding one later is the interactive
-  onboarding flow, run on the operator's instruction.
-- The nightly cron depends on a CLI agent being installed and runnable
-  non-interactively on the host.
-- Knowledge Stack source docs are byte-copied; no transformation. Proprietary
-  formats publish as-is.
-- `company/` is operator-controlled. PTL writes there only when the operator
-  explicitly requests it (currently: successful URL fetches land in
-  `company/news/`). The operator can move, rename, or delete anything PTL
-  puts there.
-- PTL does not crawl. URLs are fetched one at a time in response to the
-  operator sharing them; PTL does not follow links or scrape sites.
+- Project repos must be reachable — present on disk, or cloneable via the `remote` field in the registry. Unreachable repos register fine but their onboarding defers until they can be reached.
+- New products are never auto-discovered. Adding one later is the interactive onboarding flow, run on the operator's instruction.
+- The nightly cron depends on a CLI agent being installed and runnable non-interactively on the host.
+- Knowledge Stack source docs are byte-copied; no transformation. Proprietary formats publish as-is.
+- `company/` is operator-controlled. PTL writes there only when the operator explicitly requests it (currently: successful URL fetches land in `company/news/`). The operator can move, rename, or delete anything PTL puts there.
+- PTL does not crawl. URLs are fetched one at a time in response to the operator sharing them; PTL does not follow links or scrape sites.

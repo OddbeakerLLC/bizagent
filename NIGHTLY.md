@@ -9,21 +9,11 @@ specifies, and nothing more:
    ```sh
    bash scripts/nightly.sh
    ```
-   (if `settings.auto_update` is true, runs `scripts/upgrade.sh --yes` first;
-   then pulls project repos + hub if remotes exist; routes mail; archives stale
-   inbox messages; prunes old `*/archive/` files. Default auto_update is false.)
+   (if `settings.auto_update` is true, runs `scripts/upgrade.sh --yes` first; then pulls project repos + hub if remotes exist; routes mail; archives stale inbox messages; prunes old `*/archive/` files. Default auto_update is false.)
 
-2. For each project in `registry.json`, run `git log --since=midnight` to
-   detect the day's commits.
+2. For each project in `registry.json`, run `git log --since=midnight` to detect the day's commits.
 
-3. For each project with activity, spawn its product agent to refresh root
-   `sitemap.md`, reconcile the project's docs with the day's code changes
-   (update README/`docs/` where behavior changed; delete or rewrite docs for
-   removed/deprecated features), and add a `.agent/journal/YYYY-MM-DD.md`
-   entry — plain English, one bullet per meaningful change, with `Challenge:` /
-   `Lesson:` lines where warranted. After the agent finishes, if that project
-   repo has a git remote, ensure journal/sitemap changes are committed (agent
-   or you).
+3. For each project with activity, spawn its product agent to refresh root `sitemap.md`, reconcile the project's docs with the day's code changes (update README/`docs/` where behavior changed; delete or rewrite docs for removed/deprecated features), and add a `.agent/journal/YYYY-MM-DD.md` entry — plain English, one bullet per meaningful change, with `Challenge:` / `Lesson:` lines where warranted. After the agent finishes, if that project repo has a git remote, ensure journal/sitemap changes are committed (agent or you).
 
 4. If any work was done this run, add a hub journal entry under `journal/`.
 
@@ -33,9 +23,7 @@ specifies, and nothing more:
    ```
    This commits dirty trees and pushes:
    - each **product project** repo that has a remote (code + journals/sitemaps)
-   - the **hub** ops repo itself (registry, `agents/*/agent.md`, `journal/`,
-     `company/`, `knowledge-stack/`, local code tweaks) **if** the hub has a
-     private remote
+   - the **hub** ops repo itself (registry, `agents/*/agent.md`, `journal/`, `company/`, `knowledge-stack/`, local code tweaks) **if** the hub has a private remote
 
    The hub must **never** push to the public BizAgent framework remote. If the
    hub has no remote, log a reminder: set a private `origin` or
