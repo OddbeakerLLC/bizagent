@@ -250,6 +250,7 @@ After installation, open `http://localhost:8787` (or the port in
 your `registry.json`).
 
 - **Login-protected** — on first visit the browser shows a setup form to create credentials; afterwards, standard login
+  (inputs are trimmed and the username is case-insensitive)
 - **Dark-themed chat** — named conversations; create new ones with a button or pick from the dropdown
 - **Agent rail** — left sidebar: each agent with a status light, **`provider >> model`**
   (click to change LLM), expand for inbox / last dispatch / journal
