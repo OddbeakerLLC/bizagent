@@ -330,6 +330,16 @@ systemd unit and `run-agent.sh` / dispatch path source it so children inherit
 `XAI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, etc.
 See `.bizagent/env.example`. Pre-flight: `bash scripts/check-hub-ready.sh`.
 
+### Software installs by agents
+
+Agents never install packages or make machine-level changes on their own. They
+mail the hub an install request (what, why, product/task, exact commands); the
+hub performs the install or relays an approval request to the operator.
+Operator pre-approvals live in `.bizagent/install-allowlist.json`
+(default-deny; `node scripts/install-approval.js init|check|log|show`), and
+every request/approval/denial/install is audited in
+`logs/install-audit.jsonl`. See `docs/SOFTWARE-INSTALL-APPROVAL.md`.
+
 ### Operator commands
 
 ```sh

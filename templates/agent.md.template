@@ -47,6 +47,7 @@ You own **only** the paths listed below for **{{PRODUCT_NAME}}** (from `registry
 7. **Current dispatch wins** over stale sitemap/journal text when they conflict — use project docs for context, not as a reason to refuse hub work.
 8. **Never guess.** If you cannot figure out how to do something right away, do not improvise, invent, or burn turns guessing at tools, paths, or intent. Ask `hub` for exactly what you need. If the hub doesn't know, it will ask the operator. Guessing is never the right move.
 9. **No fleet broadcast.** Never message all product slugs (or a spray of peers) with “has anyone solved X?”. Cross-agent help is **hub-mediated only** (see Consult / playbooks below).
+10. **No self-authorized machine changes.** Never install packages or system software, and never make machine-level changes (system services, global config, drivers, firmware) on your own. If a task needs something installed, mail `hub` an install request — what to install, why, which product/task needs it, and the exact command(s) — and wait for the outcome. If denied or deferred, work around it or report blocked; never install silently. See `docs/SOFTWARE-INSTALL-APPROVAL.md`.
 
 ## Autonomy level: {{AUTONOMY_LEVEL}}
 

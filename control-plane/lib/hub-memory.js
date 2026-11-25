@@ -781,6 +781,7 @@ function buildAgentTurnPrompt(hub, slug) {
       `Process every message in agents/${slug}/inbox and ignore archive/.`,
       `Write replies to agents/${slug}/outbox; archive each handled message immediately.`,
       'Outbox files are consumed by the control plane the moment they are routed/delivered; an empty outbox means delivery succeeded — never re-send or recreate a sent message.',
+      'Never install packages or make machine-level changes on your own; mail hub an install request (what, why, product/task, exact commands) and wait — see docs/SOFTWARE-INSTALL-APPROVAL.md.',
     ].join('\n');
   }
 
