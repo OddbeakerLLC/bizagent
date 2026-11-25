@@ -34,15 +34,21 @@ function sanitizeSvg(svg) {
 }
 
 // --- Listen (TTS) in the document viewer ---
-// Browser speechSynthesis only — no server TTS dependency on the Library page.
-// Whole-document toggle: one Listen/Stop button reads the currently viewed
-// document; speech stops on toggle-off, on opening another file, and on
-// pagehide. Long text is chunked into sentence-sized utterances so engines
-// do not cut off mid-document.
+// Server TTS only (oddbeaker-tts via the control-plane /api/tts proxy) — the
+// same install-time voice preference (BIZAGENT_TTS_VOICE) the console speaks
+// with. Browser speechSynthesis is deliberately NOT used and NOT a fallback:
+// if the service or the configured voice is missing, Listen fails with a
+// visible error instead of silently reading in the built-in browser voice.
+// Reading starts at the first text visible in the viewport at click time
+// (nearest text-node boundary), never from the top of the document. Long text
+// is chunked into sentence-sized pieces; the next chunk is synthesized while
+// the current one plays so playback stays continuous.
 let librarySpeechText = ''; // raw markdown/text of the viewed document ('' = nothing speakable)
-let librarySpeechUtterance = null; // retained ref (Chrome GC drops in-flight utterances)
 let librarySpeechActive = false;
 let librarySpeechToken = 0;
+let librarySpeechAudio = null; // active HTMLAudioElement (paused on Stop/navigate)
+let librarySpeechObjectUrl = null; // blob URL of the active audio (revoked after play)
+let libraryTtsStatusOk = null; // cached health probe { available, voice } (only fully-OK results)
 
 /** Strip markdown formatting noise so text reads naturally aloud. */
 function libraryMarkdownToSpeechText(md) {
@@ -112,6 +118,29 @@ function libraryChunkSpeechText(text) {
   return chunks;
 }
 
+/** Escape a string for literal use inside a RegExp. */
+function libraryEscapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, (c) => '\\' + c);
+}
+
+/**
+ * Find `needle` in `text` ignoring whitespace-run differences (the speech text
+ * is whitespace-collapsed; DOM text is not). Returns the match index of the
+ * first needle word, or -1 when absent.
+ */
+function libraryLooseFind(text, needle) {
+  const words = String(needle || '').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return -1;
+  let re;
+  try {
+    re = new RegExp(words.map(libraryEscapeRegExp).join('\\s+'));
+  } catch (_err) {
+    return -1;
+  }
+  const m = re.exec(String(text));
+  return m ? m.index : -1;
+}
+
 function libraryListenBtn() {
   return document.getElementById('libraryListenBtn');
 }
@@ -119,10 +148,10 @@ function libraryListenBtn() {
 function setLibraryListenEnabled(on) {
   const btn = libraryListenBtn();
   if (!btn) return;
-  const supported = typeof window !== 'undefined' && 'speechSynthesis' in window;
-  const show = !!on && supported;
-  btn.hidden = !show;
-  btn.disabled = !show;
+  // Server TTS, not browser speechSynthesis — availability is checked per
+  // click against /api/tts/health, so no client capability gate here.
+  btn.hidden = !on;
+  btn.disabled = !on;
 }
 
 function setLibraryListenSpeaking(speaking) {
@@ -131,56 +160,206 @@ function setLibraryListenSpeaking(speaking) {
   btn.textContent = speaking ? 'Stop' : 'Listen';
   btn.title = speaking
     ? 'Stop reading aloud'
-    : 'Read the selected document aloud';
+    : 'Read aloud from the top of the screen';
 }
 
 function stopLibrarySpeech() {
   librarySpeechToken += 1;
   librarySpeechActive = false;
-  librarySpeechUtterance = null;
-  if (typeof window !== 'undefined' && window.speechSynthesis) {
-    try {
-      window.speechSynthesis.cancel();
-    } catch (_err) {
-      /* ignore */
-    }
+  if (librarySpeechAudio) {
+    try { librarySpeechAudio.pause(); } catch (_) { /* ignore */ }
+    try { librarySpeechAudio.removeAttribute('src'); } catch (_) { /* ignore */ }
+    librarySpeechAudio = null;
+  }
+  if (librarySpeechObjectUrl) {
+    try { URL.revokeObjectURL(librarySpeechObjectUrl); } catch (_) { /* ignore */ }
+    librarySpeechObjectUrl = null;
   }
   setLibraryListenSpeaking(false);
 }
 
-function speakLibraryDocument() {
+/**
+ * Health/voice probe for the install-time TTS preference. Fully-OK results are
+ * cached for the page session; anything else re-probes on the next click so a
+ * service/voice fix is picked up without a reload.
+ */
+async function libraryTtsStatus() {
+  if (libraryTtsStatusOk) return libraryTtsStatusOk;
+  const data = await api('/api/tts/health');
+  const status = {
+    available: !!(data && data.available),
+    voice: String((data && data.voice) || '').trim(),
+  };
+  if (status.available && status.voice) libraryTtsStatusOk = status;
+  return status;
+}
+
+/** Synthesize one speech chunk via the control-plane proxy (install voice). */
+function librarySynthesizeChunk(text) {
+  const p = api('/api/tts/synthesize', {
+    method: 'POST',
+    body: JSON.stringify({ text, raw: true }),
+  }).then((data) => {
+    if (!data || !data.audio_url) throw new Error('TTS service returned no audio');
+    return data.audio_url;
+  });
+  // A stop can discard an in-flight prefetch; swallow that rejection so it is
+  // never unhandled, while the original promise still rejects for awaiters.
+  p.catch(() => {});
+  return p;
+}
+
+/**
+ * Fetch + play one synthesized WAV. Resolves when playback ends OR when the
+ * generation token is superseded (Stop / navigation); rejects on real failures.
+ */
+function libraryPlayWav(audioUrl, token) {
+  return new Promise((resolve, reject) => {
+    fetch(audioUrl, { credentials: 'same-origin' }).then(async (res) => {
+      if (token !== librarySpeechToken) { resolve(); return; }
+      if (!res.ok) {
+        reject(new Error(`TTS audio fetch failed (HTTP ${res.status})`));
+        return;
+      }
+      const blob = await res.blob();
+      if (token !== librarySpeechToken) { resolve(); return; }
+      const url = URL.createObjectURL(blob);
+      librarySpeechObjectUrl = url;
+      const audio = new Audio(url);
+      librarySpeechAudio = audio;
+      let settled = false;
+      let watch = null;
+      const finish = (err) => {
+        if (settled) return;
+        settled = true;
+        if (watch) { try { clearInterval(watch); } catch (_) { /* ignore */ } }
+        if (librarySpeechAudio === audio) librarySpeechAudio = null;
+        if (librarySpeechObjectUrl === url) {
+          try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
+          librarySpeechObjectUrl = null;
+        }
+        if (err) reject(err);
+        else resolve();
+      };
+      // Poll so Stop cuts audio immediately instead of at the next event.
+      watch = setInterval(() => {
+        if (token !== librarySpeechToken) {
+          try { audio.pause(); } catch (_) { /* ignore */ }
+          finish();
+        }
+      }, 100);
+      audio.onended = () => finish();
+      audio.onerror = () => finish(new Error('audio playback failed'));
+      const played = audio.play();
+      if (played && typeof played.catch === 'function') {
+        played.catch((err) => finish(err instanceof Error ? err : new Error('playback blocked')));
+      }
+    }).catch((err) => reject(err instanceof Error ? err : new Error(String(err))));
+  });
+}
+
+/**
+ * Text nodes of the preview body whose box intersects the visible viewport of
+ * the scroll container, in document order.
+ */
+function libraryVisibleTextNodes() {
+  const root = document.getElementById('libraryPreviewBody');
+  if (!root) return [];
+  const box = root.getBoundingClientRect();
+  const out = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => (node.nodeValue && node.nodeValue.trim())
+      ? NodeFilter.FILTER_ACCEPT
+      : NodeFilter.FILTER_REJECT,
+  });
+  let node;
+  while ((node = walker.nextNode())) {
+    let rect = null;
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      rect = range.getBoundingClientRect();
+    } catch (_err) { continue; }
+    if (!rect || (rect.width === 0 && rect.height === 0)) continue; // hidden/collapsed
+    if (rect.bottom > box.top + 1 && rect.top < box.bottom - 1) out.push(node);
+  }
+  return out;
+}
+
+/**
+ * Character offset in the cleaned speech text matching the first word visible
+ * in the viewport at click time (nearest text-node boundary). Matches are
+ * whitespace-insensitive and must move forward through the document; falls
+ * back to 0 only when no visible text can be matched at all (e.g. the visible
+ * node sits inside a dropped code fence).
+ */
+function librarySpeechStartOffset(speechText) {
+  const nodes = libraryVisibleTextNodes().slice(0, 8);
+  for (const node of nodes) {
+    const snippet = String(node.nodeValue || '').replace(/\s+/g, ' ').trim();
+    if (!snippet) continue;
+    let triedLen = -1;
+    for (const cap of [80, 40, 20, 10, 6]) {
+      const take = Math.min(snippet.length, cap);
+      if (take === triedLen || take < 4) continue;
+      triedLen = take;
+      const idx = libraryLooseFind(speechText, snippet.slice(0, take));
+      if (idx >= 0) return idx;
+    }
+  }
+  return 0;
+}
+
+async function speakLibraryDocument() {
   if (librarySpeechActive) {
     stopLibrarySpeech();
     return;
   }
-  const synth = (typeof window !== 'undefined' && window.speechSynthesis) || null;
-  if (!synth || !librarySpeechText) return;
-  const chunks = libraryChunkSpeechText(libraryMarkdownToSpeechText(librarySpeechText));
-  if (!chunks.length) return;
+  if (!librarySpeechText) return;
   const token = ++librarySpeechToken;
   librarySpeechActive = true;
   setLibraryListenSpeaking(true);
   try {
-    synth.cancel();
-  } catch (_err) {
-    /* ignore */
-  }
-  let index = 0;
-  const speakNext = () => {
-    if (token !== librarySpeechToken) return; // stopped or navigated away
-    if (index >= chunks.length) {
-      stopLibrarySpeech();
-      return;
+    // Capture the click-time viewport BEFORE any await: the start position is
+    // "first visible word at the moment Listen was clicked".
+    const text = libraryMarkdownToSpeechText(librarySpeechText);
+    if (!text) { stopLibrarySpeech(); return; }
+    const start = librarySpeechStartOffset(text);
+    const chunks = libraryChunkSpeechText(text.slice(start));
+    if (!chunks.length) { stopLibrarySpeech(); return; }
+
+    // Install voice only: service up AND a voice configured, else fail loudly.
+    const status = await libraryTtsStatus();
+    if (token !== librarySpeechToken) return;
+    if (!status.available) {
+      throw new Error('TTS service (oddbeaker-tts) is not running');
     }
-    const utterance = new SpeechSynthesisUtterance(chunks[index++]);
-    utterance.onend = speakNext;
-    utterance.onerror = () => {
-      if (token === librarySpeechToken) stopLibrarySpeech();
-    };
-    librarySpeechUtterance = utterance; // retain ref so Chrome does not GC it mid-speech
-    synth.speak(utterance);
-  };
-  speakNext();
+    if (!status.voice) {
+      throw new Error('no TTS voice configured — set BIZAGENT_TTS_VOICE in hub .bizagent/env (scripts/install-oddbeaker-tts.sh --prompt-voice)');
+    }
+
+    let index = 0;
+    let pending = librarySynthesizeChunk(chunks[0]);
+    while (token === librarySpeechToken && index < chunks.length) {
+      let audioUrl;
+      try {
+        audioUrl = await pending;
+      } catch (err) {
+        if (token !== librarySpeechToken) return;
+        throw err;
+      }
+      if (token !== librarySpeechToken) return;
+      index += 1;
+      // Synthesize the next chunk while the current one plays.
+      pending = index < chunks.length ? librarySynthesizeChunk(chunks[index]) : null;
+      await libraryPlayWav(audioUrl, token);
+    }
+    if (token === librarySpeechToken) stopLibrarySpeech();
+  } catch (err) {
+    const message = (err && err.message) || 'TTS unavailable';
+    stopLibrarySpeech();
+    setLibraryStatus(`Listen unavailable: ${message}`, 'warn');
+  }
 }
 
 async function api(path, options = {}) {
@@ -728,9 +907,7 @@ async function initLibraryPage() {
   const srcBtn = document.getElementById('librarySourceBtn');
   if (srcBtn) srcBtn.addEventListener('click', () => downloadLibrarySource());
   const listenBtn = document.getElementById('libraryListenBtn');
-  if (listenBtn && typeof window !== 'undefined' && 'speechSynthesis' in window) {
-    listenBtn.addEventListener('click', () => speakLibraryDocument());
-  }
+  if (listenBtn) listenBtn.addEventListener('click', () => speakLibraryDocument());
   if (typeof window !== 'undefined') {
     window.addEventListener('pagehide', stopLibrarySpeech);
     window.addEventListener('beforeunload', stopLibrarySpeech);

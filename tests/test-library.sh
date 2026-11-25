@@ -16,7 +16,14 @@ grep -q 'groupLibraryRepos\|library-acc-product\|libraryExpandedProduct' "$ROOT/
 grep -q 'ensureLibraryTreesLoaded\|applyLibraryFilter' "$ROOT/control-plane/public/library.js" || fail "library page missing filter tree prefetch"
 grep -q 'repoTreeMatchesFilter' "$ROOT/control-plane/public/library.js" || fail "library page missing repoTreeMatchesFilter"
 grep -q 'libraryListenBtn' "$ROOT/control-plane/public/library.html" || fail "library page missing Listen button"
-grep -q 'speechSynthesis' "$ROOT/control-plane/public/library.js" || fail "library page missing browser speechSynthesis TTS"
+grep -q '/api/tts/health' "$ROOT/control-plane/public/library.js" || fail "library Listen must probe TTS health/voice (install voice)"
+grep -q '/api/tts/synthesize' "$ROOT/control-plane/public/library.js" || fail "library Listen must synthesize via the server TTS proxy (install voice)"
+grep -q 'no TTS voice configured' "$ROOT/control-plane/public/library.js" || fail "library Listen must fail loudly when no install voice is configured"
+grep -q 'librarySpeechStartOffset' "$ROOT/control-plane/public/library.js" || fail "library Listen must start at the first visible viewport text"
+grep -q 'libraryVisibleTextNodes' "$ROOT/control-plane/public/library.js" || fail "library Listen missing visible-text-node locator"
+if grep -qE "speechSynthesis\.|SpeechSynthesisUtterance|'speechSynthesis' in" "$ROOT/control-plane/public/library.js"; then
+  fail "library Listen must not use browser speechSynthesis (built-in voice)"
+fi
 grep -q 'stopLibrarySpeech' "$ROOT/control-plane/public/library.js" || fail "library page missing stopLibrarySpeech"
 grep -q "addEventListener('pagehide', stopLibrarySpeech)" "$ROOT/control-plane/public/library.js" || fail "library page must stop speech on pagehide"
 # File-only filter: product/project labels must not keep empty shells visible
@@ -543,7 +550,8 @@ if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
   // eslint-disable-next-line no-new-func
   new Function('exports', pageJs.slice(start, end)
     + '\nexports.clean = libraryMarkdownToSpeechText;'
-    + '\nexports.chunk = libraryChunkSpeechText;')(tts);
+    + '\nexports.chunk = libraryChunkSpeechText;'
+    + '\nexports.looseFind = libraryLooseFind;')(tts);
   const sample = [
     '# Big Title',
     '',
@@ -597,6 +605,25 @@ if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
   if (short.length !== 1 || short[0] !== 'One short paragraph.') {
     console.error('short text should be a single chunk', short);
     process.exit(53);
+  }
+  // Start-at-scroll: whitespace-insensitive locator maps visible DOM text onto
+  // the cleaned speech text (speech text collapses whitespace; DOM does not).
+  const hay = 'Intro paragraph stands first.\n\nSecond  paragraph  with   wide   spacing.';
+  const atSecond = tts.looseFind(hay, 'Second paragraph with wide spacing.');
+  if (atSecond < 0 || hay.slice(atSecond, atSecond + 6) !== 'Second') {
+    console.error('looseFind missed whitespace-collapsed match', atSecond);
+    process.exit(54);
+  }
+  if (tts.looseFind(hay, 'totally absent snippet words') !== -1) {
+    console.error('looseFind matched absent text');
+    process.exit(55);
+  }
+  // Punctuation/regex metacharacters in the snippet must be matched literally.
+  const tricky = 'Call f(a,b) now. Then g(x) later.';
+  const atCall = tts.looseFind(tricky, 'f(a,b) now');
+  if (atCall < 0 || tricky.slice(atCall, atCall + 1) !== 'f') {
+    console.error('looseFind failed on regex metacharacters', atCall);
+    process.exit(56);
   }
 }
 
