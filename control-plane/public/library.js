@@ -33,6 +33,156 @@ function sanitizeSvg(svg) {
   }
 }
 
+// --- Listen (TTS) in the document viewer ---
+// Browser speechSynthesis only — no server TTS dependency on the Library page.
+// Whole-document toggle: one Listen/Stop button reads the currently viewed
+// document; speech stops on toggle-off, on opening another file, and on
+// pagehide. Long text is chunked into sentence-sized utterances so engines
+// do not cut off mid-document.
+let librarySpeechText = ''; // raw markdown/text of the viewed document ('' = nothing speakable)
+let librarySpeechUtterance = null; // retained ref (Chrome GC drops in-flight utterances)
+let librarySpeechActive = false;
+let librarySpeechToken = 0;
+
+/** Strip markdown formatting noise so text reads naturally aloud. */
+function libraryMarkdownToSpeechText(md) {
+  let text = String(md || '').replace(/\r\n?/g, '\n');
+  // Fenced code blocks: reading code aloud is noise — drop them entirely.
+  text = text.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, '');
+  // Images: keep alt text when present, drop the URL.
+  text = text.replace(/!\[([^\]]*)\]\([^)]*\)/g, (_m, alt) => (alt || '').trim());
+  // Links: keep the link text, drop the URL (inline, reference, and autolink).
+  text = text.replace(/\[([^\]]*)\]\([^)]*\)/g, (_m, label) => label);
+  text = text.replace(/\[([^\]]*)\]\[[^\]]*\]/g, (_m, label) => label);
+  text = text.replace(/<https?:\/\/[^>\s]+>/g, '');
+  // Reference-link definitions at line start: drop.
+  text = text.replace(/^\s*\[[^\]]+\]:\s+\S+.*$/gm, '');
+  // Headings / blockquotes / list markers: keep the words, drop the markers.
+  text = text.replace(/^\s{0,3}#{1,6}\s+/gm, '');
+  text = text.replace(/^\s{0,3}>\s?/gm, '');
+  text = text.replace(/^(\s{0,3})([-*+]|\d+[.)])\s+/gm, '$1');
+  // Table separator rows and pipe dividers.
+  text = text.replace(/^\s*\|?[\s:|-]+\|[\s:|-]*$/gm, '');
+  text = text.replace(/\|/g, ' ');
+  // Emphasis / strikethrough / inline code: keep inner text.
+  text = text.replace(/(\*\*\*|\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2');
+  text = text.replace(/(\*|_)(?=\S)([^*_]*\S)\1/g, '$2');
+  text = text.replace(/~~(?=\S)([\s\S]*?\S)~~/g, '$1');
+  text = text.replace(/`([^`]*)`/g, '$1');
+  // Stray HTML tags.
+  text = text.replace(/<\/?[a-zA-Z][^>]*>/g, '');
+  // Bare URLs left in prose: drop (they read as letter soup).
+  text = text.replace(/\bhttps?:\/\/\S+/g, '');
+  // Collapse whitespace runs; keep paragraph breaks.
+  text = text.replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n');
+  text = text.replace(/\n{3,}/g, '\n\n');
+  return text.trim();
+}
+
+/** Split clean text into sentence/paragraph-sized chunks for reliable playback. */
+function libraryChunkSpeechText(text) {
+  const chunks = [];
+  const maxChunk = 220;
+  const paragraphs = String(text || '').split(/\n{2,}/);
+  for (const para of paragraphs) {
+    const clean = para.replace(/\n+/g, ' ').trim();
+    if (!clean) continue;
+    const sentences = clean.match(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g) || [clean];
+    let current = '';
+    for (const rawSentence of sentences) {
+      let sentence = rawSentence.trim();
+      if (!sentence) continue;
+      // Oversized single sentence: hard-split on word boundaries.
+      while (sentence.length > maxChunk * 2) {
+        let cut = sentence.lastIndexOf(' ', maxChunk * 2);
+        if (cut < maxChunk) cut = maxChunk * 2;
+        chunks.push(sentence.slice(0, cut).trim());
+        sentence = sentence.slice(cut).trim();
+      }
+      if (!sentence) continue;
+      if (current && (current.length + sentence.length + 1) > maxChunk) {
+        chunks.push(current);
+        current = sentence;
+      } else {
+        current = current ? `${current} ${sentence}` : sentence;
+      }
+    }
+    if (current) chunks.push(current);
+  }
+  return chunks;
+}
+
+function libraryListenBtn() {
+  return document.getElementById('libraryListenBtn');
+}
+
+function setLibraryListenEnabled(on) {
+  const btn = libraryListenBtn();
+  if (!btn) return;
+  const supported = typeof window !== 'undefined' && 'speechSynthesis' in window;
+  const show = !!on && supported;
+  btn.hidden = !show;
+  btn.disabled = !show;
+}
+
+function setLibraryListenSpeaking(speaking) {
+  const btn = libraryListenBtn();
+  if (!btn) return;
+  btn.textContent = speaking ? 'Stop' : 'Listen';
+  btn.title = speaking
+    ? 'Stop reading aloud'
+    : 'Read the selected document aloud';
+}
+
+function stopLibrarySpeech() {
+  librarySpeechToken += 1;
+  librarySpeechActive = false;
+  librarySpeechUtterance = null;
+  if (typeof window !== 'undefined' && window.speechSynthesis) {
+    try {
+      window.speechSynthesis.cancel();
+    } catch (_err) {
+      /* ignore */
+    }
+  }
+  setLibraryListenSpeaking(false);
+}
+
+function speakLibraryDocument() {
+  if (librarySpeechActive) {
+    stopLibrarySpeech();
+    return;
+  }
+  const synth = (typeof window !== 'undefined' && window.speechSynthesis) || null;
+  if (!synth || !librarySpeechText) return;
+  const chunks = libraryChunkSpeechText(libraryMarkdownToSpeechText(librarySpeechText));
+  if (!chunks.length) return;
+  const token = ++librarySpeechToken;
+  librarySpeechActive = true;
+  setLibraryListenSpeaking(true);
+  try {
+    synth.cancel();
+  } catch (_err) {
+    /* ignore */
+  }
+  let index = 0;
+  const speakNext = () => {
+    if (token !== librarySpeechToken) return; // stopped or navigated away
+    if (index >= chunks.length) {
+      stopLibrarySpeech();
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(chunks[index++]);
+    utterance.onend = speakNext;
+    utterance.onerror = () => {
+      if (token === librarySpeechToken) stopLibrarySpeech();
+    };
+    librarySpeechUtterance = utterance; // retain ref so Chrome does not GC it mid-speech
+    synth.speak(utterance);
+  };
+  speakNext();
+}
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -442,6 +592,9 @@ async function openLibraryFile(repoId, filePath) {
   const bodyEl = document.getElementById('libraryPreviewBody');
   if (!bodyEl) return;
   librarySelected = { repoId, path: filePath, id: `${repoId}:${filePath}` };
+  stopLibrarySpeech();
+  librarySpeechText = '';
+  setLibraryListenEnabled(false);
   bodyEl.innerHTML = '<p class="company-file-empty">Loading…</p>';
   bodyEl.scrollTop = 0;
   setLibraryDownloadEnabled(false);
@@ -496,12 +649,16 @@ async function openLibraryFile(repoId, filePath) {
       }
     } else {
       bodyEl.innerHTML = renderMarkdown(doc.content || '') || '<p class="company-file-empty">(empty)</p>';
+      librarySpeechText = String(doc.content || '');
+      setLibraryListenEnabled(!!librarySpeechText.trim());
     }
     bodyEl.scrollTop = 0;
     setLibraryDownloadEnabled(true);
     const hasSource = !!(doc.source_path || kind === 'plantuml' || doc.source_content);
     setLibrarySourceVisible(hasSource);
   } catch (err) {
+    librarySpeechText = '';
+    setLibraryListenEnabled(false);
     bodyEl.innerHTML = `<p class="company-file-empty">${escapeHtml(err.message || 'Failed to load')}</p>`;
     bodyEl.scrollTop = 0;
   }
@@ -570,6 +727,14 @@ async function initLibraryPage() {
   if (dlBtn) dlBtn.addEventListener('click', () => downloadLibraryDoc());
   const srcBtn = document.getElementById('librarySourceBtn');
   if (srcBtn) srcBtn.addEventListener('click', () => downloadLibrarySource());
+  const listenBtn = document.getElementById('libraryListenBtn');
+  if (listenBtn && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    listenBtn.addEventListener('click', () => speakLibraryDocument());
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('pagehide', stopLibrarySpeech);
+    window.addEventListener('beforeunload', stopLibrarySpeech);
+  }
   const filter = document.getElementById('libraryFilter');
   if (filter) {
     filter.addEventListener('input', () => {

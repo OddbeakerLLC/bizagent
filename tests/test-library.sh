@@ -15,6 +15,10 @@ grep -q 'library-accordion\|libraryAccordion' "$ROOT/control-plane/public/librar
 grep -q 'groupLibraryRepos\|library-acc-product\|libraryExpandedProduct' "$ROOT/control-plane/public/library.js" || fail "library page missing product→project nesting"
 grep -q 'ensureLibraryTreesLoaded\|applyLibraryFilter' "$ROOT/control-plane/public/library.js" || fail "library page missing filter tree prefetch"
 grep -q 'repoTreeMatchesFilter' "$ROOT/control-plane/public/library.js" || fail "library page missing repoTreeMatchesFilter"
+grep -q 'libraryListenBtn' "$ROOT/control-plane/public/library.html" || fail "library page missing Listen button"
+grep -q 'speechSynthesis' "$ROOT/control-plane/public/library.js" || fail "library page missing browser speechSynthesis TTS"
+grep -q 'stopLibrarySpeech' "$ROOT/control-plane/public/library.js" || fail "library page missing stopLibrarySpeech"
+grep -q "addEventListener('pagehide', stopLibrarySpeech)" "$ROOT/control-plane/public/library.js" || fail "library page must stop speech on pagehide"
 # File-only filter: product/project labels must not keep empty shells visible
 if grep -E 'label\.includes\(q\)|product_name.*includes\(q\)' "$ROOT/control-plane/public/library.js" >/dev/null; then
   fail "library filter still matches product/project labels (should be file name/path only)"
@@ -523,6 +527,76 @@ if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
   if (looseOl !== '<ol><li>one</li><li value="2">two</li><li value="3">three</li></ol>') {
     console.error('library loose ol restarted at 1', looseOl);
     process.exit(45);
+  }
+}
+
+// Listen (TTS): markdown→speech cleanup + chunking (pure helpers, no DOM)
+{
+  const pageJs = fs.readFileSync(path.join(process.argv[2], 'control-plane/public/library.js'), 'utf8');
+  const start = pageJs.indexOf('function libraryMarkdownToSpeechText');
+  const end = pageJs.indexOf('function libraryListenBtn');
+  if (start < 0 || end < 0 || end <= start) {
+    console.error('could not locate TTS helpers in library.js');
+    process.exit(46);
+  }
+  const tts = {};
+  // eslint-disable-next-line no-new-func
+  new Function('exports', pageJs.slice(start, end)
+    + '\nexports.clean = libraryMarkdownToSpeechText;'
+    + '\nexports.chunk = libraryChunkSpeechText;')(tts);
+  const sample = [
+    '# Big Title',
+    '',
+    'Some **bold** and _soft_ text with [a link](https://example.com/x) inside.',
+    '',
+    '```js',
+    'const hidden = true;',
+    '```',
+    '',
+    '- item one',
+    '- item two',
+    '',
+    '> A quote line.',
+    '',
+    'Ends here. Second sentence follows! Third one?',
+  ].join('\n');
+  const clean = tts.clean(sample);
+  if (/(^|\n)#|\*\*|__|~~|`|\[|\]\(|https?:\/\/|<https:|^\s*[-*+]\s|^\s*\d+\.\s/m.test(clean)) {
+    console.error('markdown noise survived speech cleanup', clean);
+    process.exit(47);
+  }
+  for (const word of ['Big Title', 'bold', 'soft', 'a link', 'item one', 'item two', 'A quote line.', 'Ends here']) {
+    if (!clean.includes(word)) {
+      console.error('speech cleanup lost content', word, clean);
+      process.exit(48);
+    }
+  }
+  if (clean.includes('const hidden')) {
+    console.error('fenced code block should be dropped from speech', clean);
+    process.exit(49);
+  }
+  // Chunking: long text splits into sentence-sized pieces; short text stays whole.
+  const longText = Array.from({ length: 12 }, (_v, i) => `Sentence number ${i} says something reasonably long for a test document.`).join(' ');
+  const chunks = tts.chunk(longText);
+  if (chunks.length < 2) {
+    console.error('long text should chunk into multiple utterances', chunks.length);
+    process.exit(50);
+  }
+  for (const c of chunks) {
+    if (!c.trim() || c.length > 441) {
+      console.error('chunk too large or empty', c.length);
+      process.exit(51);
+    }
+  }
+  const joined = chunks.join(' ').replace(/\s+/g, ' ').trim();
+  if (joined !== longText.replace(/\s+/g, ' ').trim()) {
+    console.error('chunking lost or duplicated words');
+    process.exit(52);
+  }
+  const short = tts.chunk('One short paragraph.');
+  if (short.length !== 1 || short[0] !== 'One short paragraph.') {
+    console.error('short text should be a single chunk', short);
+    process.exit(53);
   }
 }
 
