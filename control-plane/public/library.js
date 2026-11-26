@@ -40,9 +40,13 @@ function sanitizeSvg(svg) {
 // if the service or the configured voice is missing, Listen fails with a
 // visible error instead of silently reading in the built-in browser voice.
 // Reading starts at the first text visible in the viewport at click time
-// (nearest text-node boundary), never from the top of the document. Long text
-// is chunked into sentence-sized pieces; the next chunk is synthesized while
-// the current one plays so playback stays continuous.
+// (nearest text-node boundary), never from the top of the document. The first
+// TWO sentences are synthesized as ONE clip and played as a seamless lead-in
+// unit (no internal gap by construction); after that, text is chunked into
+// sentence-sized pieces and the next chunk is fully preloaded (synthesized AND
+// its WAV fetched) while the current one plays, so playback continues with
+// zero load wait between sentences. If synthesis ever falls behind playback,
+// the reader pauses briefly with a "buffering" note rather than skipping text.
 let librarySpeechText = ''; // raw markdown/text of the viewed document ('' = nothing speakable)
 let librarySpeechActive = false;
 let librarySpeechToken = 0;
@@ -116,6 +120,37 @@ function libraryChunkSpeechText(text) {
     if (current) chunks.push(current);
   }
   return chunks;
+}
+
+/**
+ * Split the leading two sentences off for the seamless lead-in clip (hub work
+ * order 2026-11-25): the first two sentences are synthesized as ONE request
+ * and played as one unit, so there is no internal gap by construction. The
+ * remainder (rest of the second sentence's paragraph onward) goes back through
+ * the normal chunker for the rolling one-ahead queue. Returns { lead, rest };
+ * lead is '' only when the text is empty.
+ */
+function librarySplitLeadIn(text) {
+  const paragraphs = String(text || '').split(/\n{2,}/);
+  const picked = [];
+  const rest = [];
+  for (const para of paragraphs) {
+    const clean = para.replace(/\n+/g, ' ').trim();
+    if (!clean) continue;
+    const sentences = clean.match(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g) || [clean];
+    let remainder = '';
+    for (const rawSentence of sentences) {
+      const sentence = rawSentence.trim();
+      if (!sentence) continue;
+      if (picked.length < 2) {
+        picked.push(sentence);
+      } else {
+        remainder = remainder ? `${remainder} ${sentence}` : sentence;
+      }
+    }
+    if (remainder) rest.push(remainder);
+  }
+  return { lead: picked.join(' '), rest: rest.join('\n\n') };
 }
 
 /** Escape a string for literal use inside a RegExp. */
@@ -210,51 +245,66 @@ function librarySynthesizeChunk(text) {
 }
 
 /**
- * Fetch + play one synthesized WAV. Resolves when playback ends OR when the
+ * Fully preload one speech chunk while the previous one plays: synthesize it
+ * AND fetch its WAV into a ready-to-play Blob, so when the current clip ends
+ * the next one starts with zero load wait (hub dispatch 2026-11-25 — the
+ * synthesize-only prefetch still left the audio fetch latency between
+ * sentences). Never blocks playback start: the caller awaits this before
+ * playing the chunk, so a slow preload simply delays that chunk's start (the
+ * old load-then-play behavior) instead of stuttering or going silent.
+ */
+function libraryPreloadChunk(text, token) {
+  const p = (async () => {
+    const audioUrl = await librarySynthesizeChunk(text);
+    const res = await fetch(audioUrl, { credentials: 'same-origin' });
+    if (token !== librarySpeechToken) return null;
+    if (!res.ok) throw new Error(`TTS audio fetch failed (HTTP ${res.status})`);
+    return await res.blob();
+  })();
+  // A stop can discard an in-flight prefetch; swallow that rejection so it is
+  // never unhandled, while the original promise still rejects for awaiters.
+  p.catch(() => {});
+  return p;
+}
+
+/**
+ * Play one preloaded WAV Blob. Resolves when playback ends OR when the
  * generation token is superseded (Stop / navigation); rejects on real failures.
  */
-function libraryPlayWav(audioUrl, token) {
+function libraryPlayWav(blob, token) {
   return new Promise((resolve, reject) => {
-    fetch(audioUrl, { credentials: 'same-origin' }).then(async (res) => {
-      if (token !== librarySpeechToken) { resolve(); return; }
-      if (!res.ok) {
-        reject(new Error(`TTS audio fetch failed (HTTP ${res.status})`));
-        return;
+    if (token !== librarySpeechToken) { resolve(); return; }
+    const url = URL.createObjectURL(blob);
+    librarySpeechObjectUrl = url;
+    const audio = new Audio(url);
+    librarySpeechAudio = audio;
+    let settled = false;
+    let watch = null;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (watch) { try { clearInterval(watch); } catch (_) { /* ignore */ } }
+      if (librarySpeechAudio === audio) librarySpeechAudio = null;
+      if (librarySpeechObjectUrl === url) {
+        try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
+        librarySpeechObjectUrl = null;
       }
-      const blob = await res.blob();
-      if (token !== librarySpeechToken) { resolve(); return; }
-      const url = URL.createObjectURL(blob);
-      librarySpeechObjectUrl = url;
-      const audio = new Audio(url);
-      librarySpeechAudio = audio;
-      let settled = false;
-      let watch = null;
-      const finish = (err) => {
-        if (settled) return;
-        settled = true;
-        if (watch) { try { clearInterval(watch); } catch (_) { /* ignore */ } }
-        if (librarySpeechAudio === audio) librarySpeechAudio = null;
-        if (librarySpeechObjectUrl === url) {
-          try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
-          librarySpeechObjectUrl = null;
-        }
-        if (err) reject(err);
-        else resolve();
-      };
-      // Poll so Stop cuts audio immediately instead of at the next event.
-      watch = setInterval(() => {
-        if (token !== librarySpeechToken) {
-          try { audio.pause(); } catch (_) { /* ignore */ }
-          finish();
-        }
-      }, 100);
-      audio.onended = () => finish();
-      audio.onerror = () => finish(new Error('audio playback failed'));
-      const played = audio.play();
-      if (played && typeof played.catch === 'function') {
-        played.catch((err) => finish(err instanceof Error ? err : new Error('playback blocked')));
+      if (err) reject(err);
+      else resolve();
+    };
+    // Poll so Stop cuts audio immediately instead of at the next event.
+    watch = setInterval(() => {
+      if (token !== librarySpeechToken) {
+        try { audio.pause(); } catch (_) { /* ignore */ }
+        finish();
       }
-    }).catch((err) => reject(err instanceof Error ? err : new Error(String(err))));
+    }, 100);
+    audio.onended = () => finish();
+    audio.onerror = () => finish(new Error('audio playback failed'));
+    const played = audio.play();
+    if (played && typeof played.catch === 'function') {
+      played.catch((err) => finish(err instanceof Error ? err : new Error('playback blocked')));
+    }
   });
 }
 
@@ -325,8 +375,12 @@ async function speakLibraryDocument() {
     const text = libraryMarkdownToSpeechText(librarySpeechText);
     if (!text) { stopLibrarySpeech(); return; }
     const start = librarySpeechStartOffset(text);
-    const chunks = libraryChunkSpeechText(text.slice(start));
-    if (!chunks.length) { stopLibrarySpeech(); return; }
+    // Lead-in unit: the first two sentences synthesized as ONE clip — seamless
+    // by construction (hub work order 2026-11-25). The remainder goes through
+    // the normal chunker for the rolling one-ahead queue.
+    const split = librarySplitLeadIn(text.slice(start));
+    const units = [split.lead, ...libraryChunkSpeechText(split.rest)].filter(Boolean);
+    if (!units.length) { stopLibrarySpeech(); return; }
 
     // Install voice only: service up AND a voice configured, else fail loudly.
     const status = await libraryTtsStatus();
@@ -338,21 +392,47 @@ async function speakLibraryDocument() {
       throw new Error('no TTS voice configured — set BIZAGENT_TTS_VOICE in hub .bizagent/env (scripts/install-oddbeaker-tts.sh --prompt-voice)');
     }
 
+    // Rolling one-ahead queue: fully preload (synthesize + WAV fetch) the
+    // next unit while the current one plays, so when the current clip ends
+    // the next starts with zero load wait. If the next preload is not ready
+    // when the current ends, show a brief buffering note and wait for it —
+    // the old load-then-play behavior — rather than stuttering or skipping.
     let index = 0;
-    let pending = librarySynthesizeChunk(chunks[0]);
-    while (token === librarySpeechToken && index < chunks.length) {
-      let audioUrl;
+    let pendingSettled = true;
+    const preloadNext = (unitText) => {
+      const p = libraryPreloadChunk(unitText, token);
+      pendingSettled = false;
+      p.then(() => { pendingSettled = true; }, () => { pendingSettled = true; });
+      return p;
+    };
+    let pending = preloadNext(units[0]);
+    let buffering = false;
+    while (token === librarySpeechToken && index < units.length) {
+      let blob;
+      if (index > 0 && !pendingSettled) {
+        // Synthesis fell behind playback (not the initial lead-in load, which
+        // is plain startup): brief buffer note, then wait — never skip text.
+        setLibraryStatus('Listen: buffering…', 'neutral');
+        buffering = true;
+      }
       try {
-        audioUrl = await pending;
+        blob = await pending;
       } catch (err) {
-        if (token !== librarySpeechToken) return;
+        if (token !== librarySpeechToken) {
+          if (buffering) setLibraryStatus('');
+          return;
+        }
         throw err;
       }
-      if (token !== librarySpeechToken) return;
+      if (token !== librarySpeechToken) {
+        if (buffering) setLibraryStatus('');
+        return;
+      }
+      if (buffering) { setLibraryStatus(''); buffering = false; }
       index += 1;
-      // Synthesize the next chunk while the current one plays.
-      pending = index < chunks.length ? librarySynthesizeChunk(chunks[index]) : null;
-      await libraryPlayWav(audioUrl, token);
+      // Preload the next clip during this one's playback.
+      pending = index < units.length ? preloadNext(units[index]) : null;
+      await libraryPlayWav(blob, token);
     }
     if (token === librarySpeechToken) stopLibrarySpeech();
   } catch (err) {

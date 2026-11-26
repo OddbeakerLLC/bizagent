@@ -21,6 +21,9 @@ grep -q '/api/tts/synthesize' "$ROOT/control-plane/public/library.js" || fail "l
 grep -q 'no TTS voice configured' "$ROOT/control-plane/public/library.js" || fail "library Listen must fail loudly when no install voice is configured"
 grep -q 'librarySpeechStartOffset' "$ROOT/control-plane/public/library.js" || fail "library Listen must start at the first visible viewport text"
 grep -q 'libraryVisibleTextNodes' "$ROOT/control-plane/public/library.js" || fail "library Listen missing visible-text-node locator"
+grep -q 'librarySplitLeadIn' "$ROOT/control-plane/public/library.js" || fail "library Listen missing two-sentence lead-in splitter (seamless first unit)"
+grep -q 'libraryPreloadChunk' "$ROOT/control-plane/public/library.js" || fail "library Listen missing rolling one-ahead preload (synthesize + WAV fetch)"
+grep -q 'buffering' "$ROOT/control-plane/public/library.js" || fail "library Listen missing graceful buffering note when synthesis falls behind playback"
 if grep -qE "speechSynthesis\.|SpeechSynthesisUtterance|'speechSynthesis' in" "$ROOT/control-plane/public/library.js"; then
   fail "library Listen must not use browser speechSynthesis (built-in voice)"
 fi
@@ -627,8 +630,223 @@ if (fs.existsSync(path.join(hub, 'library', 'manifest.json'))) {
   }
 }
 
-fs.rmSync(hub, { recursive: true, force: true });
-console.log('ok');
+// Listen (TTS) seamless streaming playback: the first two sentences are
+// synthesized as ONE clip and played as a seamless lead-in unit; after that
+// the next chunk is fully preloaded (synthesized AND its WAV fetched) while
+// the current one plays, so playback continues with zero load wait; a slow
+// preload shows a brief buffering note and falls back to load-then-play
+// (no stutter, no skipped chunks). Drives speakLibraryDocument with stubs.
+(async () => {
+
+// Listen (TTS) seamless streaming playback: the first two sentences are
+// synthesized as ONE clip and played as a seamless lead-in unit; after that
+// the next chunk is fully preloaded (synthesized AND its WAV fetched) while
+// the current one plays, so playback continues with zero load wait; a slow
+// preload shows a brief buffering note and falls back to load-then-play
+// (no stutter, no skipped chunks). Drives speakLibraryDocument with stubs.
+{
+  const pageJs = fs.readFileSync(path.join(process.argv[2], 'control-plane/public/library.js'), 'utf8');
+  const sliceStart = pageJs.indexOf('let librarySpeechText');
+  const sliceEnd = pageJs.indexOf('async function api(');
+  if (sliceStart < 0 || sliceEnd < 0 || sliceEnd <= sliceStart) {
+    console.error('could not locate Listen playback code in library.js');
+    process.exit(57);
+  }
+  const slice = pageJs.slice(sliceStart, sliceEnd);
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  const synthTexts = []; // text of each /api/tts/synthesize request (run 1)
+
+  const docText = Array.from({ length: 3 }, (_v, i) => `Paragraph ${i + 1} rambles on with plenty of ordinary words. It keeps going so the chunker must split it into more than one sentence-sized piece for reliable playback. A final sentence closes the paragraph.`).join('\n\n');
+
+  // --- Run 1: fast preload — next clip fully loaded during current playback --
+  {
+    const events = [];
+    let synthCount = 0;
+    const statusCalls = [];
+    const btn = { hidden: false, disabled: false, textContent: '', title: '' };
+    const stubApi = async (p, opts) => {
+      if (p === '/api/tts/health') return { available: true, voice: 'af_heart' };
+      if (p === '/api/tts/synthesize') {
+        const k = synthCount;
+        synthCount += 1;
+        synthTexts.push(JSON.parse((opts && opts.body) || '{}').text);
+        events.push(`syn:start:${k}`);
+        await delay(5);
+        events.push(`syn:done:${k}`);
+        return { audio_url: `https://hub.test/api/tts/audio/${k}.wav` };
+      }
+      throw new Error(`unexpected api ${p}`);
+    };
+    const stubFetch = async (url) => {
+      const k = Number((url.match(/(\d+)\.wav$/) || [])[1]);
+      events.push(`fetch:${k}`);
+      await delay(5);
+      return { ok: true, blob: async () => ({ size: 1000 }) };
+    };
+    let audioSeq = 0; // Audio gets the blob URL, not the wav URL — count creations
+    function StubAudio(_url) {
+      this.k = audioSeq;
+      audioSeq += 1;
+    }
+    StubAudio.prototype.play = function () {
+      const a = this;
+      events.push(`play:${a.k}`);
+      return delay(60).then(() => {
+        events.push(`end:${a.k}`);
+        if (a.onended) a.onended();
+      });
+    };
+    const stubDocument = { getElementById: (id) => (id === 'libraryListenBtn' ? btn : null) };
+    const mod = {};
+    // eslint-disable-next-line no-new-func
+    new Function('exports', 'api', 'fetch', 'Audio', 'URL', 'document', 'setLibraryStatus', slice
+      + '\nexports.setText = (t) => { librarySpeechText = t; };'
+      + '\nexports.chunkCount = (t) => libraryChunkSpeechText(libraryMarkdownToSpeechText(t)).length;'
+      + '\nexports.splitLead = (t) => librarySplitLeadIn(libraryMarkdownToSpeechText(t));'
+      + '\nexports.chunkRaw = (t) => libraryChunkSpeechText(t).length;'
+      + '\nexports.speak = speakLibraryDocument;'
+      + '\nexports.isActive = () => librarySpeechActive;')(mod, stubApi, stubFetch, StubAudio, { createObjectURL: () => 'blob:fake', revokeObjectURL: () => {} }, stubDocument, (msg) => { statusCalls.push(msg); });
+    mod.setText(docText);
+    // Operator spec (hub work order 2026-11-25): the first TWO sentences are
+    // synthesized as ONE clip (seamless lead-in unit), then the rest rolls
+    // one-ahead. Unit count = 1 lead-in + chunked remainder.
+    const split = mod.splitLead(docText);
+    const expected = 1 + mod.chunkRaw(split.rest);
+    if (expected < 3) {
+      console.error('test doc should play >= 3 units (lead-in + chunks)', expected);
+      process.exit(58);
+    }
+    if (split.lead.indexOf('Paragraph 1') !== 0 || split.lead.indexOf('reliable playback.') < 0) {
+      console.error('lead-in must cover the first two sentences as one unit', split.lead);
+      process.exit(67);
+    }
+    await mod.speak();
+    // First synthesis request must be exactly the two-sentence lead-in text,
+    // and the total request count must equal the unit count (one clip each).
+    if (synthTexts[0] !== split.lead) {
+      console.error('first synthesis must be the two-sentence lead-in as one request', synthTexts[0]);
+      process.exit(68);
+    }
+    if (synthTexts.length !== expected) {
+      console.error('unexpected synthesis request count', synthTexts.length, expected);
+      process.exit(69);
+    }
+    // Fast preloads: the buffering note must NOT appear when synthesis keeps up.
+    if (statusCalls.some((m) => /buffering/i.test(String(m)))) {
+      console.error('buffering note shown although synthesis kept up', statusCalls.join('|'));
+      process.exit(70);
+    }
+    const idx = (name) => events.indexOf(name);
+    // Prefetch overlapped playback: chunk 1 synthesized AND fetched before chunk 0 ended.
+    if (idx('syn:start:1') < 0 || idx('syn:start:1') > idx('end:0')) {
+      console.error('chunk 1 synthesize must start during chunk 0 playback', events.join(','));
+      process.exit(59);
+    }
+    if (idx('fetch:1') < 0 || idx('fetch:1') > idx('end:0')) {
+      console.error('chunk 1 WAV must be fetched before chunk 0 ends (zero load wait)', events.join(','));
+      process.exit(60);
+    }
+    // Every chunk played, in order, and the reader stopped cleanly.
+    for (let k = 0; k < expected; k += 1) {
+      if (idx(`play:${k}`) < 0) {
+        console.error('chunk not played', k, events.join(','));
+        process.exit(61);
+      }
+    }
+    const plays = events.filter((e) => e.startsWith('play:')).map((e) => Number(e.slice(5)));
+    for (let k = 1; k < plays.length; k += 1) {
+      if (plays[k] <= plays[k - 1]) {
+        console.error('chunks played out of order', plays.join(','));
+        process.exit(62);
+      }
+    }
+    if (mod.isActive()) {
+      console.error('Listen should be inactive after the document finishes');
+      process.exit(63);
+    }
+  }
+
+  // --- Run 2: slow preload — fallback waits for the clip (no skip, no hang) --
+  {
+    const events = [];
+    let synthCount = 0;
+    const statusCalls = [];
+    const btn = { hidden: false, disabled: false, textContent: '', title: '' };
+    const stubApi = async (p, opts) => {
+      if (p === '/api/tts/health') return { available: true, voice: 'af_heart' };
+      if (p === '/api/tts/synthesize') {
+        const k = synthCount;
+        synthCount += 1;
+        events.push(`syn:start:${k}`);
+        await delay(k === 1 ? 150 : 5); // chunk 1 synth slower than chunk 0 playback
+        events.push(`syn:done:${k}`);
+        return { audio_url: `https://hub.test/api/tts/audio/${k}.wav` };
+      }
+      throw new Error(`unexpected api ${p}`);
+    };
+    const stubFetch = async (url) => {
+      const k = Number((url.match(/(\d+)\.wav$/) || [])[1]);
+      events.push(`fetch:${k}`);
+      await delay(5);
+      return { ok: true, blob: async () => ({ size: 1000 }) };
+    };
+    let audioSeq = 0; // Audio gets the blob URL, not the wav URL — count creations
+    function StubAudio(_url) {
+      this.k = audioSeq;
+      audioSeq += 1;
+    }
+    StubAudio.prototype.play = function () {
+      const a = this;
+      events.push(`play:${a.k}`);
+      return delay(60).then(() => {
+        events.push(`end:${a.k}`);
+        if (a.onended) a.onended();
+      });
+    };
+    const stubDocument = { getElementById: (id) => (id === 'libraryListenBtn' ? btn : null) };
+    const mod = {};
+    // eslint-disable-next-line no-new-func
+    new Function('exports', 'api', 'fetch', 'Audio', 'URL', 'document', 'setLibraryStatus', slice
+      + '\nexports.setText = (t) => { librarySpeechText = t; };'
+      + '\nexports.chunkCount = (t) => libraryChunkSpeechText(libraryMarkdownToSpeechText(t)).length;'
+      + '\nexports.splitLead = (t) => librarySplitLeadIn(libraryMarkdownToSpeechText(t));'
+      + '\nexports.chunkRaw = (t) => libraryChunkSpeechText(t).length;'
+      + '\nexports.speak = speakLibraryDocument;'
+      + '\nexports.isActive = () => librarySpeechActive;')(mod, stubApi, stubFetch, StubAudio, { createObjectURL: () => 'blob:fake', revokeObjectURL: () => {} }, stubDocument, (msg) => { statusCalls.push(msg); });
+    mod.setText(docText);
+    const split = mod.splitLead(docText);
+    const expected = 1 + mod.chunkRaw(split.rest);
+    await mod.speak();
+    // Fallback: chunk 1 played only after its slow preload finished (old
+    // load-then-play behavior), and the remaining chunks still played.
+    const idx = (name) => events.indexOf(name);
+    if (idx('play:1') < 0 || idx('play:1') < idx('syn:done:1')) {
+      console.error('slow preload must delay chunk 1 start (fallback), not skip it', events.join(','));
+      process.exit(64);
+    }
+    for (let k = 0; k < expected; k += 1) {
+      if (idx(`play:${k}`) < 0) {
+        console.error('slow-preload run skipped a chunk', k, events.join(','));
+        process.exit(65);
+      }
+    }
+    if (mod.isActive()) {
+      console.error('Listen should be inactive after the slow-preload run finishes');
+      process.exit(66);
+    }
+    // Synthesis fell behind playback: the buffering note must have been shown
+    // and then cleared when playback resumed (graceful pause, no skipped text).
+    const noteIdx = statusCalls.findIndex((m) => /buffering/i.test(String(m)));
+    if (noteIdx < 0 || !statusCalls.some((m, i) => i > noteIdx && m === '')) {
+      console.error('slow preload must show then clear the buffering note', JSON.stringify(statusCalls));
+      process.exit(71);
+    }
+  }
+}
+})().then(() => {
+  fs.rmSync(hub, { recursive: true, force: true });
+  console.log('ok');
+}).catch((err) => { console.error(err); process.exit(67); });
 NODE
 
 echo "  ok: library"
