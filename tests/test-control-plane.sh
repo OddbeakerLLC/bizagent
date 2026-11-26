@@ -2756,6 +2756,75 @@ NODE
     fail "renderMarkdown regression: numbers in chat messages render as literal 'undefined'"
   fi
 
+  # Regression (hub dispatch 2026-11-26): the Library Listen reader
+  # (libraryChunkSpeechText / librarySplitLeadIn) must not split at
+  # abbreviation periods either — same 11 cases as the app.js splitter above,
+  # plus real-boundary and dotted-token regressions. Speak-only helpers, no
+  # DOM needed: extract the pure helper slice like tests/test-library.sh does.
+  if ! node - "$ROOT" <<'NODE'
+const root = process.argv[2];
+const fs = require('fs');
+const pageJs = fs.readFileSync(`${root}/control-plane/public/library.js`, 'utf8');
+const start = pageJs.indexOf('function libraryMarkdownToSpeechText');
+const end = pageJs.indexOf('function libraryListenBtn');
+if (start < 0 || end < 0 || end <= start) {
+  console.error('could not locate TTS helpers in library.js'); process.exit(171);
+}
+const lib = {};
+// eslint-disable-next-line no-new-func
+new Function('exports', pageJs.slice(start, end)
+  + '\nexports.chunk = libraryChunkSpeechText;'
+  + '\nexports.splitLead = librarySplitLeadIn;')(lib);
+// Same 11 abbreviation cases as the app.js splitter block above: each must
+// stay ONE spoken sentence in both the chunker and the lead-in splitter.
+const libAbbrevCases = [
+  'This vs. that matters.',
+  'Files changed, etc. however the build passed.',
+  'Use e.g. this pattern here.',
+  'Use i.e. the second option.',
+  'See cf. the docs.',
+  'Cost approx. 50 dollars.',
+  'Dr. Smith arrived.',
+  'Mr. and Mrs. Lee called.',
+  'Meet at St. James.',
+  'See No. 5 below.',
+  'Bob Jr. and Sr. joined.',
+];
+for (const caseText of libAbbrevCases) {
+  const chunks = lib.chunk(caseText);
+  if (chunks.length !== 1 || chunks[0] !== caseText) {
+    console.error('library chunker split at an abbreviation period:', caseText, '->', chunks); process.exit(172);
+  }
+  const split = lib.splitLead(caseText);
+  if (split.lead !== caseText || split.rest !== '') {
+    console.error('library lead-in split at an abbreviation period:', caseText, '->', split); process.exit(172);
+  }
+}
+// Real sentence boundaries still split (period+space, ?, !, paragraph break).
+const libNormal = 'First sentence here. Second one? Third! Fourth ends.\n\nNew paragraph.';
+const libNormalChunks = lib.chunk(libNormal);
+const libNormalWant = ['First sentence here. Second one? Third! Fourth ends.', 'New paragraph.'];
+if (JSON.stringify(libNormalChunks) !== JSON.stringify(libNormalWant)) {
+  console.error('library chunker must still split real sentence boundaries:', libNormalChunks); process.exit(173);
+}
+const libNormalSplit = lib.splitLead(libNormal);
+if (libNormalSplit.lead !== 'First sentence here. Second one?'
+  || libNormalSplit.rest !== 'Third! Fourth ends.\n\nNew paragraph.') {
+  console.error('library lead-in must still split real sentence boundaries:', libNormalSplit); process.exit(173);
+}
+// Dotted tokens (decimals, version chains, hostnames) stay intact too.
+const libDotted = 'Version 3.2.1 shipped to every region last quarter after extensive testing and a full review by the entire platform engineering team. See example.com for the full details about the rollout schedule, the migration guide, and the support timeline for older deployments.';
+const libDottedChunks = lib.chunk(libDotted);
+if (libDottedChunks.length !== 2
+  || libDottedChunks[0].indexOf('3.2.1') < 0
+  || libDottedChunks[1].indexOf('example.com') < 0) {
+  console.error('library chunker broke dotted-token protections:', libDottedChunks); process.exit(174);
+}
+NODE
+  then
+    fail "library Listen splitter regression: abbreviation/dotted dots or real boundaries"
+  fi
+
   # Regression (hub dispatch 2026-11-19): speak-only slash/colon pronunciation —
   # numeric/numeric slashes read as fractions ("3/5" → "3 of 5"), 3+ word
   # chains comma-join ("this/that/other" → "this, that, other"), clock times

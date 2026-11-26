@@ -89,6 +89,41 @@ function libraryMarkdownToSpeechText(md) {
   return text.trim();
 }
 
+// Abbreviation tokens whose period never ends a sentence when text follows
+// ("vs. that", "Dr. Smith", "No. 5"). Case-sensitive on purpose: "No."/"St."
+// are protected only in their capitalized forms so a real sentence ending in
+// the word "no." still splits. Mirrors SPEECH_ABBREV_DOT_RE in app.js — keep
+// the two files in sync (hub dispatch 2026-11-26).
+const LIBRARY_ABBREV_DOT_RE = /(\b(?:[Vv]s|[Vv]|etc|Etc|e\.?g|E\.?g|i\.?e|I\.?e|I\.?E|cf|Cf|approx|Approx|ca|viz|al|[Dd]r|[Mm]rs?|[Mm]s|[Ss]t|No|Jr|Sr|Prof|Sgt|Capt|Lt|Col|Gen|Sen|Rep|Gov|Rev|Hon|Pres|Inc|Ltd|Corp?|Dept|Univ|Fig|Eq|Ave|Blvd|Rd|Mt|Ft|Ph\.?D))\.(?=\s)/g;
+// General rule (mirrors SPEECH_CONTINUATION_RE in app.js): a period followed
+// by a space and a lowercase non-sentence-start continuation word is not a
+// boundary either ("vs. that", "etc. however", "e.g. this" even when
+// unlisted). A CAPITALIZED word after an unlisted period still ends the
+// sentence.
+const LIBRARY_CONTINUATION_RE = /([a-z)\uE000])\.(\s+)(?=(?:the|a|an|and|or|but|nor|for|yet|so|that|this|these|those|which|who|whose|whom|what|when|where|why|how|if|then|than|as|at|by|in|of|on|to|with|from|into|onto|over|under|after|before|during|between|through|about|against|is|are|was|were|be|been|being|has|have|had|do|does|did|will|would|can|could|should|may|might|must|not|it|its|he|she|they|we|you|his|her|their|our|your|my|however|therefore|thus|hence|also|both|each|every|all|some|any|more|most|less|very|just|only|even|still|again|while|since|because|although|though|unless|until|whether|either|neither|per|via|plus)\b)/g;
+
+/**
+ * Protect dotted tokens so the sentence splitter does not treat their "."
+ * as end-of-sentence: abbreviation periods before a space ("vs. that",
+ * "Dr. Smith") and no-space dotted tokens (decimals 1.75, domains
+ * example.com, versions 3.2.1). Same placeholder technique + pass order as
+ * protectSpeechDots in app.js — the abbreviation pass runs FIRST so "e.g."
+ * still matches after its inner dot is protected below. Inverse:
+ * libraryRestoreDots.
+ */
+function libraryProtectDots(text) {
+  return String(text || '')
+    .replace(LIBRARY_ABBREV_DOT_RE, '$1\uE000')
+    .replace(LIBRARY_CONTINUATION_RE, '$1\uE000$2')
+    // Digit chains (3.2.1): lookahead keeps overlapping dots fully covered.
+    .replace(/(\d)\.(?=\d)/g, '$1\uE000')
+    .replace(/([A-Za-z0-9])\.([A-Za-z0-9])/g, (_, a, b) => `${a}\uE000${b}`);
+}
+
+function libraryRestoreDots(text) {
+  return String(text || '').replace(/\uE000/g, '.');
+}
+
 /** Split clean text into sentence/paragraph-sized chunks for reliable playback. */
 function libraryChunkSpeechText(text) {
   const chunks = [];
@@ -97,10 +132,11 @@ function libraryChunkSpeechText(text) {
   for (const para of paragraphs) {
     const clean = para.replace(/\n+/g, ' ').trim();
     if (!clean) continue;
-    const sentences = clean.match(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g) || [clean];
+    const protectedText = libraryProtectDots(clean);
+    const sentences = protectedText.match(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g) || [protectedText];
     let current = '';
     for (const rawSentence of sentences) {
-      let sentence = rawSentence.trim();
+      let sentence = libraryRestoreDots(rawSentence.trim());
       if (!sentence) continue;
       // Oversized single sentence: hard-split on word boundaries.
       while (sentence.length > maxChunk * 2) {
@@ -137,10 +173,11 @@ function librarySplitLeadIn(text) {
   for (const para of paragraphs) {
     const clean = para.replace(/\n+/g, ' ').trim();
     if (!clean) continue;
-    const sentences = clean.match(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g) || [clean];
+    const protectedText = libraryProtectDots(clean);
+    const sentences = protectedText.match(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g) || [protectedText];
     let remainder = '';
     for (const rawSentence of sentences) {
-      const sentence = rawSentence.trim();
+      const sentence = libraryRestoreDots(rawSentence.trim());
       if (!sentence) continue;
       if (picked.length < 2) {
         picked.push(sentence);
