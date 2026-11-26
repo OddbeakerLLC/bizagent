@@ -2683,6 +2683,38 @@ const tldrMulti = sandbox.buildSpokenSummary('TLDR: ' + multiPeriod + '\n\nBody.
 if (tldrMulti !== multiPeriod) {
   console.error('labeled TLDR clipped a multi-period summary:', tldrMulti); process.exit(24);
 }
+// Regression (hub dispatch 2026-11-26): an abbreviation period followed by a
+// space + continuation word must NOT end a sentence ("This vs. that" used to
+// split in two). Known abbreviations hold even before a capitalized word
+// (Dr. Smith) or a number (No. 5); a capitalized word after an unlisted
+// period still ends the sentence.
+const splitCases = [
+  ['This vs. that matters.', ['This vs. that matters.']],
+  ['Files changed, etc. however the build passed.', ['Files changed, etc. however the build passed.']],
+  ['Use e.g. this pattern here.', ['Use e.g. this pattern here.']],
+  ['Use i.e. the second option.', ['Use i.e. the second option.']],
+  ['See cf. the docs.', ['See cf. the docs.']],
+  ['Cost approx. 50 dollars.', ['Cost approx. 50 dollars.']],
+  ['Dr. Smith arrived.', ['Dr. Smith arrived.']],
+  ['Mr. and Mrs. Lee called.', ['Mr. and Mrs. Lee called.']],
+  ['Meet at St. James.', ['Meet at St. James.']],
+  ['See No. 5 below.', ['See No. 5 below.']],
+  ['Bob Jr. and Sr. joined.', ['Bob Jr. and Sr. joined.']],
+];
+for (const [splitIn, splitWant] of splitCases) {
+  const splitGot = sandbox.splitSpeechSentences(splitIn);
+  if (JSON.stringify(splitGot) !== JSON.stringify(splitWant)) {
+    console.error('speech splitter split at an abbreviation period:', splitIn, '->', splitGot); process.exit(168);
+  }
+}
+const splitReal = sandbox.splitSpeechSentences('First sentence. Second sentence follows.');
+if (splitReal.length !== 2 || splitReal[0] !== 'First sentence.') {
+  console.error('speech splitter must still split real sentence boundaries:', splitReal); process.exit(169);
+}
+const splitDots = sandbox.splitSpeechSentences('Build 3.2.1 shipped to beakerboard.net today. All green.');
+if (splitDots.length !== 2 || splitDots[0].indexOf('3.2.1') < 0 || splitDots[0].indexOf('beakerboard.net') < 0) {
+  console.error('speech splitter broke dotted-token protections:', splitDots); process.exit(170);
+}
 
 // Regression (hub dispatch 2026-11-03): the speech scrubber must CONVERT dense
 // tokens (filenames, hex SHAs, kebab/snake identifiers) to speakable form, not

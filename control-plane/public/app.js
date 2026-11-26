@@ -1720,10 +1720,29 @@ function scrubDenseSpeechTokens(text) {
 
 /**
  * Protect no-space dotted tokens (hostnames, decimals, versions) so sentence
- * splitters do not treat bare "." as end-of-sentence. Inverse: restoreProtectedDots.
+ * splitters do not treat bare "." as end-of-sentence. Also protects
+ * abbreviation periods followed by a space ("This vs. that", "etc. however",
+ * "Dr. Smith") — hub dispatch 2026-11-26. Inverse: restoreProtectedDots.
  */
+// Abbreviation tokens whose period never ends a sentence when text follows.
+// Case-sensitive on purpose: "No."/"St." are protected only in their
+// capitalized forms so a real sentence ending in the word "no." still splits.
+// The following word may be capitalized (Dr. Smith) or numeric (No. 5,
+// approx. 50) — known abbreviations are protected regardless of what follows.
+const SPEECH_ABBREV_DOT_RE = /(\b(?:[Vv]s|[Vv]|etc|Etc|e\.?g|E\.?g|i\.?e|I\.?e|I\.?E|cf|Cf|approx|Approx|ca|viz|al|[Dd]r|[Mm]rs?|[Mm]s|[Ss]t|No|Jr|Sr|Prof|Sgt|Capt|Lt|Col|Gen|Sen|Rep|Gov|Rev|Hon|Pres|Inc|Ltd|Corp?|Dept|Univ|Fig|Eq|Ave|Blvd|Rd|Mt|Ft|Ph\.?D))\.(?=\s)/g;
+// General rule (same dispatch): a period followed by a space and a lowercase
+// non-sentence-start continuation word is not a boundary either ("vs. that",
+// "etc. however", "e.g. this" even when unlisted). A CAPITALIZED word after
+// an unlisted period still ends the sentence.
+const SPEECH_CONTINUATION_RE = /([a-z)\uE000])\.(\s+)(?=(?:the|a|an|and|or|but|nor|for|yet|so|that|this|these|those|which|who|whose|whom|what|when|where|why|how|if|then|than|as|at|by|in|of|on|to|with|from|into|onto|over|under|after|before|during|between|through|about|against|is|are|was|were|be|been|being|has|have|had|do|does|did|will|would|can|could|should|may|might|must|not|it|its|he|she|they|we|you|his|her|their|our|your|my|however|therefore|thus|hence|also|both|each|every|all|some|any|more|most|less|very|just|only|even|still|again|while|since|because|although|though|unless|until|whether|either|neither|per|via|plus)\b)/g;
+
 function protectSpeechDots(text) {
   return String(text || '')
+    // Abbreviation periods before a space ("vs. that", "Dr. Smith") — run
+    // BEFORE the no-space pass so "e.g." (whose inner dot becomes \uE000
+    // below) still matches here via its literal-dot form.
+    .replace(SPEECH_ABBREV_DOT_RE, '$1\uE000')
+    .replace(SPEECH_CONTINUATION_RE, '$1\uE000$2')
     // Digit chains (3.2.1): protect every digit-preceded dot followed by a
     // digit — lookahead keeps overlapping dots (3.2.1, 1.2.3.4) fully covered.
     .replace(/(\d)\.(?=\d)/g, '$1\uE000')
