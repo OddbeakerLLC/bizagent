@@ -118,6 +118,40 @@ oddbeaker-tts itself also honors `ODDBEAKER_TTS_HOST`, `ODDBEAKER_TTS_PORT`, `OD
 - Server path sends **preprocessed** text with `raw: true` so oddbeaker-tts does not double-process. (Upstream can still preprocess if `raw` is false.)
 - Jobe is unchanged; BizAgent TLDR/first-sentence summary mode is console-only (`speakTtsText(..., { summary: true })`).
 
+## Library Listen (document reader)
+
+The Library tab's document viewer has a **Listen/Stop** toggle (`library.html` +
+`control-plane/public/library.js`) that reads the open document aloud.
+
+- **Server TTS only.** Speech is synthesized through the control-plane `/api/tts`
+  proxy (oddbeaker-tts/Kokoro) with the install-time voice (`BIZAGENT_TTS_VOICE`).
+  Browser `speechSynthesis` is **not** used and is **not** a fallback — if the
+  service is down or the voice is missing, the viewer shows a visible
+  `Listen unavailable: …` status message. (This differs from console chat TTS,
+  which keeps a browser-voice fallback.)
+- **Markdown noise stripped before speaking** (`libraryMarkdownToSpeechText`):
+  fenced code blocks are dropped; links/images keep their text and drop URLs;
+  heading/quote/list markers are removed; emphasis/inline-code markers are
+  unwrapped; tables, raw HTML and bare URLs are cleaned up.
+- **Starts at the first visible word.** At click time the viewer walks the
+  preview's visible text nodes (`libraryVisibleTextNodes`) and maps them onto the
+  cleaned speech text with a whitespace-insensitive loose match
+  (`libraryLooseFind`), so reading resumes from the scrolled position — never
+  from the top. Offset 0 is used only when nothing visible matches (e.g. the
+  viewport is inside a code fence).
+- **Seamless streaming playback.** The first two sentences of the start-offset
+  text are synthesized as **one** request (`librarySplitLeadIn`) and played as a
+  single seamless clip; the remainder is chunked into ≤220-char sentence-sized
+  pieces (`libraryChunkSpeechText`) played from a rolling one-ahead queue —
+  the next clip's WAV is synthesized **and** fetched into a ready Blob
+  (`libraryPreloadChunk`) while the current clip plays, so playback continues
+  with no load gap. If synthesis falls behind mid-document, a brief
+  `Listen: buffering…` status note shows and playback waits (text is never
+  skipped); the note clears on resume and does not fire for the initial
+  lead-in load.
+- **Stop conditions:** the Listen/Stop toggle, opening another document, and
+  page unload (`pagehide`/`beforeunload`) all stop playback instantly.
+
 ## Interrupt behavior
 
 - New speakable hub reply cancels any in-flight utterance **and** HTMLAudio / Web Audio playback, then speaks the new text.
