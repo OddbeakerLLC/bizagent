@@ -145,7 +145,11 @@ The Library tab's document viewer has a **Listen/Stop** toggle (`library.html` +
   pieces (`libraryChunkSpeechText`) played from a rolling one-ahead queue —
   the next clip's WAV is synthesized **and** fetched into a ready Blob
   (`libraryPreloadChunk`) while the current clip plays, so playback continues
-  with no load gap. If synthesis falls behind mid-document, a brief
+  with no load gap. Sentence splitting protects dotted tokens and abbreviation
+  periods (`libraryProtectDots`, same rules as the console splitter): `3.14`,
+  `beakerboard.net`, `vs.`, `e.g.`, `Dr. Smith` and lowercase continuations
+  ("etc. however") never end a sentence; a capitalized word after an unlisted
+  period still does. If synthesis falls behind mid-document, a brief
   `Listen: buffering…` status note shows and playback waits (text is never
   skipped); the note clears on resume and does not fire for the initial
   lead-in load.
