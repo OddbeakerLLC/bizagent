@@ -1728,11 +1728,16 @@ async function handleApi(config, req, res) {
       const fields = sanitizeFields(body.fields);
       const button = String(body.button || "submit").slice(0, 64);
       saveFormResponse(config.hub, { formId, agent, button, fields });
+      // Thread the pointer mail to the chat where the form was submitted, so
+      // the response wakes the right conversation (never an unrelated archived
+      // chat via cid recovery).
+      const cid = String(body.conversation_id || "").trim();
       // Secret-free pointer mail — also wakes the requesting agent via dispatch.
       writeOutboxMessage(config.hub, {
         from: "hub",
         to: agent,
         subject: `form-response: ${formId}`,
+        conversationId: cid,
         body: [
           `The operator submitted the form you requested (form \`${formId}\`).`,
           "",
@@ -1750,7 +1755,6 @@ async function handleApi(config, req, res) {
       });
       // Neutral chat marker (no values) so the UI marks the card submitted.
       let conv = null;
-      const cid = String(body.conversation_id || "").trim();
       if (cid) {
         try {
           conv = appendMessage(config.hub, cid, "status", "Form submitted.", {

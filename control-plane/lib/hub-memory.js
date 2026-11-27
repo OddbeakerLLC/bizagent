@@ -194,6 +194,7 @@ function deriveHubRuntimePrompt(hub) {
     '',
     'Never ask the operator for passwords / API keys / tokens in chat or mail — emit a DGen form request:',
     '`scripts/write-message.sh --to user --from hub --kind form-request --subject "form-request: <title>" --body-file <file>` (omit `--conversation-id`).',
+    'Requesting for another agent? add `--requesting-agent <slug>`.',
     'The body holds prose plus a ```dgen fenced block: rows `<{…}>`; first row = title; fields `[T:id,maxlen=default]` text,',
     '`[P:id,maxlen]` masked password, `[A:id,rows=default]` textarea, `[N:id,min,max=default]` number, `[X:id]` checkbox,',
     '`[D:id,v|Label,…=default]` dropdown, `[L:Label=url]` link; last row = buttons `[B:cancel,Cancel][B:submit,Submit]`.',
@@ -385,9 +386,14 @@ function inferSenderFromFilename(hub, name) {
 /**
  * Newest archived conversation_id for this sender (`from:` or filename slug).
  * Falls back to the newest archived conversation_id of any sender.
+ * Hub-sent archive mail is never evidence: the hub sends mail in every
+ * conversation, so matching `from: hub` would attach an unrelated chat
+ * (2026-11-27 form-response misrouting). Hub senders get no archive recovery
+ * at all — hub→hub mail must carry an explicit conversation_id.
  */
 function lookupArchivedConversationId(hub, sender) {
   const senderNorm = String(sender || '').trim().toLowerCase();
+  if (!senderNorm || senderNorm === 'hub') return '';
   let anyCid = '';
   for (const file of listArchiveInboxFiles(hub)) {
     let body = '';
@@ -398,10 +404,11 @@ function lookupArchivedConversationId(hub, sender) {
     }
     const cid = parseConversationId(body);
     if (!cid) continue;
-    if (!anyCid) anyCid = cid;
     const from = parseFrom(body).toLowerCase();
+    if (from === 'hub') continue; // hub mail exists in every conversation — never evidence
+    if (!anyCid) anyCid = cid;
     const name = path.basename(file);
-    if (senderNorm && (from === senderNorm || filenameMatchesSender(name, senderNorm))) {
+    if (from === senderNorm || filenameMatchesSender(name, senderNorm)) {
       return cid;
     }
   }
@@ -965,6 +972,7 @@ module.exports = {
   hubTurnsDir,
   listAgentPendingInboxFiles,
   listPendingInboxFiles,
+  lookupArchivedConversationId,
   pickPendingConversationId,
   recoverPendingConversationIds,
   resetHubSession,

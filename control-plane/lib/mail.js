@@ -297,15 +297,23 @@ function handleFormRequestOutbox(hub, { file, text, from }) {
     logEvent(hub, { event: 'form_request_error', from: from || '', error: err.message });
     return true;
   }
+  // A form-request may be emitted on behalf of another agent (e.g. the hub
+  // relaying for a product): `requesting_agent:` names the agent that should
+  // be credited on the card and receive the response pointer mail. Without it
+  // the card is attributed to the sender (`from`), which routed responses to
+  // the hub inbox even when a product agent asked for the form.
+  const requestingRaw = String(frontmatterValue(text, 'requesting_agent') || '').trim();
+  const requestingAgent = requestingRaw && VALID_SLUG.test(requestingRaw) ? requestingRaw : '';
+  const agent = requestingAgent || from || 'hub';
   const cid = getStampConversationId(hub, from && from !== 'hub' ? from : undefined);
   if (!cid) return false; // no originating conversation — fall through to normal routing
   const formId = newFormId();
   const title = form.title || 'Information request';
   try {
-    appendMessage(hub, cid, 'status', `Information requested by ${from || 'hub'}: ${title}`, {
+    appendMessage(hub, cid, 'status', `Information requested by ${agent}: ${title}`, {
       kind: 'form-request',
       form_id: formId,
-      agent: from || 'hub',
+      agent,
       form,
     });
   } catch (err) {
@@ -317,7 +325,8 @@ function handleFormRequestOutbox(hub, { file, text, from }) {
   logEvent(hub, {
     event: 'form_request',
     form_id: formId,
-    agent: from || 'hub',
+    agent,
+    requesting_agent: requestingAgent || undefined,
     conversation_id: cid,
     title,
   });
@@ -571,6 +580,9 @@ function writeOutboxMessage(hub, opts = {}) {
   // time, so mail written late in the local day gets the right day.
   const date = opts.date || require('./local-time').localDateString();
   const kind = String(opts.kind || '').trim();
+  // `requesting_agent:` credits the real requester on form-request cards and
+  // routes the response pointer mail to that agent's inbox (not the sender's).
+  const requestingAgent = opts.requestingAgent != null ? String(opts.requestingAgent).trim() : '';
   const header = [
     '---',
     `from: ${from}`,
@@ -578,6 +590,7 @@ function writeOutboxMessage(hub, opts = {}) {
     `date: ${date}`,
     `subject: ${subject}`,
     kind ? `kind: ${kind}` : '',
+    requestingAgent && VALID_SLUG.test(requestingAgent) ? `requesting_agent: ${requestingAgent}` : '',
     conversationId ? `conversation_id: ${conversationId}` : '',
     '---',
   ].filter((line) => line !== '').join('\n');

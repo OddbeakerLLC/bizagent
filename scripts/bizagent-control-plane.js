@@ -14,7 +14,7 @@ function usage() {
     '  auth-init: --username USER (password via BIZAGENT_ADMIN_PASSWORD env or stdin; --password legacy)',
     '  append-hub-turn: --conversation ID --content TEXT|--content-file PATH',
     '  write-message: --to SLUG --subject TEXT [--from SLUG] [--conversation ID]',
-    '                 [--kind KIND] [--content TEXT|--content-file PATH]  (body also via stdin)',
+    '                 [--kind KIND] [--requesting-agent SLUG] [--content TEXT|--content-file PATH]  (body also via stdin)',
     '                 [--allow-stale-body-file]  (a content-file older than ~15 min is refused',
     '  form-answer:   FORM_ID — print a submitted form response (JSON) and delete it',
     '  form-sweep:    delete unclaimed form responses older than 24h',
@@ -38,6 +38,7 @@ function parseArgs(argv) {
     else if (arg === '--from') opts.from = argv[++i];
     else if (arg === '--subject') opts.subject = argv[++i];
     else if (arg === '--kind') opts.kind = argv[++i];
+    else if (arg === '--requesting-agent') opts.requestingAgent = argv[++i];
     else if (!arg.startsWith('--')) {
       if (!Array.isArray(opts.positional)) opts.positional = [];
       opts.positional.push(arg);
@@ -149,6 +150,7 @@ async function main() {
       conversationId: opts.conversation || '',
       userId: opts.userId || '',
       kind: opts.kind || '',
+      requestingAgent: opts.requestingAgent || '',
     });
     console.log(`wrote ${result.file}`);
     return null;
