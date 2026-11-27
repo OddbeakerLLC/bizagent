@@ -25,6 +25,13 @@ specifies, and nothing more:
    - each **product project** repo that has a remote (code + journals/sitemaps)
    - the **hub** ops repo itself (registry, `agents/*/agent.md`, `journal/`, `company/`, `knowledge-stack/`, local code tweaks) **if** the hub has a private remote
 
+   Before committing, the push step re-fetches the upstream and reconciles:
+   a tree that went stale mid-run (the step-0 pull happened hours earlier, or
+   was skipped) is fast-forwarded **before** `git add -A`, so same-day fixes
+   that landed on the remote during the pass are never reverted by a stale
+   snapshot; a diverged repo (unpushed local commits + newer remote head) is
+   refused loudly instead of pushed, and a rejected push is never force-pushed.
+
    The hub must **never** push to the public BizAgent framework remote. If the
    hub has no remote, log a reminder: set a private `origin` or
    `registry.json` → `hub.remote` (see `scripts/detach-framework-remote.sh`).

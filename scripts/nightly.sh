@@ -174,6 +174,39 @@ if [ "${1:-}" = "push" ]; then
     return 1
   }
 
+  # Staleness guard: the nightly pulls at step 0, but the agent pass in between
+  # can take hours — same-day fixes may land on the remote during that window,
+  # and a skipped step-0 pull (dirty tree, network error) leaves the tree stale.
+  # Re-fetch and reconcile BEFORE `git add -A` so a stale tree is never baked
+  # into a commit, and never push over newer remote heads (no force, ever).
+  sync_with_remote() {
+    local dir="$1" label="$2" up remote branch behind ahead
+    (
+      cd "$dir" || exit 1
+      up="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+      [ -z "$up" ] && return 0  # no upstream configured: nothing to sync against
+      remote="${up%%/*}"
+      branch="${up#*/}"
+      if ! git fetch --quiet "$remote" 2>/dev/null; then
+        echo "nightly: FETCH FAILED ($label): cannot fetch $remote — skipping commit+push (refusing to commit a possibly-stale tree); check network/remote and retry"
+        return 1
+      fi
+      behind="$(git rev-list --count "HEAD..$up" 2>/dev/null || echo 0)"
+      ahead="$(git rev-list --count "$up..HEAD" 2>/dev/null || echo 0)"
+      if [ "$behind" -gt 0 ] && [ "$ahead" -eq 0 ]; then
+        echo "nightly: $label is behind $up by $behind commit(s) — fast-forwarding before commit (never commit a stale tree)"
+        if ! git merge --ff-only "$up" 2>&1; then
+          echo "nightly: FAST-FORWARD FAILED ($label): local changes conflict with $up — skipping commit+push; reconcile manually (git status / git stash), never discard local work"
+          return 1
+        fi
+      elif [ "$behind" -gt 0 ] && [ "$ahead" -gt 0 ]; then
+        echo "nightly: DIVERGED ($label): $ahead unpushed local commit(s) vs $behind newer commit(s) on $up — refusing to commit/push over newer remote heads; reconcile manually (git pull --rebase), never force-push"
+        return 1
+      fi
+      return 0
+    )
+  }
+
   commit_and_push() {
     local dir="$1" label="$2"
     [ -d "$dir/.git" ] || return 0
@@ -190,6 +223,9 @@ if [ "${1:-}" = "push" ]; then
     if [ "$bad" -eq 1 ]; then
       return 0
     fi
+    if git -C "$dir" remote 2>/dev/null | grep -q .; then
+      sync_with_remote "$dir" "$label" || return 0
+    fi
     (
       cd "$dir" || exit 0
       git add -A 2>/dev/null || true
@@ -201,7 +237,7 @@ if [ "${1:-}" = "push" ]; then
       fi
       if git remote 2>/dev/null | grep -q .; then
         git push 2>&1 && echo "pushed: $label" \
-          || echo "push skipped ($label)"
+          || echo "push REJECTED ($label): remote refused the push (newer remote head?) — NOT force-pushing; reconcile manually (git pull --rebase) and retry"
       else
         echo "no remote: $label (local commit only, if any)"
       fi
