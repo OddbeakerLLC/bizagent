@@ -22,7 +22,7 @@ plus one new field type: `[P:]` masked password.
    ```
 2. **Router intercepts it** (`lib/mail.js` → `lib/forms.js`): the markup is parsed server-side and appended to the originating conversation as a `kind: form-request` card. The outbox file is consumed — it never becomes mail, and the browser never sees raw DGen.
 3. **Operator fills the modal** — the console card's "Provide information" button opens a modal built from the parsed form JSON.
-4. **Submit** — the browser POSTs `/api/forms/submit`; the server writes the values once to `.bizagent/forms/<form_id>.json` (mode 0600, dir 0700) and drops a **secret-free pointer mail** into the requesting agent's inbox (which also wakes the agent via normal dispatch).
+4. **Submit** — the browser POSTs `/api/forms/submit`; the server writes the values once to `.bizagent/forms/<form_id>.json` (mode 0600, dir 0700) and drops a **secret-free pointer mail** into the requesting agent's inbox (which also wakes the agent via normal dispatch). The pointer mail is threaded to the conversation the form was submitted from (`conversation_id` is passed through on submit), and when the form-request outbox mail carries `requesting_agent:` (`write-message --requesting-agent`), the response routes to that agent's inbox instead of the sender's.
 5. **Agent claims it** — `scripts/form-answer.sh <form_id>` prints the JSON and deletes the file in one step (claim-once). The chat shows only a neutral "Form submitted." marker.
 
 ## Non-persistence guarantees
